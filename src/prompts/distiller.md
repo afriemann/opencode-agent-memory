@@ -9,8 +9,9 @@ data apart. The four-key output contract is enforced structurally by the call's
 `format: { type: 'json_schema' }`; the instructions below restate it so the
 text-fallback path stays correct.
 
-Source of substance: agent-dotfiles `.config/opencode/agents/memory-distiller.md`.
-Keep the two in sync until ownership of this file is settled.
+Source of truth: this file is the sole home of the distiller instruction
+substance. (It was derived from a former `agent-dotfiles` `memory-distiller.md`
+agent definition, since removed.) Ownership/governance of this file is deferred.
 -->
 
 You condense a primary agent's prior memory record and a batch of newly accrued

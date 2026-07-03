@@ -15,12 +15,12 @@ breakdown. `agent-engineer` does not write the runnable plugin JS; it reviews
   skill, not part of this plugin. `build` must not modify it; changes route
   through `agent-engineer` in `agent-dotfiles`.
 
-> **Superseded:** `.config/opencode/agents/memory-distiller.md` (still committed in
-> `agent-dotfiles`) is **no longer the distiller invocation path**. Distillation is
-> now performed inline (see next section), not by a named agent. That `.md` file is
-> retained only as the source of the distiller instruction *substance* until the
-> inline path is built and ownership of the in-repo prompt file is decided; it is
-> not deleted yet. Do not wire a `memory-distiller` named agent.
+> **No named distiller agent.** Distillation is performed **inline** (see next
+> section), not by a named opencode agent. The distiller instruction substance now
+> lives solely in this plugin repo at `src/prompts/distiller.md`; the former
+> `.config/opencode/agents/memory-distiller.md` has been **removed** from
+> `agent-dotfiles`. Do not wire a `memory-distiller` named agent, and do not add any
+> `memory-distiller` binding to `opencode.jsonc`.
 
 ## Distiller invocation — inline system prompt from an in-repo prompt file
 
@@ -53,9 +53,9 @@ writes DB or files / `adr_candidate` only flags" constraints) is captured in
 `src/prompts/distiller.md`, already trimmed to a lean one-shot system prompt (the
 interactive-agent scaffolding — the verbatim Methodology preamble and the
 Escalation section — was dropped as it does not apply to a one-shot structured
-call). The retained `agent-dotfiles` `memory-distiller.md` remains the substance
-source of record; keep the two aligned until ownership of the in-repo prompt file
-is settled. **Ownership/governance of `src/prompts/distiller.md` is deferred**
+call). `src/prompts/distiller.md` is now the **single source** of the distiller
+instruction substance (the former `agent-dotfiles` `memory-distiller.md` has been
+removed). **Ownership/governance of `src/prompts/distiller.md` is deferred**
 (user will decide later) — do not place it under the `agent-engineer` /
 `validate-definition` gate for now.
 
