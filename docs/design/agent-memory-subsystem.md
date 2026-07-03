@@ -447,3 +447,7 @@ This is a design artefact, not a task/sprint plan.
 | `DISTIL_MIN_INTERVAL_MS` | `60000` | Idle-distil throttle window. |
 | `MEMORY_FLUSH_INTERVAL_MS` | `60000` | Continuous-accrual scratch flush throttle. |
 | `MEMORY_TARGET_AGENT` | `build` | Phase-1 target agent (single value; the scope column already allows widening later). |
+
+## Future Enhancements
+
+- **Make the distiller model configurable via a JSONC file in the opencode config directory.** The inline distiller model is currently pinned by the `MEMORY_DISTILLER_MODEL` plugin env var (default `github-copilot/gpt-5-mini`). A future enhancement should let the plugin read its model choice from a dedicated, plugin-owned JSONC file under the opencode config directory (`~/.config/opencode/`) — **not** the central `opencode.jsonc` itself — so the model can be set as configuration rather than an environment variable while keeping the plugin's settings separate from opencode's own config.
