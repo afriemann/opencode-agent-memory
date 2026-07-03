@@ -1,0 +1,18 @@
+{
+  "name": "opencode-agent-memory",
+  "version": "0.1.0",
+  "description": "Persistent agent memory plugin for opencode — captures work signals during a session, distils on idle, and auto-injects a context primer at resume time.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.15.0"
+  },
+  "devDependencies": {
+    "jest": "^29.0.0"
+  },
+  "scripts": {
+    "test": "node --experimental-vm-modules node_modules/.bin/jest"
+  }
+}
