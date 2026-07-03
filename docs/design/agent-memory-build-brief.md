@@ -28,10 +28,12 @@ The idle-distil worker calls `client.session.prompt` **without** a named `agent`
 Verified against the deployed SDK types (`@opencode-ai/sdk` `SessionPromptData.body`),
 the call passes:
 
-- `system` — the distiller instructions, **loaded at runtime from a prompt file
-  that lives in this plugin repo** (e.g. `src/prompts/distiller.md` or similar;
-  build picks the exact path). This is the "from file in the repo" decision: the
-  distiller prompt ships and versions with the plugin, not as an opencode agent.
+- `system` — the distiller instructions, **loaded at runtime from the prompt file
+  `src/prompts/distiller.md` in this plugin repo** (already written). This is the
+  "from file in the repo" decision: the distiller prompt ships and versions with
+  the plugin, not as an opencode agent. Read the file's contents and pass them as
+  `body.system`; the file's own HTML comment documents that it is a prompt, not a
+  discoverable agent/skill.
 - `model` — set by the plugin (an env var with a pinned default, e.g.
   `MEMORY_DISTILLER_MODEL` defaulting to `github-copilot/gpt-5-mini`). The model
   is **not** bound via a named agent in `opencode.jsonc`.
@@ -47,13 +49,15 @@ the call passes:
 
 The distiller instruction substance (role, exact input framing, the four output
 keys and their semantics, carry-forward and empty-record rules, "no tools / never
-writes DB or files / `adr_candidate` only flags" constraints) is specified by the
-retained `memory-distiller.md`. Reuse that substance as the prompt-file body,
-trimmed to a lean one-shot system prompt (drop the interactive-agent scaffolding:
-the verbatim Methodology preamble and the Escalation section do not apply to a
-one-shot structured call). **Ownership/governance of this in-repo prompt file is
-deferred** (user will decide later) — do not place it under the
-`agent-engineer` / `validate-definition` gate for now.
+writes DB or files / `adr_candidate` only flags" constraints) is captured in
+`src/prompts/distiller.md`, already trimmed to a lean one-shot system prompt (the
+interactive-agent scaffolding — the verbatim Methodology preamble and the
+Escalation section — was dropped as it does not apply to a one-shot structured
+call). The retained `agent-dotfiles` `memory-distiller.md` remains the substance
+source of record; keep the two aligned until ownership of the in-repo prompt file
+is settled. **Ownership/governance of `src/prompts/distiller.md` is deferred**
+(user will decide later) — do not place it under the `agent-engineer` /
+`validate-definition` gate for now.
 
 > **Sub-session capture concern (build must handle):** with no `agent` named on the
 > distiller call, the ephemeral distiller session runs as opencode's **default
