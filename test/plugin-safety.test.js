@@ -4,7 +4,7 @@
 // Every failure mode from §9 is covered; no real DB or git is used.
 
 import AgentMemory from '../src/plugin.js';
-import { reduceSignals, assemblePrimer } from '../src/lib/signal-utils.js';
+import { reduceSignals, assemblePrimer, MAX_SIGNALS_PER_KIND } from '../src/lib/signal-utils.js';
 import { renderStaleness } from '../src/lib/git-helper.js';
 
 // ── Test helpers ─────────────────────────────────────────────────────────────
@@ -460,6 +460,23 @@ describe('fail-safe degradation', () => {
       fire(plugin, 'session.idle', { sessionID: 'ses_model_fail' })
     ).resolves.not.toThrow();
   });
+
+  test('session.idle does not throw when session.create returns no id', async () => {
+    // Cold start: no prior → inject is a no-op; doDistil proceeds to session.create
+    const $ = makeMockShell({ read: COLD_READ });
+    const client = makeMockClient({
+      sessionCreate: () => ({ data: {} }), // no id field
+    });
+    const plugin = await AgentMemory({ client, $ });
+
+    await expect(
+      fire(plugin, 'session.idle', { sessionID: 'ses_create_no_id' })
+    ).resolves.not.toThrow();
+
+    // The create was attempted but no prompt should follow (no valid ephId)
+    expect(client._createCalls).toHaveLength(1);
+    expect(client._promptCalls).toHaveLength(0);
+  });
 });
 
 // ── reduceSignals (D2) unit tests ─────────────────────────────────────────────
@@ -487,31 +504,32 @@ describe('reduceSignals', () => {
     expect(a.created_at).toBe(5); // latest wins
   });
 
-  test('caps file signals to MAX_SIGNALS_PER_KIND (20) most recent', () => {
-    // Create 25 unique file paths
-    const signals = Array.from({ length: 25 }, (_, i) =>
+  test(`caps file signals to MAX_SIGNALS_PER_KIND (${MAX_SIGNALS_PER_KIND}) most recent`, () => {
+    const extras = 5;
+    // Create MAX_SIGNALS_PER_KIND+5 unique file paths with monotonically increasing created_at
+    const signals = Array.from({ length: MAX_SIGNALS_PER_KIND + extras }, (_, i) =>
       sig('file', `src/file${i}.js`, i)
     );
     const result = reduceSignals(signals);
     const files = result.filter((s) => s.kind === 'file');
-    expect(files).toHaveLength(20);
-    // The 20 most recent (by created_at) should be kept — file5..file24
+    expect(files).toHaveLength(MAX_SIGNALS_PER_KIND);
+    // The MAX_SIGNALS_PER_KIND most recent (files extras..MAX+extras-1) should be kept
     const payloads = files.map((f) => f.payload);
-    expect(payloads).toContain('src/file24.js');
-    expect(payloads).toContain('src/file5.js');
-    expect(payloads).not.toContain('src/file4.js');
+    expect(payloads).toContain(`src/file${MAX_SIGNALS_PER_KIND + extras - 1}.js`); // last file
+    expect(payloads).toContain(`src/file${extras}.js`);                            // first kept
+    expect(payloads).not.toContain(`src/file${extras - 1}.js`);                   // last dropped
   });
 
   test('keeps a re-edited file even when it was first-seen early (insertion-order fix)', () => {
-    // Scenario: 21 unique files, but file0 is re-edited last.
+    // Scenario: MAX_SIGNALS_PER_KIND+1 unique files, but file0 is re-edited last.
     // Without the sort fix, file0 (insertion-order position 0) would be dropped.
     const signals = [
-      ...Array.from({ length: 21 }, (_, i) => sig('file', `src/file${i}.js`, i + 1)),
+      ...Array.from({ length: MAX_SIGNALS_PER_KIND + 1 }, (_, i) => sig('file', `src/file${i}.js`, i + 1)),
       sig('file', 'src/file0.js', 100), // re-edit of the first-seen file, latest ts
     ];
     const result = reduceSignals(signals);
     const files = result.filter((s) => s.kind === 'file');
-    expect(files).toHaveLength(20);
+    expect(files).toHaveLength(MAX_SIGNALS_PER_KIND);
     // file0 must be present (it has the highest created_at after re-edit)
     const f0 = files.find((f) => f.payload === 'src/file0.js');
     expect(f0).toBeDefined();
@@ -520,12 +538,12 @@ describe('reduceSignals', () => {
 
   test('caps todo and message signals independently', () => {
     const signals = [
-      ...Array.from({ length: 25 }, (_, i) => sig('todo', `todo${i}`, i)),
-      ...Array.from({ length: 25 }, (_, i) => sig('message', `msg${i}`, i)),
+      ...Array.from({ length: MAX_SIGNALS_PER_KIND + 5 }, (_, i) => sig('todo', `todo${i}`, i)),
+      ...Array.from({ length: MAX_SIGNALS_PER_KIND + 5 }, (_, i) => sig('message', `msg${i}`, i)),
     ];
     const result = reduceSignals(signals);
-    expect(result.filter((s) => s.kind === 'todo')).toHaveLength(20);
-    expect(result.filter((s) => s.kind === 'message')).toHaveLength(20);
+    expect(result.filter((s) => s.kind === 'todo')).toHaveLength(MAX_SIGNALS_PER_KIND);
+    expect(result.filter((s) => s.kind === 'message')).toHaveLength(MAX_SIGNALS_PER_KIND);
   });
 });
 
@@ -542,17 +560,17 @@ describe('assemblePrimer', () => {
   test('includes the header with agent and last-two-segments of project', () => {
     const result = assemblePrimer(
       BASE_PRIOR,
-      'build',
+      'engineer',
       '/home/user/repos/my/project',
       { status: 'ok', distance: 2 }
     );
-    expect(result).toContain('[MEMORY — resumed context for build in my/project]');
+    expect(result).toContain('[MEMORY — resumed context for engineer in my/project]');
   });
 
   test('includes last_worked_summary and next_action', () => {
     const result = assemblePrimer(
       BASE_PRIOR,
-      'build',
+      'engineer',
       '/proj/repo',
       { status: 'ok', distance: 0 }
     );
@@ -563,7 +581,7 @@ describe('assemblePrimer', () => {
   test('renders open_questions as bullets when non-empty', () => {
     const result = assemblePrimer(
       BASE_PRIOR,
-      'build',
+      'engineer',
       '/proj/repo',
       { status: 'no-git' }
     );
@@ -574,7 +592,7 @@ describe('assemblePrimer', () => {
 
   test('renders "Open questions: none" when array is empty', () => {
     const prior = { ...BASE_PRIOR, open_questions: [] };
-    const result = assemblePrimer(prior, 'build', '/proj/repo', { status: 'no-git' });
+    const result = assemblePrimer(prior, 'engineer', '/proj/repo', { status: 'no-git' });
     expect(result).toContain('Open questions: none');
     expect(result).not.toContain('- '); // no bullets
   });
@@ -584,12 +602,12 @@ describe('assemblePrimer', () => {
       ...BASE_PRIOR,
       adr_candidate: 'consider ADR: use in-memory cache',
     };
-    const resultWith = assemblePrimer(withAdr, 'build', '/proj/repo', { status: 'no-git' });
+    const resultWith = assemblePrimer(withAdr, 'engineer', '/proj/repo', { status: 'no-git' });
     expect(resultWith).toContain('Possible decision to record:');
     expect(resultWith).toContain('consider ADR: use in-memory cache');
     expect(resultWith).toContain('docs/adr/');
 
-    const resultWithout = assemblePrimer(BASE_PRIOR, 'build', '/proj/repo', { status: 'no-git' });
+    const resultWithout = assemblePrimer(BASE_PRIOR, 'engineer', '/proj/repo', { status: 'no-git' });
     expect(resultWithout).not.toContain('Possible decision to record:');
   });
 
@@ -600,13 +618,13 @@ describe('assemblePrimer', () => {
       { status: 'diverged' },
       { status: 'no-anchor' },
     ]) {
-      const result = assemblePrimer(BASE_PRIOR, 'build', '/proj/repo', staleness);
+      const result = assemblePrimer(BASE_PRIOR, 'engineer', '/proj/repo', staleness);
       expect(result).toContain(`Staleness: ${renderStaleness(staleness)}`);
     }
   });
 
   test('teach-back directive is present in every primer', () => {
-    const result = assemblePrimer(BASE_PRIOR, 'build', '/proj/repo', { status: 'ok', distance: 0 });
+    const result = assemblePrimer(BASE_PRIOR, 'engineer', '/proj/repo', { status: 'ok', distance: 0 });
     expect(result).toContain('This memory is a hypothesis, not ground truth');
     expect(result).toContain('replay your understanding');
     expect(result).toContain('get my confirmation first');
@@ -617,7 +635,7 @@ describe('assemblePrimer', () => {
       ...BASE_PRIOR,
       adr_candidate: 'consider ADR: test',
     };
-    const result = assemblePrimer(prior, 'build', '/proj/repo', { status: 'ok', distance: 1 });
+    const result = assemblePrimer(prior, 'engineer', '/proj/repo', { status: 'ok', distance: 1 });
     const headerIdx    = result.indexOf('[MEMORY');
     const summaryIdx   = result.indexOf('Where we left off');
     const actionIdx    = result.indexOf('Next action');
