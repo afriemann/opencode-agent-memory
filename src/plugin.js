@@ -23,6 +23,7 @@ import {
 } from './lib/distil-prompt.js';
 import { gitRevParse, gitStaleness } from './lib/git-helper.js';
 import { assemblePrimer, reduceSignals } from './lib/signal-utils.js';
+import { loadConfigFile, resolveConfig } from './lib/config.js';
 
 // ── Static config ────────────────────────────────────────────────────────────
 
@@ -50,21 +51,18 @@ function getDistillerPrompt() {
   return _distillerPrompt;
 }
 
-const TARGET_AGENT = process.env.MEMORY_TARGET_AGENT ?? 'engineer';
-const DISTIL_MIN_INTERVAL_MS = Number(process.env.DISTIL_MIN_INTERVAL_MS ?? 60_000);
+// Resolve tuneable config: env var > config file > hardcoded default (per key).
+const _fileCfg = loadConfigFile();
+const {
+  targetAgent: TARGET_AGENT,
+  distilMinIntervalMs: DISTIL_MIN_INTERVAL_MS,
+  distillerModel: DISTILLER_MODEL,
+} = resolveConfig(process.env, _fileCfg);
 
 // Title used for ephemeral distil sub-sessions. Used in two places:
 // - ephemerals.add(ephId) after session.create (primary guard)
 // - title check in session.created handler (race-condition guard: W3 fix)
 const EPHEMERAL_TITLE = 'agent-memory distil';
-
-// Parse MEMORY_DISTILLER_MODEL "providerID/modelID" into an object.
-const _modelRaw = process.env.MEMORY_DISTILLER_MODEL ?? 'github-copilot/gpt-5-mini';
-const _slash = _modelRaw.indexOf('/');
-const DISTILLER_MODEL =
-  _slash >= 0
-    ? { providerID: _modelRaw.slice(0, _slash), modelID: _modelRaw.slice(_slash + 1) }
-    : { providerID: 'github-copilot', modelID: _modelRaw };
 
 const MAX_IN_FLIGHT = 5000;
 

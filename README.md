@@ -23,13 +23,56 @@ Run `make bootstrap` (or `make update`) in `agent-dotfiles` to create or refresh
 
 ## Environment variables
 
+
 | Variable | Default | Description |
 |---|---|---|
 | `AGENT_MEMORY_DB` | `~/.local/share/opencode/agent-memory.db` | Path to the SQLite database. |
 | `MEMORY_DISTILLER_MODEL` | `github-copilot/gpt-5-mini` | Model used for distillation, as `providerID/modelID`. |
-| `MEMORY_TARGET_AGENT` | `build` | The opencode agent this plugin tracks. Phase 1: single value only. |
+| `MEMORY_TARGET_AGENT` | `engineer` | The opencode agent this plugin tracks. Phase 1: single value only. |
 | `DISTIL_MIN_INTERVAL_MS` | `60000` | Minimum milliseconds between distil runs for the same session (throttle). |
 | `MEMORY_FLUSH_INTERVAL_MS` | `60000` | Reserved for a future periodic background flush. **Not yet implemented** — Phase 1 flushes the accumulator buffer on `session.idle` only. |
+
+## Config file
+
+
+As an alternative to environment variables, you can place a JSONC file at:
+
+```
+~/.config/opencode/agent-memory.jsonc
+```
+
+This file is loaded once at plugin startup. It supports the same three tuneable values as the env vars above, with **per-key independent precedence**:
+
+```
+env var  >  config file value  >  hardcoded default
+```
+
+Each key falls back independently — setting only `distillerModel` in the file leaves the other two at their defaults.
+
+**Supported keys:**
+
+| Key | Type | Default | Equivalent env var |
+|---|---|---|---|
+| `targetAgent` | non-empty string | `"engineer"` | `MEMORY_TARGET_AGENT` |
+| `distilMinIntervalMs` | finite positive number | `60000` | `DISTIL_MIN_INTERVAL_MS` |
+| `distillerModel` | `"providerID/modelID"` string | `"github-copilot/gpt-5-mini"` | `MEMORY_DISTILLER_MODEL` |
+
+**Example** (see also `docs/agent-memory.jsonc`):
+
+```jsonc
+{
+  // Which agent's sessions to track
+  "targetAgent": "engineer",
+  // Minimum distil interval in milliseconds
+  "distilMinIntervalMs": 60000,
+  // LLM used to distil session signals
+  "distillerModel": "github-copilot/gpt-5-mini",
+}
+```
+
+**Error handling:** invalid values emit a `[agent-memory]` warning to `console.warn` and fall back to the hardcoded default for that key only. A missing or empty file is silently ignored.
+
+**⚠️ Limitation:** string values must not contain `//`, `/*`, or `*/`. These token sequences are stripped by the inline JSONC parser. The three documented keys never need these characters in practice.
 
 ## CLI reference (`src/memory.js`)
 

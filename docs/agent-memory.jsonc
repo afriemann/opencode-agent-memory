@@ -1,0 +1,29 @@
+// ~/.config/opencode/agent-memory.jsonc
+//
+// Optional config file for the opencode-agent-memory plugin.
+// This file is loaded at startup. Settings here are overridden by
+// the corresponding environment variables (see README.md).
+//
+// JSONC format: JavaScript-style comments (//, /* */) and trailing
+// commas are supported, matching the style of opencode.jsonc.
+//
+// ⚠️  Limitation: string values must not contain //, /*, or */.
+//    These token sequences are stripped by the JSONC parser.
+//
+{
+  // Which agent's sessions to track and inject memory into.
+  // Default: "engineer"
+  // Overridden by: MEMORY_TARGET_AGENT env var
+  "targetAgent": "engineer",
+
+  // Minimum interval between idle-distil runs, in milliseconds.
+  // Must be a finite positive number. Default: 60000 (1 minute)
+  // Overridden by: DISTIL_MIN_INTERVAL_MS env var
+  "distilMinIntervalMs": 60000,
+
+  // LLM model used to distil session signals into a memory record.
+  // Format: "providerID/modelID"  (e.g. "github-copilot/gpt-5-mini")
+  // Default: "github-copilot/gpt-5-mini"
+  // Overridden by: MEMORY_DISTILLER_MODEL env var
+  "distillerModel": "github-copilot/gpt-5-mini",
+}
