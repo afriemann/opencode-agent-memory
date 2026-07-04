@@ -173,9 +173,11 @@ const AgentMemory = async ({ client, $ }) => {
       const primer = assemblePrimer(state.prior, agent, project, staleness);
 
       await client.session.prompt({
-        sessionID: sessionId,
-        noReply: true,
-        parts: [{ type: 'text', text: primer }],
+        path: { id: sessionId },
+        body: {
+          noReply: true,
+          parts: [{ type: 'text', text: primer }],
+        },
       });
     } catch (err) {
       log(`inject: failed for ${sessionId}`, err);
@@ -195,7 +197,7 @@ const AgentMemory = async ({ client, $ }) => {
     // Resolve session agent + project via session.get (authoritative, per §6).
     let session;
     try {
-      const got = await client.session.get({ sessionID: sessionId });
+      const got = await client.session.get({ path: { id: sessionId } });
       session = got && got.data;
     } catch (err) {
       log(`distil: session.get failed for ${sessionId}`, err);
@@ -280,7 +282,7 @@ const AgentMemory = async ({ client, $ }) => {
     // Create ephemeral distil sub-session.
     let ephId;
     try {
-      const created = await client.session.create({ title: EPHEMERAL_TITLE });
+      const created = await client.session.create({ body: { title: EPHEMERAL_TITLE } });
       ephId = created && created.data && created.data.id;
       if (!ephId) throw new Error('no session id in create response');
       // Add to ephemerals IMMEDIATELY after receiving the ID — before any
@@ -299,11 +301,13 @@ const AgentMemory = async ({ client, $ }) => {
       let distilled = null;
       try {
         const res = await client.session.prompt({
-          sessionID: ephId,
-          model: DISTILLER_MODEL,
-          system: getDistillerPrompt(),
-          format: { type: 'json_schema', schema: DISTIL_SCHEMA, retryCount: 1 },
-          parts: [{ type: 'text', text: distilPrompt }],
+          path: { id: ephId },
+          body: {
+            model: DISTILLER_MODEL,
+            system: getDistillerPrompt(),
+            format: { type: 'json_schema', schema: DISTIL_SCHEMA, retryCount: 1 },
+            parts: [{ type: 'text', text: distilPrompt }],
+          },
         });
         const parts = (res && res.data && res.data.parts) || [];
         const text = parts
@@ -319,11 +323,13 @@ const AgentMemory = async ({ client, $ }) => {
       if (!distilled) {
         try {
           const res2 = await client.session.prompt({
-            sessionID: ephId,
-            model: DISTILLER_MODEL,
-            system: getDistillerPrompt(),
-            format: { type: 'text' },
-            parts: [{ type: 'text', text: distilPrompt }],
+            path: { id: ephId },
+            body: {
+              model: DISTILLER_MODEL,
+              system: getDistillerPrompt(),
+              format: { type: 'text' },
+              parts: [{ type: 'text', text: distilPrompt }],
+            },
           });
           const parts = (res2 && res2.data && res2.data.parts) || [];
           const text = parts
@@ -361,7 +367,7 @@ const AgentMemory = async ({ client, $ }) => {
     } finally {
       // Delete the ephemeral session (fire-and-forget — non-fatal if unavailable).
       try {
-        await client.session.delete({ sessionID: ephId });
+        await client.session.delete({ path: { id: ephId } });
       } catch { /* non-fatal */ }
       ephemerals.delete(ephId);
     }
@@ -378,8 +384,9 @@ const AgentMemory = async ({ client, $ }) => {
 
           // ── session.created: primary injection trigger ─────────────────────
           case 'session.created': {
-            const sessionId = event.properties?.sessionID;
             const info = event.properties?.info;
+            // v1 SDK: sessionID lives at info.id; v2 SDK: also at properties.sessionID
+            const sessionId = event.properties?.sessionID ?? info?.id;
             if (!sessionId) return;
 
             // Title check: skip ephemeral distil sessions even before ephemerals.add
@@ -402,7 +409,7 @@ const AgentMemory = async ({ client, $ }) => {
 
             if (!agent || !project) {
               try {
-                const got = await client.session.get({ sessionID: sessionId });
+                const got = await client.session.get({ path: { id: sessionId } });
                 const data = got && got.data;
                 if (!agent) agent = data && data.agent;
                 if (!project) project = data && data.directory;
@@ -472,8 +479,9 @@ const AgentMemory = async ({ client, $ }) => {
 
           // ── message.updated: D1 classification + attribution + fallback ───
           case 'message.updated': {
-            const sessionId = event.properties?.sessionID;
             const msgInfo = event.properties?.info;
+            // v1 SDK: sessionID lives at info.sessionID; v2 SDK: also at properties.sessionID
+            const sessionId = event.properties?.sessionID ?? msgInfo?.sessionID;
             if (!sessionId || !msgInfo) return;
             if (ephemerals.has(sessionId)) return;
 
@@ -502,7 +510,7 @@ const AgentMemory = async ({ client, $ }) => {
             // message.
             if (!injected.has(sessionId)) {
               try {
-                const got = await client.session.get({ sessionID: sessionId });
+                const got = await client.session.get({ path: { id: sessionId } });
                 const data = got && got.data;
                 const agent = data && data.agent;
                 const project = data && data.directory;

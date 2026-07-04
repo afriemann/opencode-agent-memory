@@ -81,19 +81,25 @@ function makeMockClient(overrides = {}) {
 
   const client = {
     session: {
-      get: async ({ sessionID }) => {
-        getCalls.push(sessionID);
-        return overrides.sessionGet?.(sessionID) ?? {
+      // Accept v1 format { path: { id } } and v2 format { sessionID } for compatibility.
+      get: async (options) => {
+        const id = options?.path?.id ?? options?.sessionID;
+        getCalls.push(id);
+        return overrides.sessionGet?.(id) ?? {
           data: { agent: 'engineer', directory: '/home/user/repos/my/project', title: null },
         };
       },
-      create: async ({ title }) => {
+      create: async (options) => {
+        const title = options?.body?.title ?? options?.title;
         createCalls.push(title);
         return overrides.sessionCreate?.(title) ?? { data: { id: 'eph_test' } };
       },
-      prompt: async ({ sessionID, ...body }) => {
-        promptCalls.push({ id: sessionID, body });
-        return overrides.sessionPrompt?.(sessionID, body) ?? {
+      prompt: async (options) => {
+        const id = options?.path?.id ?? options?.sessionID;
+        // v1 format: { path: { id }, body: { ... } }; v2 format: { sessionID, ...body }
+        const body = options?.body ?? (({ path, sessionID, ...rest }) => rest)(options ?? {});
+        promptCalls.push({ id, body });
+        return overrides.sessionPrompt?.(id, body) ?? {
           data: { parts: [{ type: 'text', text: JSON.stringify({
             last_worked_summary: 'done',
             next_action: 'next',
@@ -102,8 +108,9 @@ function makeMockClient(overrides = {}) {
           }) }] },
         };
       },
-      delete: async ({ sessionID }) => {
-        deleteCalls.push(sessionID);
+      delete: async (options) => {
+        const id = options?.path?.id ?? options?.sessionID;
+        deleteCalls.push(id);
         return {};
       },
     },
