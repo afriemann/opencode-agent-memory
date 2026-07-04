@@ -125,6 +125,9 @@ async function spawnMemory($, args, stdinData) {
 // ── Plugin factory ───────────────────────────────────────────────────────────
 
 const AgentMemory = async ({ client, $ }) => {
+  // Fire-and-forget; never throws into opencode.
+  spawnMemory($, ['prune']).catch(() => {});
+
   // ── Per-process mutable state ──────────────────────────────────────────────
   const inFlight = new Set();   // sessionIDs with a pending distil queued/running
   const injected = new Set();   // sessionIDs already primed this process lifetime

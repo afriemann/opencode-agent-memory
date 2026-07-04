@@ -221,9 +221,12 @@ function cmdPrune() {
     const result = db
       .prepare('DELETE FROM memory_signal WHERE created_at < ?')
       .run(cutoff);
+    const wm = db
+      .prepare('DELETE FROM distil_watermark WHERE MAX(last_signal_ms, last_distil_ms) < ?')
+      .run(cutoff);
     db.exec('COMMIT');
     process.stdout.write(
-      JSON.stringify({ pruned: result.changes }) + '\n'
+      JSON.stringify({ pruned: result.changes, prunedWatermarks: wm.changes }) + '\n'
     );
   } catch (err) {
     db.exec('ROLLBACK');

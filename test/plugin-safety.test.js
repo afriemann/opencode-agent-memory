@@ -658,3 +658,13 @@ describe('assemblePrimer', () => {
     expect(stalenessIdx).toBeLessThan(teachIdx);
   });
 });
+
+// ── startup prune ─────────────────────────────────────────────────────────────
+
+describe('startup prune', () => {
+  test('AgentMemory factory calls spawnMemory(["prune"]) on startup', async () => {
+    const $ = makeMockShell({});
+    await AgentMemory({ client: makeMockClient(), $ });
+    expect($.calls.some((c) => /\bprune\b/.test(c))).toBe(true);
+  });
+});

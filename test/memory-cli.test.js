@@ -212,3 +212,102 @@ describe('distil-write SQL transaction', () => {
     expect(wm.last_signal_ms).toBeGreaterThanOrEqual(200); // advanced
   });
 });
+
+// ── prune SQL transaction tests ───────────────────────────────────────────────
+
+/**
+ * Run the same SQL transaction as `cmdPrune` against the provided db.
+ * Returns { pruned, prunedWatermarks } mirroring the stdout JSON.
+ *
+ * NOTE: This is a white-box copy of cmdPrune's transaction.
+ * If the SQL in cmdPrune changes, update this helper to match.
+ */
+function runPruneSQL(db, { cutoff }) {
+  db.exec('BEGIN');
+  try {
+    const result = db
+      .prepare('DELETE FROM memory_signal WHERE created_at < ?')
+      .run(cutoff);
+    const wm = db
+      .prepare('DELETE FROM distil_watermark WHERE MAX(last_signal_ms, last_distil_ms) < ?')
+      .run(cutoff);
+    db.exec('COMMIT');
+    return { pruned: result.changes, prunedWatermarks: wm.changes };
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+}
+
+/** Insert a distil_watermark row. */
+function insertWatermark(db, sessionId, lastSignalMs, lastDistilMs) {
+  db.prepare(`
+    INSERT INTO distil_watermark (session_id, last_signal_ms, last_distil_ms)
+    VALUES (?, ?, ?)
+    ON CONFLICT(session_id) DO UPDATE SET
+      last_signal_ms = excluded.last_signal_ms,
+      last_distil_ms = excluded.last_distil_ms
+  `).run(sessionId, lastSignalMs, lastDistilMs);
+}
+
+describe('prune SQL transaction', () => {
+  const CUTOFF = Date.now() - 30 * 24 * 60 * 60 * 1000; // 30 days ago (ms)
+  const OLD    = CUTOFF - 1;          // one ms before the cutoff — should be deleted
+  const FRESH  = Date.now();          // now — should be kept
+
+  test('deletes distil_watermark rows older than 30 days and keeps newer ones', () => {
+    const db = openMemory();
+
+    insertWatermark(db, 'old-session',   OLD,   OLD);    // both old → delete
+    insertWatermark(db, 'fresh-session', FRESH, FRESH);  // both fresh → keep
+    insertWatermark(db, 'mixed-session', OLD,   FRESH);  // one fresh → keep
+
+    const out = runPruneSQL(db, { cutoff: CUTOFF });
+
+    expect(out.prunedWatermarks).toBe(1); // only 'old-session' deleted
+
+    const remaining = db
+      .prepare('SELECT session_id FROM distil_watermark ORDER BY session_id')
+      .all()
+      .map((r) => r.session_id);
+    expect(remaining).toEqual(['fresh-session', 'mixed-session']);
+  });
+
+  test('deletes distil_watermark rows where both columns are 0 (epoch = trivially old)', () => {
+    const db = openMemory();
+
+    insertWatermark(db, 'zero-session', 0, 0); // MAX(0,0) = 0 < cutoff → delete
+
+    const out = runPruneSQL(db, { cutoff: CUTOFF });
+
+    expect(out.prunedWatermarks).toBe(1);
+    const count = db
+      .prepare('SELECT COUNT(*) AS n FROM distil_watermark')
+      .get().n;
+    expect(count).toBe(0);
+  });
+
+  test('returns { pruned: N, prunedWatermarks: M } output shape with correct counts', () => {
+    const db = openMemory();
+    const AGENT   = 'engineer';
+    const PROJECT = '/test/project';
+    const SES     = 'ses-prune-shape';
+
+    // One old signal
+    insertSignal(db, SES, AGENT, PROJECT, 'message', 'hello', OLD);
+    // One fresh signal (should be kept)
+    insertSignal(db, SES, AGENT, PROJECT, 'message', 'world', FRESH);
+    // One old watermark
+    insertWatermark(db, SES, OLD, OLD);
+
+    const out = runPruneSQL(db, { cutoff: CUTOFF });
+
+    expect(out).toEqual({ pruned: 1, prunedWatermarks: 1 });
+
+    // Fresh signal is intact
+    const remaining = db
+      .prepare('SELECT COUNT(*) AS n FROM memory_signal')
+      .get().n;
+    expect(remaining).toBe(1);
+  });
+});
