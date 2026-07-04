@@ -3,7 +3,8 @@
 // Tests the AgentMemory plugin factory with fully-mocked client and $.
 // Every failure mode from §9 is covered; no real DB or git is used.
 
-import { AgentMemory, reduceSignals, assemblePrimer } from '../src/plugin.js';
+import AgentMemory from '../src/plugin.js';
+import { reduceSignals, assemblePrimer } from '../src/lib/signal-utils.js';
 import { renderStaleness } from '../src/lib/git-helper.js';
 
 // ── Test helpers ─────────────────────────────────────────────────────────────
@@ -54,7 +55,7 @@ const COLD_READ = JSON.stringify({
 const WARM_READ = JSON.stringify({
   prior: {
     scope: 'project',
-    agent: 'build',
+    agent: 'engineer',
     project: '/home/user/repos/my/project',
     last_worked_summary: 'implemented the widget',
     next_action: 'write tests for widget',
@@ -80,19 +81,19 @@ function makeMockClient(overrides = {}) {
 
   const client = {
     session: {
-      get: async ({ path }) => {
-        getCalls.push(path.id);
-        return overrides.sessionGet?.(path.id) ?? {
-          data: { agent: 'build', directory: '/home/user/repos/my/project', title: null },
+      get: async ({ sessionID }) => {
+        getCalls.push(sessionID);
+        return overrides.sessionGet?.(sessionID) ?? {
+          data: { agent: 'engineer', directory: '/home/user/repos/my/project', title: null },
         };
       },
-      create: async ({ body }) => {
-        createCalls.push(body);
-        return overrides.sessionCreate?.(body) ?? { data: { id: 'eph_test' } };
+      create: async ({ title }) => {
+        createCalls.push(title);
+        return overrides.sessionCreate?.(title) ?? { data: { id: 'eph_test' } };
       },
-      prompt: async ({ path, body }) => {
-        promptCalls.push({ id: path?.id, body });
-        return overrides.sessionPrompt?.(path?.id, body) ?? {
+      prompt: async ({ sessionID, ...body }) => {
+        promptCalls.push({ id: sessionID, body });
+        return overrides.sessionPrompt?.(sessionID, body) ?? {
           data: { parts: [{ type: 'text', text: JSON.stringify({
             last_worked_summary: 'done',
             next_action: 'next',
@@ -101,8 +102,8 @@ function makeMockClient(overrides = {}) {
           }) }] },
         };
       },
-      delete: async ({ path }) => {
-        deleteCalls.push(path?.id);
+      delete: async ({ sessionID }) => {
+        deleteCalls.push(sessionID);
         return {};
       },
     },
@@ -129,7 +130,7 @@ describe('injection idempotency', () => {
 
     const props = {
       sessionID: 'ses_001',
-      info: { agent: 'build', directory: '/home/user/repos/my/project', title: null },
+      info: { agent: 'engineer', directory: '/home/user/repos/my/project', title: null },
     };
     await fire(plugin, 'session.created', props);
     await fire(plugin, 'session.created', props); // duplicate
@@ -146,7 +147,7 @@ describe('injection idempotency', () => {
 
     await fire(plugin, 'session.created', {
       sessionID: 'ses_cold',
-      info: { agent: 'build', directory: '/home/user/repos/my/project', title: null },
+      info: { agent: 'engineer', directory: '/home/user/repos/my/project', title: null },
     });
 
     const primerCalls = client._promptCalls.filter((c) => c.body?.noReply);
@@ -157,7 +158,7 @@ describe('injection idempotency', () => {
 // ── (agent, project) keying ──────────────────────────────────────────────────
 
 describe('(agent, project) keying', () => {
-  test('non-build agent sessions are skipped', async () => {
+  test('non-target-agent sessions are skipped', async () => {
     const $ = makeMockShell({ read: WARM_READ });
     const client = makeMockClient({
       sessionGet: () => ({
@@ -183,11 +184,11 @@ describe('(agent, project) keying', () => {
 
     await fire(plugin, 'session.created', {
       sessionID: 'ses_proj_a',
-      info: { agent: 'build', directory: '/proj/a', title: null },
+      info: { agent: 'engineer', directory: '/proj/a', title: null },
     });
     await fire(plugin, 'session.created', {
       sessionID: 'ses_proj_b',
-      info: { agent: 'build', directory: '/proj/b', title: null },
+      info: { agent: 'engineer', directory: '/proj/b', title: null },
     });
 
     const primerCalls = client._promptCalls.filter((c) => c.body?.noReply);
@@ -243,7 +244,7 @@ describe('idle-distil throttle', () => {
     const recentDistilMs = Date.now() - 1000; // only 1 s ago, well within 60 s default
     const throttledRead = JSON.stringify({
       prior: {
-        scope: 'project', agent: 'build', project: '/proj',
+        scope: 'project', agent: 'engineer', project: '/proj',
         last_worked_summary: 'x', next_action: 'y', open_questions: [],
         adr_candidate: null, anchored_git_sha: null, updated_at: 1000,
       },
@@ -290,7 +291,7 @@ describe('fallback inject on message.updated', () => {
     // Primed by session.created first
     await fire(plugin, 'session.created', {
       sessionID: 'ses_already_primed',
-      info: { agent: 'build', directory: '/proj', title: null },
+      info: { agent: 'engineer', directory: '/proj', title: null },
     });
 
     // message.updated fires afterward — should NOT re-inject
@@ -312,7 +313,7 @@ describe('buffer payload retention', () => {
     const client = makeMockClient();
     const plugin = await AgentMemory({ client, $ });
 
-    // Trigger a message.updated first so lastActiveBuildSessionId is set
+    // Trigger a message.updated first so lastActiveSessionId is set
     await fire(plugin, 'message.updated', {
       sessionID: 'ses_buf',
       info: { role: 'assistant', text: 'done' },
@@ -326,7 +327,7 @@ describe('buffer payload retention', () => {
     // We trigger a session.idle to flush
     const WARM_AFTER_FLUSH = JSON.stringify({
       prior: {
-        scope: 'project', agent: 'build', project: '/home/user/repos/my/project',
+        scope: 'project', agent: 'engineer', project: '/home/user/repos/my/project',
         last_worked_summary: 'x', next_action: 'y', open_questions: [],
         adr_candidate: null, anchored_git_sha: null, updated_at: 1000,
       },
