@@ -34,7 +34,6 @@ function makeMockShell(responses = {}) {
     }
 
     const obj = {
-      stdin: (_input) => obj,
       quiet: () => obj,
       text: async () => output,
     };

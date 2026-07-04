@@ -109,7 +109,7 @@ function bufferIsEmpty(buf) {
  *
  * @param {Function} $ — tagged-template shell from the plugin context
  * @param {string[]} args — CLI sub-command and positional args
- * @param {object|string|undefined} stdinData — passed as stdin JSON if provided
+ * @param {object|string|undefined} stdinData — appended as a JSON CLI arg if provided
  * @returns {Promise<string>}
  */
 async function spawnMemory($, args, stdinData) {
@@ -117,7 +117,7 @@ async function spawnMemory($, args, stdinData) {
   if (stdinData !== undefined) {
     const input =
       typeof stdinData === 'string' ? stdinData : JSON.stringify(stdinData);
-    return await $`node ${SCRIPT} ${sub} ${rest}`.stdin(input).quiet().text();
+    return await $`node ${SCRIPT} ${sub} ${rest} ${input}`.quiet().text();
   }
   return await $`node ${SCRIPT} ${sub} ${rest}`.quiet().text();
 }

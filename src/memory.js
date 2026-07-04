@@ -9,16 +9,16 @@
 //   init
 //     Create the schema (idempotent). Safe to run at any time.
 //
-//   accrue <sessionId> <agent> <project>
-//     stdin: { files: string[], todos: string[], messages: string[] }
+//   accrue <sessionId> <agent> <project> <jsonData>
+//     jsonData: JSON string { files: string[], todos: string[], messages: string[] }
 //     Write accumulated buffer signals to memory_signal.
 //
 //   read <sessionId> <agent> <project>
 //     stdout: { prior: row|null, signals: row[], watermark: { last_signal_ms, last_distil_ms } }
 //     Read the latest hot_state + all scratch signals + watermark for this session.
 //
-//   distil-write <agent> <project>
-//     stdin: { distilled: {…}, anchoredSha: string|null, lastSignalMs: number, sessionId: string }
+//   distil-write <agent> <project> <jsonData>
+//     jsonData: JSON string { distilled: {…}, anchoredSha: string|null, lastSignalMs: number, sessionId: string }
 //     UPSERT hot_state (monotonic guard), delete consumed signals, advance watermark.
 //     All three steps run in a single transaction.
 //
@@ -28,19 +28,6 @@
 import { openDb } from './lib/db.js';
 import { ensureSchema } from './lib/schema.js';
 import { readDistilWatermark, advanceDistilWatermark } from './lib/watermark.js';
-
-// ── Stdin helper ────────────────────────────────────────────────────────────
-
-async function readStdin() {
-  return new Promise((resolve) => {
-    if (process.stdin.isTTY) return resolve('');
-    let data = '';
-    process.stdin.setEncoding('utf8');
-    process.stdin.on('data', (chunk) => { data += chunk; });
-    process.stdin.on('end', () => resolve(data));
-    process.stdin.on('error', () => resolve(''));
-  });
-}
 
 // ── DB bootstrap ────────────────────────────────────────────────────────────
 
@@ -57,15 +44,14 @@ function cmdInit() {
   db.close();
 }
 
-async function cmdAccrue(sessionId, agent, project) {
-  const raw = await readStdin();
-  if (!raw.trim()) return; // Nothing to write
+async function cmdAccrue(sessionId, agent, project, jsonArg) {
+  if (!jsonArg || !jsonArg.trim()) return; // Nothing to write
 
   let delta;
   try {
-    delta = JSON.parse(raw);
+    delta = JSON.parse(jsonArg);
   } catch {
-    process.stderr.write('[agent-memory/accrue] invalid stdin JSON\n');
+    process.stderr.write('[agent-memory/accrue] invalid JSON argument\n');
     process.exit(1);
   }
 
@@ -149,13 +135,12 @@ function cmdRead(sessionId, agent, project) {
   process.stdout.write(JSON.stringify({ prior, signals, watermark }) + '\n');
 }
 
-async function cmdDistilWrite(agent, project) {
-  const raw = await readStdin();
+async function cmdDistilWrite(agent, project, jsonArg) {
   let input;
   try {
-    input = JSON.parse(raw);
+    input = JSON.parse(jsonArg);
   } catch {
-    process.stderr.write('[agent-memory/distil-write] invalid stdin JSON\n');
+    process.stderr.write('[agent-memory/distil-write] invalid JSON argument\n');
     process.exit(1);
   }
 
@@ -258,12 +243,12 @@ switch (cmd) {
     break;
 
   case 'accrue': {
-    const [sessionId, agent, project] = rest;
-    if (!sessionId || !agent || !project) {
-      process.stderr.write('Usage: memory.js accrue <sessionId> <agent> <project>\n');
+    const [sessionId, agent, project, jsonArg] = rest;
+    if (!sessionId || !agent || !project || !jsonArg) {
+      process.stderr.write('Usage: memory.js accrue <sessionId> <agent> <project> <jsonData>\n');
       process.exit(1);
     }
-    await cmdAccrue(sessionId, agent, project);
+    await cmdAccrue(sessionId, agent, project, jsonArg);
     break;
   }
 
@@ -278,12 +263,12 @@ switch (cmd) {
   }
 
   case 'distil-write': {
-    const [agent, project] = rest;
-    if (!agent || !project) {
-      process.stderr.write('Usage: memory.js distil-write <agent> <project>\n');
+    const [agent, project, jsonArg] = rest;
+    if (!agent || !project || !jsonArg) {
+      process.stderr.write('Usage: memory.js distil-write <agent> <project> <jsonData>\n');
       process.exit(1);
     }
-    await cmdDistilWrite(agent, project);
+    await cmdDistilWrite(agent, project, jsonArg);
     break;
   }
 
