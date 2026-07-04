@@ -2,7 +2,7 @@
 
 ### Requirement: inspect returns hot_state and pending signals without modifying any row
 
-The system SHALL return the current `hot_state` row (all fields) and all `memory_signal` rows for the given `(agent, project)` scope when `inspect` is invoked, and SHALL NOT write to, delete from, or lock any table as a side-effect.
+The system SHALL return the current `hot_state` row (all fields) and all `memory_signal` rows for the given `(agent, project)` scope when `inspect` is invoked, and SHALL NOT insert, update, or delete any row in any table as a side-effect.
 
 #### Scenario: Hot state and signals both exist
 - **GIVEN** a `hot_state` row and one or more `memory_signal` rows exist for the given agent/project scope
@@ -19,14 +19,14 @@ The system SHALL return the current `hot_state` row (all fields) and all `memory
 - **WHEN** `node memory.js inspect <agent> <project>` is invoked
 - **THEN** stdout contains `{ prior: <hot_state row>, signals: [] }`
 
-#### Scenario: Database tables are unchanged after inspect
+#### Scenario: No rows are inserted, updated, or deleted by inspect
 - **GIVEN** any combination of `hot_state`, `memory_signal`, and `distil_watermark` rows
 - **WHEN** `node memory.js inspect <agent> <project>` is invoked
-- **THEN** all three tables are byte-for-byte identical to their state before the call
+- **THEN** no row is inserted, updated, or deleted in any of the three tables
 
-### Requirement: memory_inspect plugin tool delegates to the inspect CLI subcommand
+### Requirement: memory_inspect plugin tool delegates to the inspect CLI subcommand using TARGET_AGENT
 
-The `memory_inspect` registered tool SHALL invoke `spawnMemory($, ['inspect', agent, directory])` using the scope resolved from `ToolContext`, and SHALL return the result as a `ToolResult` without propagating exceptions into the opencode host.
+The `memory_inspect` registered tool SHALL invoke `spawnMemory($, ['inspect', TARGET_AGENT, directory])` using `TARGET_AGENT` (the plugin-configured agent dimension) and the `directory` from `ToolContext`, and SHALL return the result as a `ToolResult` without propagating exceptions into the opencode host.
 
 #### Scenario: Tool invoked for an agent with existing memory
 - **GIVEN** a `hot_state` row and signals exist for the calling session's agent/project

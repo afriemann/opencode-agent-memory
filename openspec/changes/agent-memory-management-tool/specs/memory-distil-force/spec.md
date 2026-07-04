@@ -19,14 +19,28 @@ The `memory_distil_force` registered tool SHALL call `doDistil(sessionId, { forc
 - **WHEN** the agent calls `memory_distil_force`
 - **THEN** the tool returns an informative error result and does not propagate an unhandled rejection into the opencode host
 
-### Requirement: memory_distil_force does not affect the idle-throttle clock
+### Requirement: memory_distil_force shares the distil watermark path but does not change the idle-throttle interval
 
-The system SHALL NOT reset or advance the idle-path throttle timer as a side-effect of a forced distil; the idle-path distil remains subject to its normal `DISTIL_MIN_INTERVAL_MS` window relative to the last idle-path distil timestamp.
+A forced distil runs the identical `distil-write` path as the idle distil and therefore advances `last_distil_ms` in the per-session watermark. The idle-path throttle logic and `DISTIL_MIN_INTERVAL_MS` interval are otherwise unchanged: the idle path continues to compare `now - lastDistilMs` against the same constant, regardless of whether the last write was forced or idle.
 
-#### Scenario: Forced distil does not block a subsequent idle distil
-- **GIVEN** a forced distil was triggered at time `T_force` and the last idle-path distil occurred at `T_idle`
-- **WHEN** `session.idle` fires at `T_idle + DISTIL_MIN_INTERVAL_MS + 1`
-- **THEN** an idle-path distil is triggered normally, unaffected by `T_force`
+#### Scenario: Idle distil is subject to the throttle after a forced distil
+- **GIVEN** a forced distil completed at time `T_force` (advancing `last_distil_ms = T_force`)
+- **WHEN** `session.idle` fires at `T_force + DISTIL_MIN_INTERVAL_MS - 1` (still inside the window)
+- **THEN** the idle-path distil is skipped by the throttle check
+
+#### Scenario: Idle distil proceeds once the throttle window elapses after a forced distil
+- **GIVEN** a forced distil completed at time `T_force`
+- **WHEN** `session.idle` fires at `T_force + DISTIL_MIN_INTERVAL_MS + 1`
+- **THEN** the idle-path distil is triggered normally
+
+### Requirement: memory_distil_force is a no-op for sessions whose agent does not match TARGET_AGENT
+
+When the caller's session agent (resolved via `session.get`) does not match the plugin-configured `TARGET_AGENT`, `doDistil` returns early without performing any distillation. The tool SHALL return a successful `ToolResult` in this case; the no-op is the accepted contract, consistent with the idle-path behaviour.
+
+#### Scenario: Force distil from a non-target-agent session
+- **GIVEN** the calling session's agent is not `TARGET_AGENT`
+- **WHEN** the agent calls `memory_distil_force`
+- **THEN** the tool returns a successful result without performing distillation
 
 ### Requirement: memory_distil_force has no CLI subcommand form
 

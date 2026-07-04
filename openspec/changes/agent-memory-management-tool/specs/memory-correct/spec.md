@@ -1,8 +1,8 @@
 ## ADDED Requirements
 
-### Requirement: correct applies a partial patch to hot_state in a single transaction
+### Requirement: correct applies a partial patch to hot_state in a single BEGIN IMMEDIATE transaction
 
-The system SHALL read the current `hot_state` row, merge the caller-supplied field patch onto it, and UPSERT the merged record — all within one SQLite transaction — when `correct` is invoked. Fields not present in the patch SHALL retain their current values.
+The system SHALL open a `BEGIN IMMEDIATE` transaction, read the current `hot_state` row, merge the caller-supplied field patch onto it, and UPSERT the merged record — all within that single transaction — when `correct` is invoked. Fields not present in the patch SHALL retain their current values. Patchable fields are `last_worked_summary`, `next_action`, `open_questions`, and `adr_candidate`. `BEGIN IMMEDIATE` is required (not deferred) because the transaction performs a read followed by a write; a deferred BEGIN on a read-first path can fail with `SQLITE_BUSY_SNAPSHOT` when a concurrent `distil-write` holds a write lock, which the configured `busy_timeout` does not retry.
 
 #### Scenario: Single-field patch updates only that field
 - **GIVEN** a `hot_state` row with `last_worked_summary = "S"`, `next_action = "N"`, `open_questions = ["Q"]`, and `adr_candidate = null`
@@ -37,9 +37,9 @@ The system SHALL NOT delete any `memory_signal` rows or advance any `distil_wate
 - **WHEN** `correct` is invoked
 - **THEN** all `memory_signal` rows and the `distil_watermark` row are unchanged
 
-### Requirement: memory_correct plugin tool delegates to the correct CLI subcommand
+### Requirement: memory_correct plugin tool delegates to the correct CLI subcommand using TARGET_AGENT
 
-The `memory_correct` registered tool SHALL invoke `spawnMemory($, ['correct', agent, directory, patchJson])` using the scope from `ToolContext`, and SHALL return a `ToolResult` without propagating exceptions into the opencode host.
+The `memory_correct` registered tool SHALL invoke `spawnMemory($, ['correct', TARGET_AGENT, directory, patchJson])` using `TARGET_AGENT` (the plugin-configured agent dimension) and the `directory` from `ToolContext`, and SHALL return a `ToolResult` without propagating exceptions into the opencode host.
 
 #### Scenario: Tool applies a correction for the calling session's scope
 - **GIVEN** a `hot_state` row exists for the calling session's agent/project
