@@ -1,5 +1,8 @@
-## ADDED Requirements
+# memory-distil-force Specification
 
+## Purpose
+TBD - created by archiving change agent-memory-management-tool. Update Purpose after archive.
+## Requirements
 ### Requirement: memory_distil_force plugin tool triggers an immediate distil bypassing only the throttle
 
 The `memory_distil_force` registered tool SHALL call `doDistil(sessionId, { force: true })` for the session identified by `ToolContext.sessionID`, bypassing the `DISTIL_MIN_INTERVAL_MS` throttle early-return while leaving every other step of the distil path (ephemeral-session creation, signal reduction, LLM call, `distil-write` with monotonic guard) intact.
@@ -19,9 +22,9 @@ The `memory_distil_force` registered tool SHALL call `doDistil(sessionId, { forc
 - **WHEN** the agent calls `memory_distil_force`
 - **THEN** the tool returns an informative error result and does not propagate an unhandled rejection into the opencode host
 
-### Requirement: memory_distil_force shares the distil watermark path but does not change the idle-throttle interval
+### Requirement: memory_distil_force SHALL share the distil watermark path but MUST NOT change the idle-throttle interval
 
-A forced distil runs the identical `distil-write` path as the idle distil and therefore advances `last_distil_ms` in the per-session watermark. The idle-path throttle logic and `DISTIL_MIN_INTERVAL_MS` interval are otherwise unchanged: the idle path continues to compare `now - lastDistilMs` against the same constant, regardless of whether the last write was forced or idle.
+A forced distil SHALL run the identical `distil-write` path as the idle distil and therefore advances `last_distil_ms` in the per-session watermark. The idle-path throttle logic and `DISTIL_MIN_INTERVAL_MS` interval are otherwise unchanged: the idle path continues to compare `now - lastDistilMs` against the same constant, regardless of whether the last write was forced or idle.
 
 #### Scenario: Idle distil is subject to the throttle after a forced distil
 - **GIVEN** a forced distil completed at time `T_force` (advancing `last_distil_ms = T_force`)
@@ -50,3 +53,4 @@ The system SHALL NOT expose a `distil-force` subcommand in `src/memory.js`. The 
 - **GIVEN** the `src/memory.js` CLI is invoked
 - **WHEN** `node memory.js distil-force` is called
 - **THEN** the process exits with a non-zero code and prints the usage line for unknown commands
+
