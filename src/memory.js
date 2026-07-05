@@ -265,7 +265,9 @@ function cmdCorrect(agent, project, patchJsonArg) {
 
     const newUpdatedAt = base.updated_at + 1;
 
-    // UPSERT hot_state — no monotonic guard here (correct always wins)
+    // UPSERT hot_state. The new updated_at = current + 1 is strictly greater
+    // than the existing row (same exclusive transaction), so the monotonic guard
+    // always passes — kept for defence-in-depth per design.md D4.
     db.prepare(`
       INSERT INTO hot_state
         (scope, agent, project, last_worked_summary, next_action,
@@ -278,6 +280,7 @@ function cmdCorrect(agent, project, patchJsonArg) {
         adr_candidate       = excluded.adr_candidate,
         schema_version      = excluded.schema_version,
         updated_at          = excluded.updated_at
+      WHERE excluded.updated_at > hot_state.updated_at
     `).run(
       agent, project,
       merged.last_worked_summary,

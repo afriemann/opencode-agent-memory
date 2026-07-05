@@ -819,14 +819,31 @@ describe('memory_correct tool execute', () => {
     expect(output).toContain('success');
   });
 
-  test('returns error result instead of throwing when spawn fails', async () => {
-    const $ = makeMockShell({}); // no 'correct' key → empty response (ok, won't throw)
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+  test('returns error result instead of throwing when spawn throws', async () => {
+    // Build a $ that throws when the 'correct' subcommand is invoked, simulating
+    // a subprocess exit-code error. All other calls (e.g. 'prune' at startup) return ''.
+    const throwingShell = function (strings, ...values) {
+      const cmd = strings.reduce(
+        (acc, str, i) => acc + str + (values[i] !== undefined ? String(values[i]) : ''),
+        ''
+      );
+      if (cmd.includes('correct')) throw new Error('spawn error: exit code 1');
+      const obj = { quiet: () => obj, text: async () => '' };
+      return obj;
+    };
+    throwingShell.calls = [];
+
+    const plugin = await AgentMemory({ client: makeMockClient(), $: throwingShell });
     const ctx = makeContext();
 
-    await expect(
-      plugin.tool.memory_correct.execute({ patch: { next_action: 'do it' } }, ctx)
-    ).resolves.toBeDefined();
+    const result = await plugin.tool.memory_correct.execute(
+      { patch: { next_action: 'do it' } },
+      ctx
+    );
+
+    // Must resolve (not reject) and return an error result
+    const output = typeof result === 'string' ? result : result.output;
+    expect(output.toLowerCase()).toContain('error');
   });
 
   test('uses TARGET_AGENT (not context.agent) as the agent dimension', async () => {
@@ -882,6 +899,58 @@ describe('memory_distil_force tool execute', () => {
     // to create an ephemeral session (even if it then returns on the throttle
     // path without force). This is the distinguishing behavior.
     expect(client._createCalls).toHaveLength(1);
+  });
+
+  test('forced distil bypasses throttle; subsequent non-forced idle within window remains throttled (W2 spec scenario)', async () => {
+    // Spec: "GIVEN a forced distil completed at T_force (advancing last_distil_ms),
+    //        WHEN session.idle fires within DISTIL_MIN_INTERVAL_MS of T_force,
+    //        THEN the idle-path distil is skipped by the throttle check."
+    //
+    // In the mock, both reads return the same static watermark (last_distil_ms = recent).
+    // This validates: forced call proceeds (1 ephemeral created), then non-forced idle
+    // still reads a recent watermark and is throttled (no second ephemeral).
+    const recentDistilMs = Date.now() - 1000;
+    const throttledRead = JSON.stringify({
+      prior: {
+        scope: 'project', agent: 'engineer', project: '/test/project',
+        last_worked_summary: 'x', next_action: 'y', open_questions: [],
+        adr_candidate: null, anchored_git_sha: null, updated_at: 1,
+      },
+      signals: [],
+      watermark: { last_signal_ms: 0, last_distil_ms: recentDistilMs },
+    });
+
+    const $ = makeMockShell({ read: throttledRead });
+    const client = makeMockClient();
+    const plugin = await AgentMemory({ client, $ });
+
+    // Forced distil — bypasses throttle, creates 1 ephemeral session
+    const ctx = makeContext({ sessionID: 'ses_force_then_idle' });
+    await plugin.tool.memory_distil_force.execute({}, ctx);
+    expect(client._createCalls).toHaveLength(1);
+
+    // Non-forced session.idle — same recent watermark → throttled, no second ephemeral
+    await fire(plugin, 'session.idle', { sessionID: 'ses_force_then_idle' });
+    expect(client._createCalls).toHaveLength(1); // still exactly 1
+  });
+
+  test('non-target-agent session is a no-op returning a successful ToolResult (W3 spec scenario)', async () => {
+    // Spec: "GIVEN the calling session's agent is not TARGET_AGENT,
+    //        WHEN the agent calls memory_distil_force,
+    //        THEN the tool returns a successful result without performing distillation."
+    const $ = makeMockShell({});
+    const client = makeMockClient({
+      sessionGet: () => ({ data: { agent: 'different-agent', directory: '/proj' } }),
+    });
+    const plugin = await AgentMemory({ client, $ });
+
+    const ctx = makeContext({ sessionID: 'ses_non_target_force' });
+    const result = await plugin.tool.memory_distil_force.execute({}, ctx);
+
+    // Must return a ToolResult (not throw)
+    expect(result).toBeDefined();
+    // No ephemeral session should have been created (doDistil returned early)
+    expect(client._createCalls).toHaveLength(0);
   });
 
   test('returns error result instead of throwing when doDistil throws', async () => {
