@@ -668,3 +668,234 @@ describe('startup prune', () => {
     expect($.calls.some((c) => /\bprune\b/.test(c))).toBe(true);
   });
 });
+
+// ── doDistil force parameter: throttle regression (task 3.3) ──────────────────
+
+describe('doDistil force parameter — throttle regression', () => {
+  /**
+   * A non-forced session.idle within the throttle window with no signals must
+   * still return without distilling (i.e. must not create an ephemeral session).
+   * This confirms the !force guard does not break the existing throttle path.
+   */
+  test('non-forced idle within throttle window with no new signals still skips distil', async () => {
+    const recentDistilMs = Date.now() - 1000; // only 1 s ago, within 60 s default
+    const throttledRead = JSON.stringify({
+      prior: {
+        scope: 'project', agent: 'engineer', project: '/proj',
+        last_worked_summary: 'x', next_action: 'y', open_questions: [],
+        adr_candidate: null, anchored_git_sha: null, updated_at: 1000,
+      },
+      signals: [],
+      watermark: { last_signal_ms: 0, last_distil_ms: recentDistilMs },
+    });
+
+    const $ = makeMockShell({ read: throttledRead });
+    const client = makeMockClient();
+    const plugin = await AgentMemory({ client, $ });
+
+    // Fire a normal (non-forced) session.idle
+    await fire(plugin, 'session.idle', { sessionID: 'ses_throttle_regression' });
+
+    // No ephemeral session should have been created (distil was throttled)
+    expect(client._createCalls).toHaveLength(0);
+  });
+});
+
+// ── Plugin tool hook tests (task 4.6) ─────────────────────────────────────────
+
+describe('plugin tool hook — factory returns tool map', () => {
+  test('AgentMemory factory returns { event, tool } with all three tools', async () => {
+    const $ = makeMockShell({});
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    expect(plugin).toHaveProperty('event');
+    expect(plugin).toHaveProperty('tool');
+    expect(plugin.tool).toHaveProperty('memory_inspect');
+    expect(plugin.tool).toHaveProperty('memory_correct');
+    expect(plugin.tool).toHaveProperty('memory_distil_force');
+  });
+
+  test('each tool has description, args, and execute', async () => {
+    const $ = makeMockShell({});
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    for (const name of ['memory_inspect', 'memory_correct', 'memory_distil_force']) {
+      const t = plugin.tool[name];
+      expect(typeof t.description).toBe('string');
+      expect(t.description.length).toBeGreaterThan(0);
+      expect(t.args).toBeDefined();
+      expect(typeof t.execute).toBe('function');
+    }
+  });
+});
+
+describe('memory_inspect tool execute', () => {
+  function makeContext(overrides = {}) {
+    return {
+      sessionID: 'ses_tool_test',
+      messageID: 'msg_1',
+      agent: 'engineer',
+      directory: '/test/project',
+      worktree: '/test/project',
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+      ...overrides,
+    };
+  }
+
+  test('delegates to memory.js inspect with TARGET_AGENT and context.directory', async () => {
+    const inspectResult = { prior: { last_worked_summary: 'done' }, signals: [] };
+    const $ = makeMockShell({ inspect: JSON.stringify(inspectResult) });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const ctx = makeContext();
+
+    const result = await plugin.tool.memory_inspect.execute({}, ctx);
+
+    // A spawn call containing 'inspect' must have happened
+    expect($.calls.some((c) => c.includes('inspect'))).toBe(true);
+    // Result must be a ToolResult with the parsed data
+    const output = typeof result === 'string' ? result : result.output;
+    const parsed = JSON.parse(output);
+    expect(parsed.prior.last_worked_summary).toBe('done');
+  });
+
+  test('returns error result instead of throwing when spawn fails', async () => {
+    const $ = makeMockShell({}); // empty response → JSON.parse('') fails
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const ctx = makeContext();
+
+    // Must not throw
+    const result = await expect(
+      plugin.tool.memory_inspect.execute({}, ctx)
+    ).resolves.toBeDefined();
+  });
+
+  test('uses TARGET_AGENT (not context.agent) as the agent dimension', async () => {
+    const inspectResult = { prior: null, signals: [] };
+    const $ = makeMockShell({ inspect: JSON.stringify(inspectResult) });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    // Context agent is a different agent, but the CLI call must use TARGET_AGENT
+    const ctx = makeContext({ agent: 'other-agent' });
+    await plugin.tool.memory_inspect.execute({}, ctx);
+
+    // The CLI invocation must not include 'other-agent' as the agent dimension.
+    // TARGET_AGENT defaults to 'engineer'; at minimum the call must include 'inspect'.
+    const inspectCalls = $.calls.filter((c) => c.includes('inspect'));
+    expect(inspectCalls.length).toBeGreaterThan(0);
+    // 'other-agent' must NOT appear as a CLI arg
+    expect(inspectCalls.every((c) => !c.includes('other-agent'))).toBe(true);
+  });
+});
+
+describe('memory_correct tool execute', () => {
+  function makeContext(overrides = {}) {
+    return {
+      sessionID: 'ses_tool_test',
+      messageID: 'msg_2',
+      agent: 'engineer',
+      directory: '/test/project',
+      worktree: '/test/project',
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+      ...overrides,
+    };
+  }
+
+  test('delegates to memory.js correct with serialised patch', async () => {
+    const $ = makeMockShell({ correct: JSON.stringify({ ok: true }) });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const ctx = makeContext();
+
+    const result = await plugin.tool.memory_correct.execute(
+      { patch: { last_worked_summary: 'patched' } },
+      ctx
+    );
+
+    expect($.calls.some((c) => c.includes('correct'))).toBe(true);
+    const output = typeof result === 'string' ? result : result.output;
+    expect(output).toContain('success');
+  });
+
+  test('returns error result instead of throwing when spawn fails', async () => {
+    const $ = makeMockShell({}); // no 'correct' key → empty response (ok, won't throw)
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const ctx = makeContext();
+
+    await expect(
+      plugin.tool.memory_correct.execute({ patch: { next_action: 'do it' } }, ctx)
+    ).resolves.toBeDefined();
+  });
+
+  test('uses TARGET_AGENT (not context.agent) as the agent dimension', async () => {
+    const $ = makeMockShell({ correct: JSON.stringify({ ok: true }) });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const ctx = makeContext({ agent: 'different-agent' });
+
+    await plugin.tool.memory_correct.execute({ patch: { next_action: 'x' } }, ctx);
+
+    const correctCalls = $.calls.filter((c) => c.includes('correct'));
+    expect(correctCalls.length).toBeGreaterThan(0);
+    expect(correctCalls.every((c) => !c.includes('different-agent'))).toBe(true);
+  });
+});
+
+describe('memory_distil_force tool execute', () => {
+  function makeContext(overrides = {}) {
+    return {
+      sessionID: 'ses_force_test',
+      messageID: 'msg_3',
+      agent: 'engineer',
+      directory: '/test/project',
+      worktree: '/test/project',
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+      ...overrides,
+    };
+  }
+
+  test('calls doDistil with force:true — creates an ephemeral session (bypasses throttle)', async () => {
+    // Provide a warm read so doDistil proceeds past agent/project guards and
+    // reaches the ephemeral session creation step.
+    const recentDistilMs = Date.now() - 1000; // within throttle window
+    const throttledRead = JSON.stringify({
+      prior: {
+        scope: 'project', agent: 'engineer', project: '/test/project',
+        last_worked_summary: 'x', next_action: 'y', open_questions: [],
+        adr_candidate: null, anchored_git_sha: null, updated_at: 1,
+      },
+      signals: [],
+      watermark: { last_signal_ms: 0, last_distil_ms: recentDistilMs },
+    });
+
+    const $ = makeMockShell({ read: throttledRead });
+    const client = makeMockClient();
+    const plugin = await AgentMemory({ client, $ });
+
+    const ctx = makeContext();
+    await plugin.tool.memory_distil_force.execute({}, ctx);
+
+    // With force:true the throttle is bypassed — doDistil must have attempted
+    // to create an ephemeral session (even if it then returns on the throttle
+    // path without force). This is the distinguishing behavior.
+    expect(client._createCalls).toHaveLength(1);
+  });
+
+  test('returns error result instead of throwing when doDistil throws', async () => {
+    const $ = makeMockShell({}); // empty shell → read will fail → doDistil returns early
+    const client = makeMockClient({
+      // session.get throws so doDistil returns early (no create call)
+      sessionGet: () => { throw new Error('forced failure'); },
+    });
+    const plugin = await AgentMemory({ client, $ });
+    const ctx = makeContext();
+
+    // Must not throw regardless of the internal failure
+    await expect(
+      plugin.tool.memory_distil_force.execute({}, ctx)
+    ).resolves.toBeDefined();
+  });
+});

@@ -90,15 +90,67 @@ node src/memory.js read <sessionId> <agent> <project>
   stdout: { "prior": {...}|null, "signals": [...], "watermark": {...} }
   Read the latest hot state, all scratch signals, and the session watermark.
 
+node src/memory.js inspect <agent> <project>
+  stdout: { "prior": {...}|null, "signals": [...] }
+  Non-destructive read of hot state and signals. No watermark, no row mutations.
+  Used by the memory_inspect plugin tool.
+
 node src/memory.js distil-write <agent> <project>
   stdin: { "distilled": {...}, "anchoredSha": string|null, "lastSignalMs": number, "sessionId": string }
   UPSERT hot_state (monotonic guard), delete consumed signals, advance watermark.
   Runs in a single transaction.
 
+node src/memory.js correct <agent> <project> <patchJson>
+  patchJson: partial JSON object — any subset of:
+    { "last_worked_summary": string, "next_action": string,
+      "open_questions": string[], "adr_candidate": string|null }
+  Applies a partial correction to the hot state using BEGIN IMMEDIATE.
+  Only supplied fields are changed; all others keep their current values.
+  Does NOT delete signals or advance the distil watermark.
+  Used by the memory_correct plugin tool.
+
 node src/memory.js prune
   stdout: { "pruned": N }
   Delete memory_signal rows older than 30 days.
 ```
+
+> **Note:** `distil-force` has **no CLI form**. Forced distillation can only be triggered via the `memory_distil_force` plugin tool (which calls `doDistil` in-process). Passing `distil-force` as a subcommand exits with an error.
+
+## Plugin tools
+
+The plugin exposes three tools under the `tool` key returned by the `AgentMemory` factory. All three tools key the agent dimension on `TARGET_AGENT` (not the calling session's agent), consistent with the single-agent store design.
+
+### `memory_inspect`
+
+Read the current hot state and signals for the current project. Non-destructive — no row is inserted, updated, or deleted.
+
+| — | — |
+|---|---|
+| Args | *(none)* |
+| Returns | JSON string `{ prior: {...}|null, signals: [...] }` |
+| CLI equivalent | `node src/memory.js inspect <TARGET_AGENT> <context.directory>` |
+
+### `memory_correct`
+
+Apply a partial correction to the hot state. Only the fields included in `patch` are updated; omitted fields retain their current values. Uses `BEGIN IMMEDIATE` to prevent conflicts with concurrent distil writes.
+
+| Arg | Type | Required | Description |
+|---|---|---|---|
+| `patch.last_worked_summary` | `string` | No | Summary of work done so far |
+| `patch.next_action` | `string` | No | Recommended next action |
+| `patch.open_questions` | `string[]` | No | Open questions or blockers |
+| `patch.adr_candidate` | `string \| null` | No | Architecture decision candidate, or `null` to clear |
+
+Does **not** delete signals or advance the distil watermark.
+
+### `memory_distil_force`
+
+Force an immediate memory distillation for the current session, bypassing the idle throttle window. All other guards still apply (ephemeral skip, TARGET\_AGENT check). The forced distil shares the per-session watermark and may advance `last_distil_ms`.
+
+| — | — |
+|---|---|
+| Args | *(none)* |
+| CLI equivalent | **None.** Only available as a plugin tool (requires in-process `client`). |
 
 ## Known limitations
 

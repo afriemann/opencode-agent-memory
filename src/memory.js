@@ -17,10 +17,21 @@
 //     stdout: { prior: row|null, signals: row[], watermark: { last_signal_ms, last_distil_ms } }
 //     Read the latest hot_state + all scratch signals + watermark for this session.
 //
+//   inspect <agent> <project>
+//     stdout: { prior: row|null, signals: row[] }
+//     Non-destructive read of hot_state + signals. No watermark, no row mutations.
+//
 //   distil-write <agent> <project> <jsonData>
 //     jsonData: JSON string { distilled: {…}, anchoredSha: string|null, lastSignalMs: number, sessionId: string }
 //     UPSERT hot_state (monotonic guard), delete consumed signals, advance watermark.
 //     All three steps run in a single transaction.
+//
+//   correct <agent> <project> <patchJson>
+//     patchJson: partial JSON object with any of: last_worked_summary, next_action,
+//                open_questions, adr_candidate. Absent fields keep current values.
+//     Opens a BEGIN IMMEDIATE transaction to avoid SQLITE_BUSY_SNAPSHOT on concurrent
+//     distil-write. UPSERTs hot_state with updated_at = current + 1.
+//     Does NOT delete signals or advance the watermark.
 //
 //   prune
 //     Delete memory_signal rows older than 30 days. Idempotent.
@@ -28,6 +39,7 @@
 import { openDb } from './lib/db.js';
 import { ensureSchema } from './lib/schema.js';
 import { readDistilWatermark, advanceDistilWatermark } from './lib/watermark.js';
+import { EMPTY_RECORD } from './lib/distil-prompt.js';
 
 // ── DB bootstrap ────────────────────────────────────────────────────────────
 
@@ -133,6 +145,158 @@ function cmdRead(sessionId, agent, project) {
   db.close();
 
   process.stdout.write(JSON.stringify({ prior, signals, watermark }) + '\n');
+}
+
+function cmdInspect(agent, project) {
+  const db = openAndInit();
+
+  // Read hot_state for (scope='project', agent, project) — same query as cmdRead
+  const priorRow = db
+    .prepare(`
+      SELECT id, scope, agent, project,
+             last_worked_summary, next_action, open_questions,
+             adr_candidate, anchored_git_sha, schema_version, updated_at
+      FROM hot_state
+      WHERE scope = 'project' AND agent = ? AND project = ?
+    `)
+    .get(agent, project);
+
+  let prior = null;
+  if (priorRow) {
+    let open_questions = [];
+    try {
+      open_questions = priorRow.open_questions ? JSON.parse(priorRow.open_questions) : [];
+    } catch { /* leave as [] */ }
+    prior = { ...priorRow, open_questions };
+  }
+
+  // Read all signals for (scope='project', agent, project) — same query as cmdRead
+  const signals = db
+    .prepare(`
+      SELECT id, session_id, scope, agent, project, kind, payload, created_at
+      FROM memory_signal
+      WHERE scope = 'project' AND agent = ? AND project = ?
+      ORDER BY created_at ASC
+    `)
+    .all(agent, project);
+
+  db.close();
+
+  process.stdout.write(JSON.stringify({ prior, signals }) + '\n');
+}
+
+function cmdCorrect(agent, project, patchJsonArg) {
+  let patch;
+  try {
+    patch = JSON.parse(patchJsonArg);
+  } catch {
+    process.stderr.write('[agent-memory/correct] invalid JSON argument\n');
+    process.exit(1);
+  }
+
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+    process.stderr.write('[agent-memory/correct] patch must be a JSON object\n');
+    process.exit(1);
+  }
+
+  // Validate field types for any provided fields (same shape checks as parseDistilReply)
+  if ('last_worked_summary' in patch && typeof patch.last_worked_summary !== 'string') {
+    process.stderr.write('[agent-memory/correct] last_worked_summary must be a string\n');
+    process.exit(1);
+  }
+  if ('next_action' in patch && typeof patch.next_action !== 'string') {
+    process.stderr.write('[agent-memory/correct] next_action must be a string\n');
+    process.exit(1);
+  }
+  if ('adr_candidate' in patch && patch.adr_candidate !== null && typeof patch.adr_candidate !== 'string') {
+    process.stderr.write('[agent-memory/correct] adr_candidate must be a string or null\n');
+    process.exit(1);
+  }
+  if ('open_questions' in patch && !Array.isArray(patch.open_questions)) {
+    process.stderr.write('[agent-memory/correct] open_questions must be an array\n');
+    process.exit(1);
+  }
+
+  const db = openAndInit();
+
+  // BEGIN IMMEDIATE: prevents SQLITE_BUSY_SNAPSHOT when a concurrent distil-write
+  // holds a write lock. A deferred BEGIN + read-first path cannot upgrade to a
+  // write lock if another writer is active; IMMEDIATE acquires the write lock
+  // upfront, allowing busy_timeout to retry before failing.
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    // Read current hot_state row inside the transaction
+    const currentRow = db
+      .prepare(`
+        SELECT last_worked_summary, next_action, open_questions,
+               adr_candidate, anchored_git_sha, updated_at
+        FROM hot_state
+        WHERE scope = 'project' AND agent = ? AND project = ?
+      `)
+      .get(agent, project);
+
+    // Base values: current row or EMPTY_RECORD defaults for a cold start.
+    // Cold-start updated_at base = 0 so first correct writes updated_at = 1.
+    let baseOpenQuestions = EMPTY_RECORD.open_questions;
+    if (currentRow) {
+      try {
+        baseOpenQuestions = currentRow.open_questions
+          ? JSON.parse(currentRow.open_questions)
+          : [];
+      } catch { /* leave as [] */ }
+    }
+
+    const base = {
+      last_worked_summary: currentRow?.last_worked_summary ?? EMPTY_RECORD.last_worked_summary,
+      next_action:         currentRow?.next_action         ?? EMPTY_RECORD.next_action,
+      open_questions:      baseOpenQuestions,
+      adr_candidate:       currentRow?.adr_candidate       ?? EMPTY_RECORD.adr_candidate,
+      anchored_git_sha:    currentRow?.anchored_git_sha    ?? null,
+      updated_at:          currentRow?.updated_at          ?? 0,
+    };
+
+    // Merge patch onto base (absent fields keep current values)
+    const merged = {
+      last_worked_summary: 'last_worked_summary' in patch ? patch.last_worked_summary : base.last_worked_summary,
+      next_action:         'next_action'         in patch ? patch.next_action         : base.next_action,
+      open_questions:      'open_questions'      in patch ? patch.open_questions      : base.open_questions,
+      adr_candidate:       'adr_candidate'       in patch ? patch.adr_candidate       : base.adr_candidate,
+    };
+
+    const newUpdatedAt = base.updated_at + 1;
+
+    // UPSERT hot_state — no monotonic guard here (correct always wins)
+    db.prepare(`
+      INSERT INTO hot_state
+        (scope, agent, project, last_worked_summary, next_action,
+         open_questions, adr_candidate, anchored_git_sha, schema_version, updated_at)
+      VALUES ('project', ?, ?, ?, ?, ?, ?, ?, 1, ?)
+      ON CONFLICT(scope, agent, project) DO UPDATE SET
+        last_worked_summary = excluded.last_worked_summary,
+        next_action         = excluded.next_action,
+        open_questions      = excluded.open_questions,
+        adr_candidate       = excluded.adr_candidate,
+        schema_version      = excluded.schema_version,
+        updated_at          = excluded.updated_at
+    `).run(
+      agent, project,
+      merged.last_worked_summary,
+      merged.next_action,
+      JSON.stringify(merged.open_questions),
+      merged.adr_candidate,
+      base.anchored_git_sha,
+      newUpdatedAt
+    );
+
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+
+  db.close();
+
+  process.stdout.write(JSON.stringify({ ok: true }) + '\n');
 }
 
 async function cmdDistilWrite(agent, project, jsonArg) {
@@ -265,6 +429,16 @@ switch (cmd) {
     break;
   }
 
+  case 'inspect': {
+    const [agent, project] = rest;
+    if (!agent || !project) {
+      process.stderr.write('Usage: memory.js inspect <agent> <project>\n');
+      process.exit(1);
+    }
+    cmdInspect(agent, project);
+    break;
+  }
+
   case 'distil-write': {
     const [agent, project, jsonArg] = rest;
     if (!agent || !project || !jsonArg) {
@@ -279,9 +453,19 @@ switch (cmd) {
     cmdPrune();
     break;
 
+  case 'correct': {
+    const [agent, project, patchJsonArg] = rest;
+    if (!agent || !project || !patchJsonArg) {
+      process.stderr.write('Usage: memory.js correct <agent> <project> <patchJson>\n');
+      process.exit(1);
+    }
+    cmdCorrect(agent, project, patchJsonArg);
+    break;
+  }
+
   default:
     process.stderr.write(
-      `Usage: memory.js <init|accrue|read|distil-write|prune> [args]\n`
+      `Usage: memory.js <init|accrue|read|inspect|distil-write|correct|prune> [args]\n`
     );
     process.exit(1);
 }

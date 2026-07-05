@@ -13,6 +13,7 @@
 // Safety: every step is wrapped in try/catch; failures degrade to "no
 // capture / no injection" for that session and never throw into opencode.
 
+import { tool } from '@opencode-ai/plugin';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
@@ -191,7 +192,7 @@ const AgentMemory = async ({ client, $ }) => {
 
   // ── Idle-distil worker (component 3) ──────────────────────────────────────
 
-  async function doDistil(sessionId) {
+  async function doDistil(sessionId, { force = false } = {}) {
     // Skip known ephemeral distil sessions.
     if (ephemerals.has(sessionId)) return;
 
@@ -230,12 +231,13 @@ const AgentMemory = async ({ client, $ }) => {
 
     const { prior, signals: storedSignals, watermark } = state;
 
-    // Throttle check (in-memory only, no DB).
+    // Throttle check (in-memory only, no DB). Skipped when force === true.
     const now = Date.now();
     const buf = buffers.get(sessionId);
     const bufEmpty = !buf || bufferIsEmpty(buf);
     const lastDistilMs = watermark ? (watermark.last_distil_ms ?? 0) : 0;
     if (
+      !force &&
       now - lastDistilMs < DISTIL_MIN_INTERVAL_MS &&
       (storedSignals ?? []).length === 0 &&
       bufEmpty
@@ -373,6 +375,102 @@ const AgentMemory = async ({ client, $ }) => {
       ephemerals.delete(ephId);
     }
   }
+
+  // ── Plugin tools (component 5) ────────────────────────────────────────────
+
+  /**
+   * memory_inspect — non-destructive read of the current hot state + signals.
+   * The agent dimension is always TARGET_AGENT (single-agent store invariant).
+   */
+  const memory_inspect = tool({
+    description:
+      'Read the current agent memory state (hot state + signals) for the current project. ' +
+      'Non-destructive — does not insert, update, or delete any database row.',
+    args: {},
+    async execute(_args, context) {
+      try {
+        const out = await spawnMemory($, ['inspect', TARGET_AGENT, context.directory]);
+        const result = JSON.parse(out.trim());
+        return {
+          title: 'memory_inspect',
+          output: JSON.stringify(result, null, 2),
+        };
+      } catch (err) {
+        return {
+          title: 'memory_inspect',
+          output: `Error reading memory: ${err && err.message ? err.message : String(err)}`,
+        };
+      }
+    },
+  });
+
+  /**
+   * memory_correct — apply a partial patch to the hot state.
+   * Only supplied fields are updated; all others keep their current values.
+   * The agent dimension is always TARGET_AGENT.
+   */
+  const memory_correct = tool({
+    description:
+      'Apply a partial correction to the agent memory hot state. ' +
+      'Only fields included in `patch` are updated; omitted fields are unchanged. ' +
+      'Does not delete signals or advance the distil watermark.',
+    args: {
+      patch: tool.schema.object({
+        last_worked_summary: tool.schema.string().optional().describe('Summary of work done so far'),
+        next_action: tool.schema.string().optional().describe('Recommended next action'),
+        open_questions: tool.schema
+          .array(tool.schema.string())
+          .optional()
+          .describe('Open questions or blockers'),
+        adr_candidate: tool.schema
+          .string()
+          .nullable()
+          .optional()
+          .describe('Architecture decision candidate, or null to clear'),
+      }).describe('Partial patch. Include only the fields you want to change.'),
+    },
+    async execute({ patch }, context) {
+      try {
+        const patchJson = JSON.stringify(patch);
+        await spawnMemory($, ['correct', TARGET_AGENT, context.directory, patchJson]);
+        return {
+          title: 'memory_correct',
+          output: 'Memory corrected successfully.',
+        };
+      } catch (err) {
+        return {
+          title: 'memory_correct',
+          output: `Error correcting memory: ${err && err.message ? err.message : String(err)}`,
+        };
+      }
+    },
+  });
+
+  /**
+   * memory_distil_force — force an immediate distillation, bypassing the throttle.
+   * There is no CLI form for this tool; it can only be invoked in-process.
+   */
+  const memory_distil_force = tool({
+    description:
+      'Force an immediate memory distillation for the current session, bypassing the idle ' +
+      'throttle window. All other guards (ephemeral skip, TARGET_AGENT check) still apply. ' +
+      'The distil-force subcommand has no CLI form; only this plugin tool triggers it.',
+    args: {},
+    async execute(_args, context) {
+      try {
+        await doDistil(context.sessionID, { force: true });
+        return {
+          title: 'memory_distil_force',
+          output: 'Distillation triggered.',
+        };
+      } catch (err) {
+        return {
+          title: 'memory_distil_force',
+          output: `Error during forced distil: ${err && err.message ? err.message : String(err)}`,
+        };
+      }
+    },
+  });
 
   // ── Event router (component 1) ─────────────────────────────────────────────
 
@@ -532,6 +630,7 @@ const AgentMemory = async ({ client, $ }) => {
         log(`event handler error for ${event.type}`, err);
       }
     },
+    tool: { memory_inspect, memory_correct, memory_distil_force },
   };
 };
 
