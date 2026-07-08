@@ -634,12 +634,13 @@ const AgentMemory = async ({ client, $ }) => {
     config: async (cfg) => {
       cfg.agent ??= {};
       // Register a hidden no-tool agent used for ephemeral distil sub-sessions.
-      // permission: 'deny' is the scalar deny-all form (per opencode PermissionConfig).
+      // Agent-level permission must be an object; { '*': 'deny' } uses the
+      // wildcard key so whollyDisabled() returns true for every tool.
       // ??= avoids clobbering a user-defined 'distiller' agent.
       cfg.agent['distiller'] ??= {
         mode: 'subagent',
         hidden: true,
-        permission: 'deny',
+        permission: { '*': 'deny' },
       };
     },
   };

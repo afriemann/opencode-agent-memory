@@ -877,7 +877,7 @@ describe('config hook — distiller agent registration', () => {
     expect(cfg.agent['distiller']).toMatchObject({
       mode: 'subagent',
       hidden: true,
-      permission: 'deny',
+      permission: { '*': 'deny' },
     });
   });
 

@@ -33,7 +33,7 @@ The `doDistil` internal function SHALL accept an optional second argument `{ for
 
 ### Requirement: Plugin factory returns a config hook that registers a hidden distiller agent
 
-The `AgentMemory` factory SHALL return an object that includes a `config` hook in addition to the existing `event` and `tool` keys. When invoked, the `config` hook SHALL add a key `distiller` to `cfg.agent` (creating the map if absent) with `mode: 'subagent'`, `hidden: true`, and `permission: 'deny'` (the scalar deny-all form). The hook SHALL use a non-destructive assignment (`??=`) so a user-defined `distiller` agent in their config is not overwritten.
+The `AgentMemory` factory SHALL return an object that includes a `config` hook in addition to the existing `event` and `tool` keys. When invoked, the `config` hook SHALL add a key `distiller` to `cfg.agent` (creating the map if absent) with `mode: 'subagent'`, `hidden: true`, and `permission: { '*': 'deny' }` (object form with wildcard key — the scalar string form is not valid for agent-level PermissionConfig). The hook SHALL use a non-destructive assignment (`??=`) so a user-defined `distiller` agent in their config is not overwritten.
 
 #### Scenario: config hook is present on the returned hooks object
 - **WHEN** the `AgentMemory` factory resolves
@@ -41,7 +41,7 @@ The `AgentMemory` factory SHALL return an object that includes a `config` hook i
 
 #### Scenario: config hook registers the distiller agent
 - **WHEN** `plugin.config({})` is called with an empty config object
-- **THEN** `cfg.agent.distiller` is defined with `mode: 'subagent'`, `hidden: true`, and `permission === 'deny'`
+- **THEN** `cfg.agent.distiller` is defined with `mode: 'subagent'`, `hidden: true`, and `permission['*'] === 'deny'`
 
 #### Scenario: config hook does not overwrite existing agent entries
 - **WHEN** `plugin.config({ agent: { engineer: { existing: true } } })` is called
