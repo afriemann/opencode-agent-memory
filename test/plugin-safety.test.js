@@ -78,6 +78,7 @@ function makeMockClient(overrides = {}) {
   const deleteCalls = [];
   const getCalls = [];
 
+  const createBodies = [];
   const client = {
     session: {
       // Accept v1 format { path: { id } } and v2 format { sessionID } for compatibility.
@@ -91,6 +92,7 @@ function makeMockClient(overrides = {}) {
       create: async (options) => {
         const title = options?.body?.title ?? options?.title;
         createCalls.push(title);
+        createBodies.push(options?.body ?? {});
         return overrides.sessionCreate?.(title) ?? { data: { id: 'eph_test' } };
       },
       prompt: async (options) => {
@@ -115,6 +117,7 @@ function makeMockClient(overrides = {}) {
     },
     _promptCalls: promptCalls,
     _createCalls: createCalls,
+    _createBodies: createBodies,
     _deleteCalls: deleteCalls,
     _getCalls: getCalls,
   };
@@ -856,6 +859,45 @@ describe('memory_correct tool execute', () => {
     const correctCalls = $.calls.filter((c) => c.includes('correct'));
     expect(correctCalls.length).toBeGreaterThan(0);
     expect(correctCalls.every((c) => !c.includes('different-agent'))).toBe(true);
+  });
+});
+
+// ── config hook and distiller agent (distil-session-tool-restriction) ─────────
+
+describe('config hook — distiller agent registration', () => {
+  test('AgentMemory factory returns a config hook', async () => {
+    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
+    expect(typeof plugin.config).toBe('function');
+  });
+  test('config hook registers distiller agent with mode, hidden, and deny-all permission', async () => {
+    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
+    const cfg = {};
+    await plugin.config(cfg);
+    expect(cfg.agent).toBeDefined();
+    expect(cfg.agent['distiller']).toMatchObject({
+      mode: 'subagent',
+      hidden: true,
+      permission: 'deny',
+    });
+  });
+
+  test('config hook does not overwrite existing agent entries', async () => {
+    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
+    const cfg = { agent: { engineer: { existing: true } } };
+    await plugin.config(cfg);
+    expect(cfg.agent.engineer).toEqual({ existing: true });
+    expect(cfg.agent['distiller']).toBeDefined();
+  });
+
+  test('session.create is called with agent: distiller on distil', async () => {
+    const $ = makeMockShell({ read: WARM_READ });
+    const client = makeMockClient();
+    const plugin = await AgentMemory({ client, $ });
+
+    await fire(plugin, 'session.idle', { sessionID: 'ses_distil_agent_check' });
+
+    expect(client._createCalls).toHaveLength(1);
+    expect(client._createBodies[0]?.agent).toBe('distiller');
   });
 });
 
