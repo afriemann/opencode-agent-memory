@@ -285,7 +285,7 @@ const AgentMemory = async ({ client, $ }) => {
     // Create ephemeral distil sub-session.
     let ephId;
     try {
-      const created = await client.session.create({ body: { title: EPHEMERAL_TITLE } });
+      const created = await client.session.create({ body: { title: EPHEMERAL_TITLE, agent: 'distiller' } });
       ephId = created && created.data && created.data.id;
       if (!ephId) throw new Error('no session id in create response');
       // Add to ephemerals IMMEDIATELY after receiving the ID — before any
@@ -631,6 +631,17 @@ const AgentMemory = async ({ client, $ }) => {
       }
     },
     tool: { memory_inspect, memory_correct, memory_distil_force },
+    config: async (cfg) => {
+      cfg.agent ??= {};
+      // Register a hidden no-tool agent used for ephemeral distil sub-sessions.
+      // permission: 'deny' is the scalar deny-all form (per opencode PermissionConfig).
+      // ??= avoids clobbering a user-defined 'distiller' agent.
+      cfg.agent['distiller'] ??= {
+        mode: 'subagent',
+        hidden: true,
+        permission: 'deny',
+      };
+    },
   };
 };
 
