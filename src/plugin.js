@@ -23,7 +23,11 @@ import {
   parseDistilReply,
 } from './lib/distil-prompt.js';
 import { gitRevParse, gitStaleness } from './lib/git-helper.js';
-import { assemblePrimer, reduceSignals } from './lib/signal-utils.js';
+import {
+  assemblePrimer,
+  reduceSignals,
+  lastTwoSegments,
+} from './lib/signal-utils.js';
 import { loadConfigFile, resolveConfig } from './lib/config.js';
 
 // ── Static config ────────────────────────────────────────────────────────────
@@ -128,11 +132,11 @@ const AgentMemory = async ({ client, $ }) => {
   spawnMemory($, ['prune']).catch(() => {});
 
   // ── Per-process mutable state ──────────────────────────────────────────────
-  const inFlight = new Set();   // sessionIDs with a pending distil queued/running
-  const injected = new Set();   // sessionIDs already primed this process lifetime
-  const priming = new Set();    // sessionIDs where injectPrimer is currently in flight
-  const ephemerals = new Set(); // distiller sub-session IDs (skip injection + idle)
-  const buffers = new Map();    // sessionId → { files, todos, messages }
+  const inFlight = new Set();       // sessionIDs with a pending distil queued/running
+  const primerLoaded = new Set();   // sessionIDs where a memory load has been attempted
+  const primers = new Map();        // sessionId → assembled primer text (warm sessions only)
+  const ephemerals = new Set();     // distiller sub-session IDs (skip injection + idle)
+  const buffers = new Map();        // sessionId → { files, todos, messages }
   // Last active session for file.edited attribution (heuristic — see I5).
   // NOTE: This is a single-worktree approximation; multi-worktree concurrency
   // may misattribute edits. Acceptable for Phase-1 scope; see README limitations.
@@ -145,16 +149,17 @@ const AgentMemory = async ({ client, $ }) => {
   // ── Injection module (component 4) ────────────────────────────────────────
 
   /**
-   * Inject the memory primer into a session exactly once per process lifetime.
-   * Guards against duplicate injection from concurrent event dispatch (W2 fix):
-   * both `injected` (settled) and `priming` (in-flight) are checked before
-   * starting. `injected.add` runs in `finally` so the session is always marked
-   * as consumed even on error.
+   * Load the memory primer for a session into the in-process `primers` Map.
+   * Populates the cache exactly once per session (guarded by `primerLoaded`).
+   * Cold-start sessions (no prior hot_state) are added to `primerLoaded` but
+   * receive no `primers` entry — preserving the `primerLoaded ⊇ keys(primers)`
+   * invariant so repeated message.updated events don't re-spawn the DB read.
+   *
+   * No `session.prompt` call is made. Injection is handled by the
+   * `experimental.chat.system.transform` hook on every subsequent LLM call.
    */
-  async function injectPrimer(sessionId, agent, project) {
-    if (injected.has(sessionId)) return;
-    if (priming.has(sessionId)) return; // concurrent-dispatch guard (W2 fix)
-    priming.add(sessionId);
+  async function loadMemoryForSession(sessionId, agent, project) {
+    if (primerLoaded.has(sessionId)) return;
 
     try {
       // Read prior hot_state + watermark from CLI (never opens DB directly).
@@ -167,26 +172,20 @@ const AgentMemory = async ({ client, $ }) => {
         return;
       }
 
-      // Cold start: no prior memory → no injection; session proceeds normally.
+      // Cold start: no prior memory → no primer cached; session proceeds normally.
       if (!state.prior) return;
 
       const storedSha = state.prior.anchored_git_sha ?? null;
       const staleness = await gitStaleness($, project, storedSha);
       const primer = assemblePrimer(state.prior, agent, project, staleness);
 
-      await client.session.prompt({
-        path: { id: sessionId },
-        body: {
-          noReply: true,
-          parts: [{ type: 'text', text: primer }],
-        },
-      });
+      primers.set(sessionId, primer);
+      log(`primer loaded for session ${sessionId} in ${lastTwoSegments(project)} (${primer.length} chars)`);
     } catch (err) {
       log(`inject: failed for ${sessionId}`, err);
     } finally {
-      // Mark injected regardless of outcome — one attempt per session lifetime.
-      injected.add(sessionId);
-      priming.delete(sessionId); // clear in-flight guard (W2 fix)
+      // Mark load-attempted regardless of outcome — prevents re-read on cold start.
+      primerLoaded.add(sessionId);
     }
   }
 
@@ -213,9 +212,9 @@ const AgentMemory = async ({ client, $ }) => {
     if (agent && agent !== TARGET_AGENT) return;
     if (!project) return;
 
-    // Fallback inject: prime the session if it hasn't been primed yet.
-    if (!injected.has(sessionId)) {
-      await injectPrimer(sessionId, TARGET_AGENT, project);
+    // Fallback load: cache the primer for this session if not yet attempted.
+    if (!primerLoaded.has(sessionId)) {
+      await loadMemoryForSession(sessionId, TARGET_AGENT, project);
     }
 
     // Read prior + signals + watermark (watermark is returned by the CLI, no
@@ -391,9 +390,10 @@ const AgentMemory = async ({ client, $ }) => {
       try {
         const out = await spawnMemory($, ['inspect', TARGET_AGENT, context.directory]);
         const result = JSON.parse(out.trim());
+        const activePrimer = primers.get(context.sessionID) ?? null;
         return {
           title: 'memory_inspect',
-          output: JSON.stringify(result, null, 2),
+          output: JSON.stringify({ ...result, active_primer: activePrimer }, null, 2),
         };
       } catch (err) {
         return {
@@ -497,8 +497,8 @@ const AgentMemory = async ({ client, $ }) => {
 
             // Skip sessions we already know are ephemeral.
             if (ephemerals.has(sessionId)) return;
-            // Skip sessions already primed this process lifetime.
-            if (injected.has(sessionId)) return;
+            // Skip sessions where memory load has already been attempted.
+            if (primerLoaded.has(sessionId)) return;
 
             // Resolve agent + directory from the event payload.
             // The SDK's Session type carries both fields on EventSessionCreated.
@@ -521,7 +521,7 @@ const AgentMemory = async ({ client, $ }) => {
             if (agent && agent !== TARGET_AGENT) return;
             if (!project) return;
 
-            await injectPrimer(sessionId, TARGET_AGENT, project);
+            await loadMemoryForSession(sessionId, TARGET_AGENT, project);
             break;
           }
 
@@ -604,20 +604,19 @@ const AgentMemory = async ({ client, $ }) => {
               }
             }
 
-            // Fallback inject (W9 fix / §4): if the session was not primed by
-            // session.created (e.g. on resume), prime it on the first qualifying
-            // message.
-            if (!injected.has(sessionId)) {
+            // Fallback load (W9 fix / §4): if the session was not loaded by
+            // session.created (e.g. on resume), load it on the first message.
+            if (!primerLoaded.has(sessionId)) {
               try {
                 const got = await client.session.get({ path: { id: sessionId } });
                 const data = got && got.data;
                 const agent = data && data.agent;
                 const project = data && data.directory;
                 if ((!agent || agent === TARGET_AGENT) && project) {
-                  await injectPrimer(sessionId, TARGET_AGENT, project);
+                  await loadMemoryForSession(sessionId, TARGET_AGENT, project);
                 }
               } catch (err) {
-                log(`message.updated: fallback inject failed for ${sessionId}`, err);
+                log(`message.updated: fallback load failed for ${sessionId}`, err);
               }
             }
             break;
@@ -631,6 +630,32 @@ const AgentMemory = async ({ client, $ }) => {
       }
     },
     tool: { memory_inspect, memory_correct, memory_distil_force },
+    /**
+     * Inject the memory primer into the LLM system prompt on every call for
+     * sessions with a cached prior record. Guards in order:
+     *   (a) sessionID must be present in hook input (it is optional per SDK)
+     *   (b) skip ephemeral distil sessions
+     *   (c) skip sessions with no cached primer (cold start or unloaded resume)
+     * The whole body is wrapped in try/catch — failures degrade to no-injection
+     * (consistent with the plugin's global safety contract).
+     *
+     * NOTE: output.system is assumed to be a fresh array per LLM call per the
+     * transform-hook contract. Confirmed at implementation time (task 3.4) —
+     * no idempotent-append guard is needed.
+     */
+    'experimental.chat.system.transform': async (input, output) => {
+      let sessionID;
+      try {
+        ({ sessionID } = input ?? {});
+        if (!sessionID) return;
+        if (ephemerals.has(sessionID)) return;
+        const primer = primers.get(sessionID);
+        if (!primer) return;
+        output.system.push(primer);
+      } catch (err) {
+        log(`system.transform: error for session ${sessionID ?? '(unknown)'}`, err);
+      }
+    },
     config: async (cfg) => {
       cfg.agent ??= {};
       // Register a hidden no-tool agent used for ephemeral distil sub-sessions.
