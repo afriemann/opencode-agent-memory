@@ -144,7 +144,7 @@ const AgentMemory = async ({ client, $ }) => {
   let queue = Promise.resolve(); // Serialized promise chain
 
   const log = (msg, err) =>
-    console.error(`[agent-memory] ${msg}${err ? `: ${err}` : ''}`);
+    process.stderr.write(`[agent-memory] ${msg}${err ? `: ${err instanceof Error ? err.stack ?? err.message : err}` : ''}\n`);
 
   // ── Injection module (component 4) ────────────────────────────────────────
 

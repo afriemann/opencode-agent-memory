@@ -830,7 +830,7 @@ describe('primerLoaded ⊇ keys(primers) invariant', () => {
 
 describe('primer load log-line emission', () => {
   test('emits [agent-memory] primer loaded log line for a warm session', async () => {
-    const spy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const spy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
       const $ = makeMockShell({ read: WARM_READ });
       const client = makeMockClient();
@@ -853,7 +853,7 @@ describe('primer load log-line emission', () => {
   });
 
   test('does not emit a primer loaded log line for a cold-start session', async () => {
-    const spy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const spy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
       const $ = makeMockShell({ read: COLD_READ });
       const client = makeMockClient();
