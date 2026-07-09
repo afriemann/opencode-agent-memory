@@ -180,7 +180,6 @@ const AgentMemory = async ({ client, $ }) => {
       const primer = assemblePrimer(state.prior, agent, project, staleness);
 
       primers.set(sessionId, primer);
-      log(`primer loaded for session ${sessionId} in ${lastTwoSegments(project)} (${primer.length} chars)`);
     } catch (err) {
       log(`inject: failed for ${sessionId}`, err);
     } finally {

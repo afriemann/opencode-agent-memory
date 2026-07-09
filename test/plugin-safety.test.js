@@ -829,7 +829,7 @@ describe('primerLoaded ⊇ keys(primers) invariant', () => {
 // ── Primer load log-line emission ─────────────────────────────────────────────
 
 describe('primer load log-line emission', () => {
-  test('emits [agent-memory] primer loaded log line for a warm session', async () => {
+  test('loads primer silently for a warm session (no log on success path)', async () => {
     const spy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
       const $ = makeMockShell({ read: WARM_READ });
@@ -841,12 +841,13 @@ describe('primer load log-line emission', () => {
         info: { agent: 'engineer', directory: '/home/user/repos/my/project', title: null },
       });
 
+      // Success path must be silent — no "primer loaded" log line.
       const logCalls = spy.mock.calls.map((c) => String(c[0]));
-      const loaderLine = logCalls.find((s) => s.includes('primer loaded'));
-      expect(loaderLine).toBeDefined();
-      expect(loaderLine).toContain('ses_log_test');
-      expect(loaderLine).toContain('my/project');
-      expect(loaderLine).toMatch(/\d+ chars/);
+      expect(logCalls.some((s) => s.includes('primer loaded'))).toBe(false);
+
+      // Primer was still loaded: system.transform injects it.
+      const system = await invokeSystemTransform(plugin, 'ses_log_test');
+      expect(system.length).toBeGreaterThan(0);
     } finally {
       spy.mockRestore();
     }
