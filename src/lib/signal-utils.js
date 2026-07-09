@@ -13,7 +13,7 @@ export const MAX_SIGNALS_PER_KIND = 20;
 // ── Primer assembly ──────────────────────────────────────────────────────────
 
 /** Return the last two path segments of an absolute path for display. */
-function lastTwoSegments(absPath) {
+export function lastTwoSegments(absPath) {
   if (!absPath) return String(absPath);
   const parts = absPath.replace(/\/+$/, '').split('/');
   return parts.slice(-2).join('/');
@@ -39,11 +39,13 @@ export function assemblePrimer(prior, agent, project, staleness) {
   const stalenessLine = renderStaleness(staleness);
 
   const lines = [
-    `[MEMORY — resumed context for ${agent} in ${displayProject}]`,
+    `## Project memory — ${displayProject} (background context — no action required)`,
     '',
-    `Where we left off: ${summary}`,
+    "This is a snapshot from your last session. Wait for the user's request before taking any action.",
     '',
-    `Next action: ${nextAction}`,
+    `Last session: ${summary}`,
+    '',
+    `Suggested next step: ${nextAction}`,
     '',
   ];
 
@@ -63,10 +65,6 @@ export function assemblePrimer(prior, agent, project, staleness) {
   }
 
   lines.push(`Staleness: ${stalenessLine}`);
-  lines.push('');
-  lines.push(
-    'This memory is a hypothesis, not ground truth. Before making any change, replay your understanding of the next action and the open questions back to me, reconcile it against the current code and git state, and get my confirmation first.'
-  );
 
   return lines.join('\n');
 }

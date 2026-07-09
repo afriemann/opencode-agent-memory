@@ -139,31 +139,31 @@ describe('gitStaleness', () => {
 describe('renderStaleness', () => {
   test('ok status renders N commits phrasing', () => {
     const s = renderStaleness({ status: 'ok', distance: 5 });
-    expect(s).toBe('5 commits since this note — reconcile before trusting');
+    expect(s).toBe('5 commit(s) since this note');
   });
 
   test('ok status distance 0 renders zero commits', () => {
     const s = renderStaleness({ status: 'ok', distance: 0 });
-    expect(s).toBe('0 commits since this note — reconcile before trusting');
+    expect(s).toBe('0 commit(s) since this note');
   });
 
   test('no-anchor status renders unavailable phrasing', () => {
     const s = renderStaleness({ status: 'no-anchor' });
-    expect(s).toBe('git anchor unavailable — verify against current code');
+    expect(s).toBe('git anchor unavailable');
   });
 
   test('no-git status renders unavailable phrasing', () => {
     const s = renderStaleness({ status: 'no-git' });
-    expect(s).toBe('git anchor unavailable — verify against current code');
+    expect(s).toBe('git anchor unavailable');
   });
 
   test('diverged status renders history-diverged phrasing', () => {
     const s = renderStaleness({ status: 'diverged' });
-    expect(s).toBe('history diverged since this note — reconcile before trusting');
+    expect(s).toBe("history diverged from this note's anchor");
   });
 
   test('null staleness renders unavailable phrasing', () => {
     const s = renderStaleness(null);
-    expect(s).toBe('git anchor unavailable — verify against current code');
+    expect(s).toBe('git anchor unavailable');
   });
 });

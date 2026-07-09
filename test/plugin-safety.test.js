@@ -4,6 +4,7 @@
 // Every failure mode from §9 is covered; no real DB or git is used.
 
 import AgentMemory from '../src/plugin.js';
+import { jest } from '@jest/globals';
 import { reduceSignals, assemblePrimer, MAX_SIGNALS_PER_KIND } from '../src/lib/signal-utils.js';
 import { renderStaleness } from '../src/lib/git-helper.js';
 
@@ -129,10 +130,21 @@ async function fire(plugin, type, properties) {
   await plugin.event({ event: { type, properties } });
 }
 
+/**
+ * Invoke the `experimental.chat.system.transform` hook for a session and
+ * return the resulting system-prompt array.  Returns [] if the hook is absent.
+ */
+async function invokeSystemTransform(plugin, sessionID, model = {}) {
+  const output = { system: [] };
+  const hook = plugin['experimental.chat.system.transform'];
+  if (hook) await hook({ sessionID, model }, output);
+  return output.system;
+}
+
 // ── Injection idempotency ────────────────────────────────────────────────────
 
 describe('injection idempotency', () => {
-  test('injects exactly once when session.created fires twice for the same session', async () => {
+  test('loads primer exactly once when session.created fires twice for the same session', async () => {
     const $ = makeMockShell({ read: WARM_READ });
     const client = makeMockClient();
     const plugin = await AgentMemory({ client, $ });
@@ -144,12 +156,22 @@ describe('injection idempotency', () => {
     await fire(plugin, 'session.created', props);
     await fire(plugin, 'session.created', props); // duplicate
 
-    // Only one noReply prompt for the primer
-    const primerCalls = client._promptCalls.filter((c) => c.body?.noReply);
-    expect(primerCalls).toHaveLength(1);
+    // Primer is NOT injected via session.prompt (noReply)
+    const noReplyCalls = client._promptCalls.filter((c) => c.body?.noReply);
+    expect(noReplyCalls).toHaveLength(0);
+
+    // Primer IS available via system.transform (exactly once — not doubled on duplicate events)
+    const system1 = await invokeSystemTransform(plugin, 'ses_001');
+    expect(system1).toHaveLength(1);
+    expect(typeof system1[0]).toBe('string');
+    expect(system1[0].length).toBeGreaterThan(0);
+
+    // A fresh output.system is always exactly 1 push — not accumulated
+    const system2 = await invokeSystemTransform(plugin, 'ses_001');
+    expect(system2).toHaveLength(1);
   });
 
-  test('does not inject for cold start (no prior memory)', async () => {
+  test('does not load primer for cold start (no prior memory)', async () => {
     const $ = makeMockShell({ read: COLD_READ });
     const client = makeMockClient();
     const plugin = await AgentMemory({ client, $ });
@@ -159,8 +181,13 @@ describe('injection idempotency', () => {
       info: { agent: 'engineer', directory: '/home/user/repos/my/project', title: null },
     });
 
-    const primerCalls = client._promptCalls.filter((c) => c.body?.noReply);
-    expect(primerCalls).toHaveLength(0);
+    // No injection via session.prompt
+    const noReplyCalls = client._promptCalls.filter((c) => c.body?.noReply);
+    expect(noReplyCalls).toHaveLength(0);
+
+    // system.transform returns empty for cold-start session
+    const system = await invokeSystemTransform(plugin, 'ses_cold');
+    expect(system).toHaveLength(0);
   });
 });
 
@@ -185,7 +212,7 @@ describe('(agent, project) keying', () => {
     expect(primerCalls).toHaveLength(0);
   });
 
-  test('two sessions in different projects each get their own injection', async () => {
+  test('two sessions in different projects each get their own primer', async () => {
     // Use separate read responses keyed by project path presence
     const $ = makeMockShell({ read: WARM_READ });
     const client = makeMockClient();
@@ -200,11 +227,15 @@ describe('(agent, project) keying', () => {
       info: { agent: 'engineer', directory: '/proj/b', title: null },
     });
 
-    const primerCalls = client._promptCalls.filter((c) => c.body?.noReply);
-    expect(primerCalls).toHaveLength(2);
-    const injectedSessions = primerCalls.map((c) => c.id);
-    expect(injectedSessions).toContain('ses_proj_a');
-    expect(injectedSessions).toContain('ses_proj_b');
+    // Neither session should inject via session.prompt
+    const noReplyCalls = client._promptCalls.filter((c) => c.body?.noReply);
+    expect(noReplyCalls).toHaveLength(0);
+
+    // Both sessions have primers available via system.transform
+    const systemA = await invokeSystemTransform(plugin, 'ses_proj_a');
+    const systemB = await invokeSystemTransform(plugin, 'ses_proj_b');
+    expect(systemA).toHaveLength(1);
+    expect(systemB).toHaveLength(1);
   });
 });
 
@@ -275,7 +306,7 @@ describe('idle-distil throttle', () => {
 // ── Fallback inject on message.updated ───────────────────────────────────────
 
 describe('fallback inject on message.updated', () => {
-  test('injects primer when session was not primed by session.created', async () => {
+  test('loads primer when session was not primed by session.created', async () => {
     const $ = makeMockShell({ read: WARM_READ });
     const client = makeMockClient();
     const plugin = await AgentMemory({ client, $ });
@@ -286,13 +317,17 @@ describe('fallback inject on message.updated', () => {
       info: { role: 'user', text: 'hello, continue the work' },
     });
 
-    // Should have triggered a primer injection
-    const primerCalls = client._promptCalls.filter((c) => c.body?.noReply);
-    expect(primerCalls).toHaveLength(1);
-    expect(primerCalls[0].id).toBe('ses_resumed');
+    // No injection via session.prompt
+    const noReplyCalls = client._promptCalls.filter((c) => c.body?.noReply);
+    expect(noReplyCalls).toHaveLength(0);
+
+    // Primer IS available via system.transform after the fallback load
+    const system = await invokeSystemTransform(plugin, 'ses_resumed');
+    expect(system).toHaveLength(1);
+    expect(typeof system[0]).toBe('string');
   });
 
-  test('does not inject twice when message.updated fires after session.created primed the session', async () => {
+  test('does not load primer twice when message.updated fires after session.created primed the session', async () => {
     const $ = makeMockShell({ read: WARM_READ });
     const client = makeMockClient();
     const plugin = await AgentMemory({ client, $ });
@@ -303,14 +338,19 @@ describe('fallback inject on message.updated', () => {
       info: { agent: 'engineer', directory: '/proj', title: null },
     });
 
-    // message.updated fires afterward — should NOT re-inject
+    // message.updated fires afterward — should NOT re-load
     await fire(plugin, 'message.updated', {
       sessionID: 'ses_already_primed',
       info: { role: 'user', text: 'continue' },
     });
 
-    const primerCalls = client._promptCalls.filter((c) => c.body?.noReply);
-    expect(primerCalls).toHaveLength(1); // still exactly one
+    // No injection via session.prompt at all
+    const noReplyCalls = client._promptCalls.filter((c) => c.body?.noReply);
+    expect(noReplyCalls).toHaveLength(0);
+
+    // Primer available exactly once (not accumulated from duplicate loads)
+    const system = await invokeSystemTransform(plugin, 'ses_already_primed');
+    expect(system).toHaveLength(1);
   });
 });
 
@@ -566,25 +606,30 @@ describe('assemblePrimer', () => {
     adr_candidate: null,
   };
 
-  test('includes the header with agent and last-two-segments of project', () => {
+  test('includes the passive header with project shortname', () => {
     const result = assemblePrimer(
       BASE_PRIOR,
       'engineer',
       '/home/user/repos/my/project',
       { status: 'ok', distance: 2 }
     );
-    expect(result).toContain('[MEMORY — resumed context for engineer in my/project]');
+    expect(result).toContain('## Project memory — my/project (background context — no action required)');
+    // Old imperative header must not appear
+    expect(result).not.toContain('[MEMORY — resumed context');
   });
 
-  test('includes last_worked_summary and next_action', () => {
+  test('uses passive labels for last_worked_summary and next_action', () => {
     const result = assemblePrimer(
       BASE_PRIOR,
       'engineer',
       '/proj/repo',
       { status: 'ok', distance: 0 }
     );
-    expect(result).toContain('Where we left off: implemented the widget');
-    expect(result).toContain('Next action: write widget tests');
+    expect(result).toContain('Last session: implemented the widget');
+    expect(result).toContain('Suggested next step: write widget tests');
+    // Old imperative labels must not appear
+    expect(result).not.toContain('Where we left off:');
+    expect(result).not.toContain('Next action:');
   });
 
   test('renders open_questions as bullets when non-empty', () => {
@@ -632,33 +677,198 @@ describe('assemblePrimer', () => {
     }
   });
 
-  test('teach-back directive is present in every primer', () => {
+  test('passive closing line present; no investigation instructions', () => {
     const result = assemblePrimer(BASE_PRIOR, 'engineer', '/proj/repo', { status: 'ok', distance: 0 });
-    expect(result).toContain('This memory is a hypothesis, not ground truth');
-    expect(result).toContain('replay your understanding');
-    expect(result).toContain('get my confirmation first');
+    // Passive orientation line
+    expect(result).toContain('Wait for the user');
+    // Old imperative investigation paragraph must be gone
+    expect(result).not.toContain('This memory is a hypothesis, not ground truth');
+    expect(result).not.toContain('replay your understanding');
+    expect(result).not.toContain('get my confirmation first');
+    expect(result).not.toContain('reconcile');
   });
 
-  test('slot order: header → summary → next_action → questions → ADR → staleness → teach-back', () => {
+  test('slot order: header → closing → summary → next_action → questions → ADR → staleness', () => {
     const prior = {
       ...BASE_PRIOR,
       adr_candidate: 'consider ADR: test',
     };
     const result = assemblePrimer(prior, 'engineer', '/proj/repo', { status: 'ok', distance: 1 });
-    const headerIdx    = result.indexOf('[MEMORY');
-    const summaryIdx   = result.indexOf('Where we left off');
-    const actionIdx    = result.indexOf('Next action');
+    const headerIdx    = result.indexOf('## Project memory');
+    const closingIdx   = result.indexOf('Wait for the user');
+    const summaryIdx   = result.indexOf('Last session');
+    const actionIdx    = result.indexOf('Suggested next step');
     const questionsIdx = result.indexOf('Open questions');
     const adrIdx       = result.indexOf('Possible decision');
     const stalenessIdx = result.indexOf('Staleness:');
-    const teachIdx     = result.indexOf('This memory is a hypothesis');
 
-    expect(headerIdx).toBeLessThan(summaryIdx);
+    expect(headerIdx).toBeLessThan(closingIdx);
+    expect(closingIdx).toBeLessThan(summaryIdx);
     expect(summaryIdx).toBeLessThan(actionIdx);
     expect(actionIdx).toBeLessThan(questionsIdx);
     expect(questionsIdx).toBeLessThan(adrIdx);
     expect(adrIdx).toBeLessThan(stalenessIdx);
-    expect(stalenessIdx).toBeLessThan(teachIdx);
+  });
+});
+
+// ── experimental.chat.system.transform hook ──────────────────────────────────
+
+describe('experimental.chat.system.transform hook', () => {
+  test('hook is present on the returned hooks object', async () => {
+    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
+    expect(typeof plugin['experimental.chat.system.transform']).toBe('function');
+  });
+
+  test('appends primer to output.system after session.created with prior memory', async () => {
+    const $ = makeMockShell({ read: WARM_READ });
+    const client = makeMockClient();
+    const plugin = await AgentMemory({ client, $ });
+
+    await fire(plugin, 'session.created', {
+      sessionID: 'ses_transform_warm',
+      info: { agent: 'engineer', directory: '/home/user/repos/my/project', title: null },
+    });
+
+    const system = await invokeSystemTransform(plugin, 'ses_transform_warm');
+    expect(system).toHaveLength(1);
+    expect(system[0]).toContain('background context');
+    expect(system[0]).toContain('Suggested next step');
+  });
+
+  test('does not append when session has no cached primer (cold start)', async () => {
+    const $ = makeMockShell({ read: COLD_READ });
+    const client = makeMockClient();
+    const plugin = await AgentMemory({ client, $ });
+
+    await fire(plugin, 'session.created', {
+      sessionID: 'ses_transform_cold',
+      info: { agent: 'engineer', directory: '/proj', title: null },
+    });
+
+    const system = await invokeSystemTransform(plugin, 'ses_transform_cold');
+    expect(system).toHaveLength(0);
+  });
+
+  test('does not append when sessionID is absent from hook input', async () => {
+    const $ = makeMockShell({ read: WARM_READ });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    const output = { system: [] };
+    const hook = plugin['experimental.chat.system.transform'];
+    // sessionID is undefined
+    await hook({ model: {} }, output);
+    expect(output.system).toHaveLength(0);
+  });
+
+  test('does not append for an ephemeral distil session', async () => {
+    const $ = makeMockShell({ read: WARM_READ });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    // Register the session as ephemeral via session.created with ephemeral title
+    await fire(plugin, 'session.created', {
+      sessionID: 'eph_transform',
+      info: { agent: undefined, directory: '/proj', title: 'agent-memory distil' },
+    });
+
+    const system = await invokeSystemTransform(plugin, 'eph_transform');
+    expect(system).toHaveLength(0);
+  });
+
+  test('does not throw on any error in hook body; leaves output.system empty', async () => {
+    // Build a plugin then corrupt the primers Map to simulate an internal error.
+    // The hook must not propagate the error.
+    const $ = makeMockShell({ read: WARM_READ });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    // Load the primer normally
+    await fire(plugin, 'session.created', {
+      sessionID: 'ses_hook_safe',
+      info: { agent: 'engineer', directory: '/proj', title: null },
+    });
+
+    // Force an error by passing a non-object output (hook must not throw)
+    const hook = plugin['experimental.chat.system.transform'];
+    await expect(
+      hook({ sessionID: 'ses_hook_safe', model: {} }, null)
+    ).resolves.not.toThrow();
+  });
+});
+
+// ── Cold-start primerLoaded ⊇ keys(primers) invariant ────────────────────────
+
+describe('primerLoaded ⊇ keys(primers) invariant', () => {
+  test('cold-start session is load-attempted (no re-read on message.updated) but has no primer', async () => {
+    const $ = makeMockShell({ read: COLD_READ });
+    const client = makeMockClient();
+    const plugin = await AgentMemory({ client, $ });
+
+    // session.created fires for cold start
+    await fire(plugin, 'session.created', {
+      sessionID: 'ses_cold_inv',
+      info: { agent: 'engineer', directory: '/proj', title: null },
+    });
+
+    // Subsequent message.updated must NOT trigger another DB read
+    const readCallsBefore = $.calls.filter((c) => c.includes(' read ')).length;
+
+    await fire(plugin, 'message.updated', {
+      sessionID: 'ses_cold_inv',
+      info: { role: 'user', text: 'hello' },
+    });
+
+    const readCallsAfter = $.calls.filter((c) => c.includes(' read ')).length;
+    // No additional read for the already-attempted session
+    expect(readCallsAfter).toBe(readCallsBefore);
+
+    // And system.transform still returns empty (no primer for this cold-start session)
+    const system = await invokeSystemTransform(plugin, 'ses_cold_inv');
+    expect(system).toHaveLength(0);
+  });
+});
+
+// ── Primer load log-line emission ─────────────────────────────────────────────
+
+describe('primer load log-line emission', () => {
+  test('emits [agent-memory] primer loaded log line for a warm session', async () => {
+    const spy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const $ = makeMockShell({ read: WARM_READ });
+      const client = makeMockClient();
+      const plugin = await AgentMemory({ client, $ });
+
+      await fire(plugin, 'session.created', {
+        sessionID: 'ses_log_test',
+        info: { agent: 'engineer', directory: '/home/user/repos/my/project', title: null },
+      });
+
+      const logCalls = spy.mock.calls.map((c) => String(c[0]));
+      const loaderLine = logCalls.find((s) => s.includes('primer loaded'));
+      expect(loaderLine).toBeDefined();
+      expect(loaderLine).toContain('ses_log_test');
+      expect(loaderLine).toContain('my/project');
+      expect(loaderLine).toMatch(/\d+ chars/);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('does not emit a primer loaded log line for a cold-start session', async () => {
+    const spy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const $ = makeMockShell({ read: COLD_READ });
+      const client = makeMockClient();
+      const plugin = await AgentMemory({ client, $ });
+
+      await fire(plugin, 'session.created', {
+        sessionID: 'ses_log_cold',
+        info: { agent: 'engineer', directory: '/home/user/repos/my/project', title: null },
+      });
+
+      const logCalls = spy.mock.calls.map((c) => String(c[0]));
+      expect(logCalls.some((s) => s.includes('primer loaded'))).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 
@@ -761,6 +971,50 @@ describe('memory_inspect tool execute', () => {
     const output = typeof result === 'string' ? result : result.output;
     const parsed = JSON.parse(output);
     expect(parsed.prior.last_worked_summary).toBe('done');
+  });
+
+  test('active_primer is null when no primer is cached for the session', async () => {
+    const inspectResult = { prior: null, signals: [] };
+    const $ = makeMockShell({ inspect: JSON.stringify(inspectResult) });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    // No session.created fired — no primer loaded
+    const ctx = makeContext({ sessionID: 'ses_no_primer' });
+
+    const result = await plugin.tool.memory_inspect.execute({}, ctx);
+    const output = typeof result === 'string' ? result : result.output;
+    const parsed = JSON.parse(output);
+    expect(parsed.active_primer).toBeNull();
+  });
+
+  test('active_primer equals the cached primer text when a primer was loaded', async () => {
+    const inspectResult = { prior: { last_worked_summary: 'done' }, signals: [] };
+    const $ = makeMockShell({
+      read: WARM_READ,
+      inspect: JSON.stringify(inspectResult),
+    });
+    const client = makeMockClient();
+    const plugin = await AgentMemory({ client, $ });
+
+    // Load primer via session.created
+    await fire(plugin, 'session.created', {
+      sessionID: 'ses_with_primer',
+      info: { agent: 'engineer', directory: '/home/user/repos/my/project', title: null },
+    });
+
+    // memory_inspect must return active_primer matching what system.transform would inject
+    const ctx = makeContext({ sessionID: 'ses_with_primer' });
+    const result = await plugin.tool.memory_inspect.execute({}, ctx);
+    const output = typeof result === 'string' ? result : result.output;
+    const parsed = JSON.parse(output);
+
+    expect(typeof parsed.active_primer).toBe('string');
+    expect(parsed.active_primer.length).toBeGreaterThan(0);
+    expect(parsed.active_primer).toContain('background context');
+    expect(parsed.active_primer).toContain('Suggested next step');
+
+    // Must be identical to what system.transform would inject
+    const system = await invokeSystemTransform(plugin, 'ses_with_primer');
+    expect(system[0]).toBe(parsed.active_primer);
   });
 
   test('returns error result instead of throwing when spawn fails', async () => {

@@ -1,31 +1,4 @@
-# memory-inspect Specification
-
-## Purpose
-TBD - created by archiving change agent-memory-management-tool. Update Purpose after archive.
-## Requirements
-### Requirement: inspect returns hot_state and pending signals without modifying any row
-
-The system SHALL return the current `hot_state` row (all fields) and all `memory_signal` rows for the given `(agent, project)` scope when `inspect` is invoked, and SHALL NOT insert, update, or delete any row in any table as a side-effect.
-
-#### Scenario: Hot state and signals both exist
-- **GIVEN** a `hot_state` row and one or more `memory_signal` rows exist for the given agent/project scope
-- **WHEN** `node memory.js inspect <agent> <project>` is invoked
-- **THEN** stdout contains a JSON object `{ prior: <hot_state row>, signals: [<signal rows>] }` with all fields present
-
-#### Scenario: Cold start — no hot_state row
-- **GIVEN** no `hot_state` row exists for the given agent/project scope
-- **WHEN** `node memory.js inspect <agent> <project>` is invoked
-- **THEN** stdout contains `{ prior: null, signals: [] }` (or the signals array populated if any signals exist)
-
-#### Scenario: Hot state exists but no pending signals
-- **GIVEN** a `hot_state` row exists but no `memory_signal` rows are pending for the scope
-- **WHEN** `node memory.js inspect <agent> <project>` is invoked
-- **THEN** stdout contains `{ prior: <hot_state row>, signals: [] }`
-
-#### Scenario: No rows are inserted, updated, or deleted by inspect
-- **GIVEN** any combination of `hot_state`, `memory_signal`, and `distil_watermark` rows
-- **WHEN** `node memory.js inspect <agent> <project>` is invoked
-- **THEN** no row is inserted, updated, or deleted in any of the three tables
+## MODIFIED Requirements
 
 ### Requirement: memory_inspect plugin tool delegates to the inspect CLI subcommand using TARGET_AGENT
 
@@ -51,6 +24,8 @@ The `memory_inspect` registered tool SHALL invoke `spawnMemory($, ['inspect', TA
 - **WHEN** the agent calls the `memory_inspect` tool
 - **THEN** the tool returns an informative error result and does not propagate an unhandled rejection into the opencode host
 
+## ADDED Requirements
+
 ### Requirement: assemblePrimer produces passive background-context framing
 
 The `assemblePrimer` function in `src/lib/signal-utils.js` SHALL produce primer text that uses passive, non-imperative language throughout. The output SHALL:
@@ -69,4 +44,3 @@ The `assemblePrimer` function in `src/lib/signal-utils.js` SHALL produce primer 
 #### Scenario: No investigation instruction in primer
 - **WHEN** `assemblePrimer` is called with any prior record
 - **THEN** the returned string does not contain phrases like "reconcile", "replay your understanding", or "get my confirmation"
-

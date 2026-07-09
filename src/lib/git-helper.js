@@ -65,18 +65,18 @@ export async function gitStaleness($, project, storedSha) {
  * @returns {string}
  */
 export function renderStaleness(staleness) {
-  if (!staleness) return 'git anchor unavailable — verify against current code';
+  if (!staleness) return 'git anchor unavailable';
 
   switch (staleness.status) {
     case 'ok': {
       const n = staleness.distance ?? 0;
-      return `${n} commits since this note — reconcile before trusting`;
+      return `${n} commit(s) since this note`;
     }
     case 'no-anchor':
     case 'no-git':
-      return 'git anchor unavailable — verify against current code';
+      return 'git anchor unavailable';
     case 'diverged':
     default:
-      return 'history diverged since this note — reconcile before trusting';
+      return 'history diverged from this note\'s anchor';
   }
 }
