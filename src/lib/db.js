@@ -27,9 +27,11 @@ export function openDb(path) {
   if (dir) mkdirSync(dir, { recursive: true });
 
   const db = new DatabaseSync(dbPath);
+  // Set busy_timeout FIRST so it is active before WAL mode is established
+  // (WAL requires a write lock on first creation; without the timeout already
+  // in place a concurrent open could fail immediately with SQLITE_BUSY).
+  db.exec('PRAGMA busy_timeout = 5000;');
   // WAL mode allows concurrent readers even during a write (multiple CLI processes).
   db.exec('PRAGMA journal_mode = WAL;');
-  // Wait up to 5 s for a write lock instead of failing immediately.
-  db.exec('PRAGMA busy_timeout = 5000;');
   return db;
 }

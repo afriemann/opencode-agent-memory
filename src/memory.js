@@ -407,6 +407,7 @@ function cmdPrune() {
 
 const [,, cmd, ...rest] = process.argv;
 
+try {
 switch (cmd) {
   case 'init':
     cmdInit();
@@ -471,4 +472,8 @@ switch (cmd) {
       `Usage: memory.js <init|accrue|read|inspect|distil-write|correct|prune> [args]\n`
     );
     process.exit(1);
+}
+} catch (err) {
+  process.stderr.write(`[memory.js] ${cmd ?? 'unknown'} failed: ${err?.message ?? err}\n`);
+  process.exit(1);
 }

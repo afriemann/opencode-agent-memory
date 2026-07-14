@@ -143,8 +143,54 @@ const AgentMemory = async ({ client, $ }) => {
   let lastActiveSessionId = null;
   let queue = Promise.resolve(); // Serialized promise chain
 
-  const log = (msg, err) =>
-    process.stderr.write(`[agent-memory] ${msg}${err ? `: ${err instanceof Error ? err.stack ?? err.message : err}` : ''}\n`);
+  /**
+   * Log an error-level message to the opencode session log via client.app.log.
+   * Falls back to process.stderr.write if the client call throws synchronously
+   * or rejects asynchronously (e.g. during startup or when the server is
+   * unavailable).
+   *
+   * When `err` is a Bun ShellError (or any Error-like with a `.stderr` Buffer),
+   * the child-process stderr is appended to the message so failures in
+   * memory.js are fully visible without a separate stderr scan.
+   *
+   * Fire-and-forget: never awaited so it cannot block the plugin's hot paths.
+   */
+  const log = (msg, err) => {
+    const errDetail = err
+      ? `: ${err instanceof Error ? err.stack ?? err.message : err}`
+      : '';
+    const stderrDetail = err?.stderr
+      ? `\n${err.stderr.toString().trim()}`
+      : '';
+    const message = `[agent-memory] ${msg}${errDetail}${stderrDetail}`;
+    try {
+      const result = client.app.log({ body: { service: 'agent-memory', level: 'error', message } });
+      // client.app.log is an HTTP call and may return a rejected Promise; ensure
+      // any async rejection also falls back to stderr rather than going unhandled.
+      result?.catch?.(() => process.stderr.write(message + '\n'));
+    } catch {
+      process.stderr.write(message + '\n');
+    }
+  };
+
+  /**
+   * Surface a critical plugin error as an in-TUI toast notification so the
+   * user sees it without needing to inspect log files.
+   *
+   * Prepends "agent-memory: " to every message so toast consumers can identify
+   * the source without the call site needing to repeat the prefix.
+   *
+   * Fire-and-forget and never throws — a toast failure must not propagate.
+   */
+  const notify = (msg) => {
+    try {
+      const result = client.tui.showToast({ body: { message: `agent-memory: ${msg}`, variant: 'error' } });
+      // showToast is an HTTP call; suppress any async rejection silently.
+      result?.catch?.(() => {});
+    } catch {
+      // Intentionally silent — toast is best-effort.
+    }
+  };
 
   // ── Injection module (component 4) ────────────────────────────────────────
 
@@ -169,6 +215,7 @@ const AgentMemory = async ({ client, $ }) => {
         state = JSON.parse(out.trim());
       } catch (err) {
         log(`inject: read failed for ${sessionId}`, err);
+        notify(`inject read failed for session ${sessionId}`);
         return;
       }
 
@@ -224,6 +271,7 @@ const AgentMemory = async ({ client, $ }) => {
       state = JSON.parse(out.trim());
     } catch (err) {
       log(`distil: read failed for ${sessionId}`, err);
+      notify(`distil read failed for session ${sessionId}`);
       return;
     }
 
@@ -626,6 +674,7 @@ const AgentMemory = async ({ client, $ }) => {
         }
       } catch (err) {
         log(`event handler error for ${event.type}`, err);
+        notify(`event handler error for ${event.type}`);
       }
     },
     tool: { memory_inspect, memory_correct, memory_distil_force },

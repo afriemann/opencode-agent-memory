@@ -16,7 +16,7 @@ import { renderStaleness } from '../src/lib/git-helper.js';
  * @param {Record<string, string|object>} responses — key is substring to match,
  *   value is the text to return (objects are JSON.stringified).
  */
-function makeMockShell(responses = {}) {
+function makeMockShell(responses = {}, throwFor = {}) {
   const calls = [];
 
   const $ = function (strings, ...values) {
@@ -25,6 +25,20 @@ function makeMockShell(responses = {}) {
       ''
     );
     calls.push(cmd);
+
+    // Check if this command should throw (for error-path testing).
+    for (const [pattern, errConfig] of Object.entries(throwFor)) {
+      if (cmd.includes(pattern)) {
+        const err = Object.assign(new Error(errConfig.message ?? 'shell error'), {
+          stderr: errConfig.stderr != null ? Buffer.from(errConfig.stderr) : undefined,
+        });
+        const obj = {
+          quiet: () => obj,
+          text: () => Promise.reject(err),
+        };
+        return obj;
+      }
+    }
 
     let output = '';
     for (const [pattern, value] of Object.entries(responses)) {
@@ -78,8 +92,10 @@ function makeMockClient(overrides = {}) {
   const createCalls = [];
   const deleteCalls = [];
   const getCalls = [];
-
   const createBodies = [];
+  const appLogCalls = [];
+  const toastCalls = [];
+
   const client = {
     session: {
       // Accept v1 format { path: { id } } and v2 format { sessionID } for compatibility.
@@ -116,11 +132,26 @@ function makeMockClient(overrides = {}) {
         return {};
       },
     },
+    app: {
+      log: jest.fn((options) => {
+        appLogCalls.push(options?.body ?? options);
+        if (overrides.appLogThrows) throw new Error('app.log unavailable');
+        return overrides.appLog?.(options) ?? {};
+      }),
+    },
+    tui: {
+      showToast: jest.fn(async (options) => {
+        toastCalls.push(options?.body ?? options);
+        return {};
+      }),
+    },
     _promptCalls: promptCalls,
     _createCalls: createCalls,
     _createBodies: createBodies,
     _deleteCalls: deleteCalls,
     _getCalls: getCalls,
+    _appLogCalls: appLogCalls,
+    _toastCalls: toastCalls,
   };
   return client;
 }
@@ -1263,5 +1294,152 @@ describe('memory_distil_force tool execute', () => {
     await expect(
       plugin.tool.memory_distil_force.execute({}, ctx)
     ).resolves.toBeDefined();
+  });
+});
+
+// ── error observability (fix-error-observability spec scenarios) ──────────────
+//
+// RED-STEP tests: these fail before the implementation and pass after.
+// Scenarios from openspec/changes/fix-error-observability/specs/error-observability/spec.md
+
+describe('error observability', () => {
+  // EO-S1: log() routes to client.app.log instead of stderr
+  test('log() calls client.app.log (not process.stderr.write) on error', async () => {
+    // Empty shell → JSON.parse('') throws → log('inject: read failed ...') or
+    // log('distil: read failed ...') is invoked.
+    const $ = makeMockShell({});
+    const client = makeMockClient();
+    const stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const plugin = await AgentMemory({ client, $ });
+      await fire(plugin, 'session.idle', { sessionID: 'ses_eo_1' });
+
+      expect(client.app.log).toHaveBeenCalled();
+      const call = client._appLogCalls[0];
+      expect(call).toMatchObject({ service: 'agent-memory', level: 'error' });
+      expect(typeof call.message).toBe('string');
+      expect(call.message.length).toBeGreaterThan(0);
+      // Spec: process.stderr is NOT written on the success path (log routes to app.log).
+      expect(stderrSpy).not.toHaveBeenCalled();
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  // EO-S2: err.stderr is appended to the log message when present
+  test('log() appends err.stderr content when the error carries a stderr buffer', async () => {
+    const stderrPayload = 'SQLITE_BUSY: database is locked';
+    // Shell throws an error with .stderr set for any command that includes 'read'.
+    const $ = makeMockShell({}, { read: { message: 'exit 1', stderr: stderrPayload } });
+    const client = makeMockClient();
+    const stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const plugin = await AgentMemory({ client, $ });
+      await fire(plugin, 'session.idle', { sessionID: 'ses_eo_2' });
+
+      expect(client._appLogCalls.length).toBeGreaterThan(0);
+      const firstMsg = client._appLogCalls[0].message;
+      expect(firstMsg).toContain(stderrPayload);
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  // EO-S3: log() falls back to process.stderr.write when client.app.log throws
+  test('log() falls back to process.stderr.write when client.app.log is unavailable', async () => {
+    const $ = makeMockShell({});
+    const client = makeMockClient({ appLogThrows: true });
+    const stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const plugin = await AgentMemory({ client, $ });
+      await fire(plugin, 'session.idle', { sessionID: 'ses_eo_3' });
+
+      const stderrOutput = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+      expect(stderrOutput).toContain('[agent-memory]');
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  // EO-S4: notify() calls client.tui.showToast with variant 'error'
+  test('notify() fires client.tui.showToast with variant "error" on critical error', async () => {
+    const $ = makeMockShell({});
+    const client = makeMockClient();
+    const stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const plugin = await AgentMemory({ client, $ });
+      await fire(plugin, 'session.idle', { sessionID: 'ses_eo_4' });
+
+      expect(client.tui.showToast).toHaveBeenCalled();
+      const toast = client._toastCalls.find((t) => t?.variant === 'error');
+      expect(toast).toBeDefined();
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  // EO-S5: distil: read failed calls both log() and notify()
+  test('distil: read failed path calls both app.log and tui.showToast', async () => {
+    const $ = makeMockShell({});
+    const client = makeMockClient();
+    const stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const plugin = await AgentMemory({ client, $ });
+      await fire(plugin, 'session.idle', { sessionID: 'ses_eo_5' });
+
+      // Both observability channels must have been notified for a critical read failure.
+      expect(client.app.log).toHaveBeenCalled();
+      expect(client.tui.showToast).toHaveBeenCalled();
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  // EO-S6 (spec.md §event handler error): unexpected exception in the event switch
+  // body triggers both log() and notify() via the outer catch block.
+  test('unexpected event-handler exception reaches outer catch and calls both app.log and tui.showToast', async () => {
+    const $ = makeMockShell({ read: WARM_READ });
+    const client = makeMockClient();
+    const stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const plugin = await AgentMemory({ client, $ });
+
+      // A properties object whose sessionID getter throws synchronously.
+      // Optional chaining (?.) only guards against null/undefined, not thrown
+      // getters — so event.properties?.sessionID propagates the throw, which
+      // escapes all inner handlers and reaches the outer event-handler catch.
+      const evilProps = Object.defineProperty({}, 'sessionID', {
+        get() { throw new Error('unexpected internal failure'); },
+      });
+      await fire(plugin, 'session.idle', evilProps);
+
+      expect(client.app.log).toHaveBeenCalled();
+      expect(client.tui.showToast).toHaveBeenCalled();
+      const toast = client._toastCalls.find((t) => t?.variant === 'error');
+      expect(toast).toBeDefined();
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
+  // EO-S7 (spec.md §lower-severity distil failure): session.get failure inside doDistil
+  // logs the error but must NOT fire a toast (it is a lower-severity, retryable failure).
+  test('distil session.get failure logs but does NOT call tui.showToast', async () => {
+    const $ = makeMockShell({});
+    const client = makeMockClient({
+      sessionGet: () => { throw new Error('server unavailable'); },
+    });
+    const stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const plugin = await AgentMemory({ client, $ });
+      await fire(plugin, 'session.idle', { sessionID: 'ses_eo_7' });
+
+      // The error should still be logged...
+      expect(client.app.log).toHaveBeenCalled();
+      // ...but must NOT trigger a toast (lower-severity, not user-actionable).
+      expect(client.tui.showToast).not.toHaveBeenCalled();
+    } finally {
+      stderrSpy.mockRestore();
+    }
   });
 });

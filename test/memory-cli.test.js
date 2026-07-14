@@ -1,4 +1,4 @@
-// test/memory-cli.test.js — distil-write SQL transaction tests.
+// test/memory-cli.test.js — distil-write SQL transaction tests + error boundary tests.
 //
 // Tests the core SQL operations performed by `memory.js distil-write` directly
 // against an in-memory database, verifying the three-step transaction:
@@ -10,6 +10,10 @@
 // statements in cmdDistilWrite so a future refactor catches regressions.
 
 import { DatabaseSync } from 'node:sqlite';
+import { spawnSync } from 'node:child_process';
+import { writeFileSync, unlinkSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { join, dirname } from 'node:path';
 import { ensureSchema } from '../src/lib/schema.js';
 import { readDistilWatermark, advanceDistilWatermark } from '../src/lib/watermark.js';
 
@@ -309,5 +313,38 @@ describe('prune SQL transaction', () => {
       .prepare('SELECT COUNT(*) AS n FROM memory_signal')
       .get().n;
     expect(remaining).toBe(1);
+  });
+});
+
+// ── error boundary (fix-error-observability spec scenario EO-S6) ─────────────
+//
+// RED-STEP test: verifies that the dispatch try/catch in memory.js writes a
+// structured `[memory.js] <cmd> failed: ...` message to stderr when a command
+// handler throws, rather than letting Node.js emit an unformatted stack trace.
+
+describe('memory.js dispatch error boundary', () => {
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname  = dirname(__filename);
+  const MEMORY_JS  = join(__dirname, '../src/memory.js');
+
+  test('formats uncaught internal error as [memory.js] <cmd> failed: on stderr', () => {
+    // Provide a non-SQLite file as the DB to force DatabaseSync / PRAGMA to throw.
+    const tmpDb = `/tmp/invalid-sqlite-${Date.now()}.db`;
+    writeFileSync(tmpDb, 'NOT A SQLITE DATABASE FILE\n');
+    try {
+      const result = spawnSync(
+        process.execPath,
+        [MEMORY_JS, 'read', 'ses_test', 'engineer', '/some/project'],
+        { env: { ...process.env, AGENT_MEMORY_DB: tmpDb }, encoding: 'utf8' }
+      );
+
+      // Must exit with code 1.
+      expect(result.status).toBe(1);
+      // Before the fix: Node emits a raw stack trace without the [memory.js] prefix.
+      // After the fix: stderr begins with the structured prefix.
+      expect(result.stderr).toMatch(/\[memory\.js\] read failed:/);
+    } finally {
+      try { unlinkSync(tmpDb); } catch { /* cleanup only */ }
+    }
   });
 });
