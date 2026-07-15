@@ -709,11 +709,15 @@ const AgentMemory = async ({ client, $ }) => {
       // Register a hidden no-tool agent used for ephemeral distil sub-sessions.
       // Agent-level permission must be an object; { '*': 'deny' } uses the
       // wildcard key so whollyDisabled() returns true for every tool.
+      // external_directory is added explicitly because the path-level gate fires
+      // before tool-level denies — without it, the distiller LLM can trigger a
+      // desktop permission prompt by attempting to read file paths from its prompt
+      // (e.g. /tmp files recorded as file.edited signals).
       // ??= avoids clobbering a user-defined 'distiller' agent.
       cfg.agent['distiller'] ??= {
         mode: 'subagent',
         hidden: true,
-        permission: { '*': 'deny' },
+        permission: { '*': 'deny', external_directory: 'deny' },
       };
     },
   };

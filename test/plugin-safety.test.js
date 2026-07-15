@@ -1163,8 +1163,19 @@ describe('config hook — distiller agent registration', () => {
     expect(cfg.agent['distiller']).toMatchObject({
       mode: 'subagent',
       hidden: true,
-      permission: { '*': 'deny' },
+      permission: { '*': 'deny', external_directory: 'deny' },
     });
+  });
+
+  test('config hook denies external_directory on distiller to suppress path-gate prompts', async () => {
+    // The distiller LLM may attempt to read file paths it sees in its prompt
+    // (e.g. /tmp files from file.edited signals). external_directory must be
+    // explicitly denied so opencode's path-level gate does not surface a
+    // desktop permission prompt before the tool-level deny fires.
+    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
+    const cfg = {};
+    await plugin.config(cfg);
+    expect(cfg.agent['distiller'].permission.external_directory).toBe('deny');
   });
 
   test('config hook does not overwrite existing agent entries', async () => {
