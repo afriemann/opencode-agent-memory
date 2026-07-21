@@ -57,12 +57,7 @@ function getDistillerPrompt() {
 }
 
 // Resolve tuneable config: env var > config file > hardcoded default (per key).
-const _fileCfg = loadConfigFile();
-const {
-  targetAgent: TARGET_AGENT,
-  distilMinIntervalMs: DISTIL_MIN_INTERVAL_MS,
-  distillerModel: DISTILLER_MODEL,
-} = resolveConfig(process.env, _fileCfg);
+// Config is resolved inside the factory so tests can control process.env per call.
 
 // Title used for ephemeral distil sub-sessions. Used in two places:
 // - ephemerals.add(ephId) after session.create (primary guard)
@@ -128,6 +123,15 @@ async function spawnMemory($, args, stdinData) {
 // ── Plugin factory ───────────────────────────────────────────────────────────
 
 const AgentMemory = async ({ client, $ }) => {
+  // ── Config (read fresh per factory call for testability) ──────────────────
+  const _fileCfg = loadConfigFile();
+  const {
+    targetAgents,
+    distilMinIntervalMs: DISTIL_MIN_INTERVAL_MS,
+    distillerModel: DISTILLER_MODEL,
+  } = resolveConfig(process.env, _fileCfg);
+  const TARGET_AGENTS = new Set(targetAgents);
+
   // Fire-and-forget; never throws into opencode.
   spawnMemory($, ['prune']).catch(() => {});
 
@@ -137,6 +141,7 @@ const AgentMemory = async ({ client, $ }) => {
   const primers = new Map();        // sessionId → assembled primer text (warm sessions only)
   const ephemerals = new Set();     // distiller sub-session IDs (skip injection + idle)
   const buffers = new Map();        // sessionId → { files, todos, messages }
+  const sessionAgents = new Map();  // sessionId → resolved agent name
   // Last active session for file.edited attribution (heuristic — see I5).
   // NOTE: This is a single-worktree approximation; multi-worktree concurrency
   // may misattribute edits. Acceptable for Phase-1 scope; see README limitations.
@@ -235,6 +240,32 @@ const AgentMemory = async ({ client, $ }) => {
     }
   }
 
+  /**
+   * Resolve the tracked agent name for a session.
+   *
+   * Cache-first: returns the name stored in `sessionAgents` immediately if
+   * present. On a cold miss, calls session.get, tests Set membership, and
+   * populates the cache before returning. Returns null when the session's
+   * agent is absent, unresolvable, or not in TARGET_AGENTS.
+   *
+   * @param {string} sessionId
+   * @returns {Promise<string|null>}
+   */
+  async function resolveSessionAgent(sessionId) {
+    if (sessionAgents.has(sessionId)) return sessionAgents.get(sessionId);
+    try {
+      const got = await client.session.get({ path: { id: sessionId } });
+      const data = got && got.data;
+      const agent = data && data.agent;
+      if (!agent || !TARGET_AGENTS.has(agent)) return null;
+      sessionAgents.set(sessionId, agent);
+      return agent;
+    } catch (err) {
+      log(`resolveSessionAgent: session.get failed for ${sessionId}`, err);
+      return null;
+    }
+  }
+
   // ── Idle-distil worker (component 3) ──────────────────────────────────────
 
   async function doDistil(sessionId, { force = false } = {}) {
@@ -254,20 +285,23 @@ const AgentMemory = async ({ client, $ }) => {
     const agent = session && session.agent;
     const project = session && session.directory;
 
-    // Only distil for the target agent; undefined agent = default = TARGET_AGENT.
-    if (agent && agent !== TARGET_AGENT) return;
+    // Only distil for tracked agents; null/undefined agent = untracked = skip.
+    if (!agent || !TARGET_AGENTS.has(agent)) return;
     if (!project) return;
+
+    // Opportunistically populate the session agent map.
+    sessionAgents.set(sessionId, agent);
 
     // Fallback load: cache the primer for this session if not yet attempted.
     if (!primerLoaded.has(sessionId)) {
-      await loadMemoryForSession(sessionId, TARGET_AGENT, project);
+      await loadMemoryForSession(sessionId, agent, project);
     }
 
     // Read prior + signals + watermark (watermark is returned by the CLI, no
     // DB access here — B1 fix).
     let state;
     try {
-      const out = await spawnMemory($, ['read', sessionId, TARGET_AGENT, project]);
+      const out = await spawnMemory($, ['read', sessionId, agent, project]);
       state = JSON.parse(out.trim());
     } catch (err) {
       log(`distil: read failed for ${sessionId}`, err);
@@ -302,7 +336,7 @@ const AgentMemory = async ({ client, $ }) => {
       buf.todos.length = 0;
       buf.messages.length = 0;
       try {
-        await spawnMemory($, ['accrue', sessionId, TARGET_AGENT, project], delta);
+        await spawnMemory($, ['accrue', sessionId, agent, project], delta);
       } catch (err) {
         log(`distil: accrue flush failed for ${sessionId}`, err);
         // Continue — use whatever signals are already in the DB.
@@ -312,7 +346,7 @@ const AgentMemory = async ({ client, $ }) => {
     // Re-read signals after flush.
     let allSignals;
     try {
-      const out2 = await spawnMemory($, ['read', sessionId, TARGET_AGENT, project]);
+      const out2 = await spawnMemory($, ['read', sessionId, agent, project]);
       const state2 = JSON.parse(out2.trim());
       allSignals = state2.signals ?? [];
     } catch {
@@ -403,7 +437,7 @@ const AgentMemory = async ({ client, $ }) => {
 
       // Write via CLI (sole writer — never touches DB here).
       try {
-        await spawnMemory($, ['distil-write', TARGET_AGENT, project], {
+        await spawnMemory($, ['distil-write', agent, project], {
           distilled,
           anchoredSha,
           lastSignalMs,
@@ -426,7 +460,7 @@ const AgentMemory = async ({ client, $ }) => {
 
   /**
    * memory_inspect — non-destructive read of the current hot state + signals.
-   * The agent dimension is always TARGET_AGENT (single-agent store invariant).
+   * The agent dimension is resolved from the session via resolveSessionAgent.
    */
   const memory_inspect = tool({
     description:
@@ -434,8 +468,15 @@ const AgentMemory = async ({ client, $ }) => {
       'Non-destructive — does not insert, update, or delete any database row.',
     args: {},
     async execute(_args, context) {
+      const agent = await resolveSessionAgent(context.sessionID);
+      if (!agent) {
+        return {
+          title: 'memory_inspect',
+          output: 'Session agent is not tracked by agent-memory.',
+        };
+      }
       try {
-        const out = await spawnMemory($, ['inspect', TARGET_AGENT, context.directory]);
+        const out = await spawnMemory($, ['inspect', agent, context.directory]);
         const result = JSON.parse(out.trim());
         const activePrimer = primers.get(context.sessionID) ?? null;
         return {
@@ -454,7 +495,7 @@ const AgentMemory = async ({ client, $ }) => {
   /**
    * memory_correct — apply a partial patch to the hot state.
    * Only supplied fields are updated; all others keep their current values.
-   * The agent dimension is always TARGET_AGENT.
+   * The agent dimension is resolved from the session via resolveSessionAgent.
    */
   const memory_correct = tool({
     description:
@@ -477,9 +518,16 @@ const AgentMemory = async ({ client, $ }) => {
       }).describe('Partial patch. Include only the fields you want to change.'),
     },
     async execute({ patch }, context) {
+      const agent = await resolveSessionAgent(context.sessionID);
+      if (!agent) {
+        return {
+          title: 'memory_correct',
+          output: 'Session agent is not tracked by agent-memory.',
+        };
+      }
       try {
         const patchJson = JSON.stringify(patch);
-        await spawnMemory($, ['correct', TARGET_AGENT, context.directory, patchJson]);
+        await spawnMemory($, ['correct', agent, context.directory, patchJson]);
         return {
           title: 'memory_correct',
           output: 'Memory corrected successfully.',
@@ -500,10 +548,17 @@ const AgentMemory = async ({ client, $ }) => {
   const memory_distil_force = tool({
     description:
       'Force an immediate memory distillation for the current session, bypassing the idle ' +
-      'throttle window. All other guards (ephemeral skip, TARGET_AGENT check) still apply. ' +
+      'throttle window. All other guards (ephemeral skip, tracked-agent check) still apply. ' +
       'The distil-force subcommand has no CLI form; only this plugin tool triggers it.',
     args: {},
     async execute(_args, context) {
+      const agent = await resolveSessionAgent(context.sessionID);
+      if (!agent) {
+        return {
+          title: 'memory_distil_force',
+          output: 'Session agent is not tracked by agent-memory.',
+        };
+      }
       try {
         await doDistil(context.sessionID, { force: true });
         return {
@@ -564,11 +619,12 @@ const AgentMemory = async ({ client, $ }) => {
               }
             }
 
-            // Only handle the target agent; undefined = default = TARGET_AGENT.
-            if (agent && agent !== TARGET_AGENT) return;
+            // Only handle tracked agents; null/undefined agent = untracked = skip.
+            if (!agent || !TARGET_AGENTS.has(agent)) return;
             if (!project) return;
 
-            await loadMemoryForSession(sessionId, TARGET_AGENT, project);
+            sessionAgents.set(sessionId, agent);
+            await loadMemoryForSession(sessionId, agent, project);
             break;
           }
 
@@ -659,8 +715,9 @@ const AgentMemory = async ({ client, $ }) => {
                 const data = got && got.data;
                 const agent = data && data.agent;
                 const project = data && data.directory;
-                if ((!agent || agent === TARGET_AGENT) && project) {
-                  await loadMemoryForSession(sessionId, TARGET_AGENT, project);
+                if (agent && TARGET_AGENTS.has(agent) && project) {
+                  sessionAgents.set(sessionId, agent);
+                  await loadMemoryForSession(sessionId, agent, project);
                 }
               } catch (err) {
                 log(`message.updated: fallback load failed for ${sessionId}`, err);

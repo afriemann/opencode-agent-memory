@@ -28,7 +28,7 @@ Run `make bootstrap` (or `make update`) in `agent-dotfiles` to create or refresh
 |---|---|---|
 | `AGENT_MEMORY_DB` | `~/.local/share/opencode/agent-memory.db` | Path to the SQLite database. |
 | `MEMORY_DISTILLER_MODEL` | `github-copilot/gpt-5-mini` | Model used for distillation, as `providerID/modelID`. |
-| `MEMORY_TARGET_AGENT` | `engineer` | The opencode agent this plugin tracks. Phase 1: single value only. |
+| `MEMORY_TARGET_AGENTS` | *(none — no agents tracked)* | Comma-separated list of opencode agent names to track (e.g. `engineer,code-reviewer`). No default: if unset, the plugin is effectively disabled. |
 | `DISTIL_MIN_INTERVAL_MS` | `60000` | Minimum milliseconds between distil runs for the same session (throttle). |
 | `MEMORY_FLUSH_INTERVAL_MS` | `60000` | Reserved for a future periodic background flush. **Not yet implemented** — Phase 1 flushes the accumulator buffer on `session.idle` only. |
 
@@ -53,7 +53,7 @@ Each key falls back independently — setting only `distillerModel` in the file 
 
 | Key | Type | Default | Equivalent env var |
 |---|---|---|---|
-| `targetAgent` | non-empty string | `"engineer"` | `MEMORY_TARGET_AGENT` |
+| `targetAgents` | array of non-empty strings | `[]` (no agents tracked) | `MEMORY_TARGET_AGENTS` |
 | `distilMinIntervalMs` | finite positive number | `60000` | `DISTIL_MIN_INTERVAL_MS` |
 | `distillerModel` | `"providerID/modelID"` string | `"github-copilot/gpt-5-mini"` | `MEMORY_DISTILLER_MODEL` |
 
@@ -61,8 +61,8 @@ Each key falls back independently — setting only `distillerModel` in the file 
 
 ```jsonc
 {
-  // Which agent's sessions to track
-  "targetAgent": "engineer",
+  // Which agents' sessions to track
+  "targetAgents": ["engineer", "code-reviewer"],
   // Minimum distil interval in milliseconds
   "distilMinIntervalMs": 60000,
   // LLM used to distil session signals
@@ -118,7 +118,7 @@ node src/memory.js prune
 
 ## Plugin tools
 
-The plugin exposes three tools under the `tool` key returned by the `AgentMemory` factory. All three tools key the agent dimension on `TARGET_AGENT` (not the calling session's agent), consistent with the single-agent store design.
+The plugin exposes three tools under the `tool` key returned by the `AgentMemory` factory. All three tools resolve the agent dimension from the current session via `resolveSessionAgent` (which checks the `TARGET_AGENTS` set). If the session's agent is not tracked, the tool returns an informative message and makes no CLI call.
 
 ### `memory_inspect`
 
@@ -128,7 +128,7 @@ Read the current hot state and signals for the current project. Non-destructive 
 |---|---|
 | Args | *(none)* |
 | Returns | JSON string `{ prior: {...}|null, signals: [...] }` |
-| CLI equivalent | `node src/memory.js inspect <TARGET_AGENT> <context.directory>` |
+| CLI equivalent | `node src/memory.js inspect <resolved-agent> <context.directory>` |
 
 ### `memory_correct`
 
@@ -145,7 +145,7 @@ Does **not** delete signals or advance the distil watermark.
 
 ### `memory_distil_force`
 
-Force an immediate memory distillation for the current session, bypassing the idle throttle window. All other guards still apply (ephemeral skip, TARGET\_AGENT check). The forced distil shares the per-session watermark and may advance `last_distil_ms`.
+Force an immediate memory distillation for the current session, bypassing the idle throttle window. All other guards still apply (ephemeral skip, tracked-agent check). The forced distil shares the per-session watermark and may advance `last_distil_ms`.
 
 | — | — |
 |---|---|
@@ -154,8 +154,8 @@ Force an immediate memory distillation for the current session, bypassing the id
 
 ## Known limitations
 
-- **File-edit attribution** — `file.edited` events carry no `sessionID`. The plugin attributes them to the last active `build` session in the current process. In environments with multiple concurrent `build` sessions (multiple worktrees), edits may be attributed to the wrong session. This is a Phase-1 trade-off; the distiller still receives the correct file names, just potentially under the wrong session key.
-- **Phase 1 scope** — only the `build` agent is tracked (`MEMORY_TARGET_AGENT`). The `scope` and `agent` columns are in the schema to allow a non-breaking additive extension later.
+- **File-edit attribution** — `file.edited` events carry no `sessionID`. The plugin attributes them to the last active tracked-agent session in the current process. In environments with multiple concurrent tracked sessions (multiple worktrees), edits may be attributed to the wrong session. This is a Phase-1 trade-off; the distiller still receives the correct file names, just potentially under the wrong session key.
+- **Multi-agent tracking** — multiple agents are tracked independently; each session is keyed to its own hot-state row by `(scope, agent, project)`. Sessions whose agent is not in `targetAgents` are silently skipped.
 
 ## Development
 

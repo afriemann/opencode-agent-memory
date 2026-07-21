@@ -154,13 +154,13 @@ describe('loadConfigFile — non-object root', () => {
 describe('loadConfigFile — JSONC syntax support', () => {
   test('parses file with // comments and trailing commas successfully', () => {
     const path = writeTmpConfig(`{
-  // Agent to track
-  "targetAgent": "engineer",
+  // Agents to track
+  "targetAgents": ["engineer", "code-reviewer"],
   // Minimum distil interval in ms
   "distilMinIntervalMs": 30000,
 }`);
     const result = loadConfigFile(path);
-    expect(result).toEqual({ targetAgent: 'engineer', distilMinIntervalMs: 30000 });
+    expect(result).toEqual({ targetAgents: ['engineer', 'code-reviewer'], distilMinIntervalMs: 30000 });
   });
 
   test('parses file with /* */ block comments successfully', () => {
@@ -175,31 +175,82 @@ describe('loadConfigFile — JSONC syntax support', () => {
 
 // ── resolveConfig — core precedence and validation tests ─────────────────────
 
-// 3.4 Valid targetAgent in file → value used
-describe('resolveConfig — targetAgent', () => {
-  test('uses file value when no env var set', () => {
-    const cfg = resolveConfig({}, { targetAgent: 'architect' });
-    expect(cfg.targetAgent).toBe('architect');
+// 3.4 Valid targetAgents array in file → value used
+describe('resolveConfig — targetAgents', () => {
+  test('uses file array when no env var set', () => {
+    const cfg = resolveConfig({}, { targetAgents: ['engineer', 'code-reviewer'] });
+    expect(cfg.targetAgents).toEqual(['engineer', 'code-reviewer']);
+  });
+
+  test('returns empty array when neither env nor file set (no default)', () => {
+    const cfg = resolveConfig({}, {});
+    expect(cfg.targetAgents).toEqual([]);
+  });
+
+  test('empty array in file is valid and silent (nothing tracked)', () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const cfg = resolveConfig({}, { targetAgents: [] });
+    expect(cfg.targetAgents).toEqual([]);
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
   });
 
   // 3.7 env var wins over file
-  test('env var overrides file value', () => {
-    const cfg = resolveConfig({ MEMORY_TARGET_AGENT: 'from-env' }, { targetAgent: 'from-file' });
-    expect(cfg.targetAgent).toBe('from-env');
+  test('env var MEMORY_TARGET_AGENTS overrides file array', () => {
+    const cfg = resolveConfig(
+      { MEMORY_TARGET_AGENTS: 'from-env,code-reviewer' },
+      { targetAgents: ['from-file'] }
+    );
+    expect(cfg.targetAgents).toEqual(['from-env', 'code-reviewer']);
   });
 
-  // 3.13 empty string → warn, default
-  test('warns and uses default "engineer" when file value is empty string', () => {
+  test('env var is parsed as comma-separated list with trimming', () => {
+    const cfg = resolveConfig({ MEMORY_TARGET_AGENTS: ' engineer , code-reviewer ' }, {});
+    expect(cfg.targetAgents).toEqual(['engineer', 'code-reviewer']);
+  });
+
+  test('env var with single entry produces single-element array', () => {
+    const cfg = resolveConfig({ MEMORY_TARGET_AGENTS: 'engineer' }, {});
+    expect(cfg.targetAgents).toEqual(['engineer']);
+  });
+
+  test('env var set to empty string yields empty array', () => {
+    const cfg = resolveConfig({ MEMORY_TARGET_AGENTS: '' }, {});
+    expect(cfg.targetAgents).toEqual([]);
+  });
+
+  // Non-array file value → warn, empty array
+  test('warns and uses empty array when file value is a string (not array)', () => {
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
-    const cfg = resolveConfig({}, { targetAgent: '' });
-    expect(cfg.targetAgent).toBe('engineer');
+    const cfg = resolveConfig({}, { targetAgents: 'engineer' });
+    expect(cfg.targetAgents).toEqual([]);
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('[agent-memory]'));
     warnSpy.mockRestore();
   });
 
-  test('uses default "engineer" when neither env nor file set', () => {
-    const cfg = resolveConfig({}, {});
-    expect(cfg.targetAgent).toBe('engineer');
+  test('warns and uses empty array when file value is null', () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const cfg = resolveConfig({}, { targetAgents: null });
+    expect(cfg.targetAgents).toEqual([]);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('[agent-memory]'));
+    warnSpy.mockRestore();
+  });
+
+  // Invalid elements inside array → warn per element, drop element
+  test('drops non-string elements with a warning, keeps valid strings', () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const cfg = resolveConfig({}, { targetAgents: ['engineer', 42, '', 'code-reviewer'] });
+    expect(cfg.targetAgents).toEqual(['engineer', 'code-reviewer']);
+    expect(warnSpy).toHaveBeenCalledTimes(2); // 42 and ''
+    warnSpy.mockRestore();
+  });
+
+  test('old targetAgent key is silently ignored', () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const cfg = resolveConfig({}, { targetAgent: 'engineer' });
+    expect(cfg.targetAgents).toEqual([]); // not picked up
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
   });
 });
 
@@ -219,9 +270,9 @@ describe('resolveConfig — distilMinIntervalMs', () => {
   // 3.11 non-numeric → warn, default, other keys unaffected
   test('warns and uses default when file value is a string (non-numeric)', () => {
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
-    const cfg = resolveConfig({}, { distilMinIntervalMs: 'not-a-number', targetAgent: 'architect' });
+    const cfg = resolveConfig({}, { distilMinIntervalMs: 'not-a-number', targetAgents: ['architect'] });
     expect(cfg.distilMinIntervalMs).toBe(60_000);
-    expect(cfg.targetAgent).toBe('architect'); // other keys unaffected
+    expect(cfg.targetAgents).toEqual(['architect']); // other keys unaffected
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('[agent-memory]'));
     warnSpy.mockRestore();
   });
@@ -291,7 +342,7 @@ describe('resolveConfig — unknown keys', () => {
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
     const cfg = resolveConfig({}, { unknownKey: 'something', anotherUnknown: 42 });
     // known keys use defaults
-    expect(cfg.targetAgent).toBe('engineer');
+    expect(cfg.targetAgents).toEqual([]);
     expect(cfg.distilMinIntervalMs).toBe(60_000);
     expect(cfg.distillerModel).toEqual({ providerID: 'github-copilot', modelID: 'gpt-5-mini' });
     expect(warnSpy).not.toHaveBeenCalled();
@@ -302,11 +353,21 @@ describe('resolveConfig — unknown keys', () => {
 // ── End-to-end: loadConfigFile + resolveConfig ────────────────────────────────
 
 describe('end-to-end: file load + resolve', () => {
-  test('3.4 valid targetAgent in file is used in resolution', () => {
-    const path = writeTmpConfig('{"targetAgent": "code-reviewer"}');
+  test('3.4 valid targetAgents array in file is used in resolution', () => {
+    const path = writeTmpConfig('{"targetAgents": ["code-reviewer", "architect"]}');
     const fileCfg = loadConfigFile(path);
     const cfg = resolveConfig({}, fileCfg);
-    expect(cfg.targetAgent).toBe('code-reviewer');
+    expect(cfg.targetAgents).toEqual(['code-reviewer', 'architect']);
+  });
+
+  test('3.4 empty targetAgents array in file yields empty array (no warning)', () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const path = writeTmpConfig('{"targetAgents": []}');
+    const fileCfg = loadConfigFile(path);
+    const cfg = resolveConfig({}, fileCfg);
+    expect(cfg.targetAgents).toEqual([]);
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
   });
 
   test('3.5 valid distilMinIntervalMs in file is used in resolution', () => {
@@ -323,34 +384,34 @@ describe('end-to-end: file load + resolve', () => {
     expect(cfg.distillerModel).toEqual({ providerID: 'anthropic', modelID: 'claude-3-5-sonnet' });
   });
 
-  test('3.7 env var wins over file value for all three keys', () => {
+  test('3.7 env var wins over file value for targetAgents and other keys', () => {
     const path = writeTmpConfig(`{
-  "targetAgent": "from-file",
+  "targetAgents": ["from-file"],
   "distilMinIntervalMs": 30000,
   "distillerModel": "openai/gpt-4o"
 }`);
     const fileCfg = loadConfigFile(path);
     const cfg = resolveConfig(
       {
-        MEMORY_TARGET_AGENT: 'env-agent',
+        MEMORY_TARGET_AGENTS: 'env-agent,second-agent',
         DISTIL_MIN_INTERVAL_MS: '99000',
         MEMORY_DISTILLER_MODEL: 'anthropic/claude',
       },
       fileCfg
     );
-    expect(cfg.targetAgent).toBe('env-agent');
+    expect(cfg.targetAgents).toEqual(['env-agent', 'second-agent']);
     expect(cfg.distilMinIntervalMs).toBe(99000);
     expect(cfg.distillerModel).toEqual({ providerID: 'anthropic', modelID: 'claude' });
   });
 
   test('3.8 JSONC file with line comments and trailing comma resolves correctly', () => {
     const path = writeTmpConfig(`{
-  // which agent to watch
-  "targetAgent": "engineer", // trailing comma on this line too
+  // which agents to watch
+  "targetAgents": ["engineer"], // trailing comma on this line too
 }`);
     const fileCfg = loadConfigFile(path);
     const cfg = resolveConfig({}, fileCfg);
-    expect(cfg.targetAgent).toBe('engineer');
+    expect(cfg.targetAgents).toEqual(['engineer']);
   });
 
   test('3.9 malformed JSON file → warn, all keys use defaults', () => {
@@ -358,7 +419,7 @@ describe('end-to-end: file load + resolve', () => {
     const path = writeTmpConfig('{ bad json !!! }');
     const fileCfg = loadConfigFile(path);
     const cfg = resolveConfig({}, fileCfg);
-    expect(cfg.targetAgent).toBe('engineer');
+    expect(cfg.targetAgents).toEqual([]);
     expect(cfg.distilMinIntervalMs).toBe(60_000);
     expect(cfg.distillerModel).toEqual({ providerID: 'github-copilot', modelID: 'gpt-5-mini' });
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('[agent-memory]'));
@@ -370,7 +431,7 @@ describe('end-to-end: file load + resolve', () => {
     const path = writeTmpConfig('42');
     const fileCfg = loadConfigFile(path);
     const cfg = resolveConfig({}, fileCfg);
-    expect(cfg.targetAgent).toBe('engineer');
+    expect(cfg.targetAgents).toEqual([]);
     expect(cfg.distilMinIntervalMs).toBe(60_000);
     expect(cfg.distillerModel).toEqual({ providerID: 'github-copilot', modelID: 'gpt-5-mini' });
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('[agent-memory]'));
@@ -379,14 +440,14 @@ describe('end-to-end: file load + resolve', () => {
 
   test('3.11 distilMinIntervalMs non-numeric → warn for that key, other keys ok', () => {
     const path = writeTmpConfig(`{
-  "targetAgent": "architect",
+  "targetAgents": ["architect"],
   "distilMinIntervalMs": "oops"
 }`);
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
     const fileCfg = loadConfigFile(path);
     const cfg = resolveConfig({}, fileCfg);
-    expect(cfg.targetAgent).toBe('architect');         // unaffected
-    expect(cfg.distilMinIntervalMs).toBe(60_000);      // fell back
+    expect(cfg.targetAgents).toEqual(['architect']); // unaffected
+    expect(cfg.distilMinIntervalMs).toBe(60_000);    // fell back
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('[agent-memory]'));
     warnSpy.mockRestore();
   });
@@ -401,22 +462,22 @@ describe('end-to-end: file load + resolve', () => {
     warnSpy.mockRestore();
   });
 
-  test('3.13 targetAgent empty string → warn, default "engineer"', () => {
-    const path = writeTmpConfig('{"targetAgent": ""}');
+  test('3.13 targetAgents non-array (string) → warn, empty array', () => {
+    const path = writeTmpConfig('{"targetAgents": "engineer"}');
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
     const fileCfg = loadConfigFile(path);
     const cfg = resolveConfig({}, fileCfg);
-    expect(cfg.targetAgent).toBe('engineer');
+    expect(cfg.targetAgents).toEqual([]);
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('[agent-memory]'));
     warnSpy.mockRestore();
   });
 
   test('3.14 unknown keys in file → silently ignored', () => {
-    const path = writeTmpConfig('{"targetAgent": "engineer", "unknownFeature": true}');
+    const path = writeTmpConfig('{"targetAgents": ["engineer"], "unknownFeature": true}');
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
     const fileCfg = loadConfigFile(path);
     const cfg = resolveConfig({}, fileCfg);
-    expect(cfg.targetAgent).toBe('engineer');
+    expect(cfg.targetAgents).toEqual(['engineer']);
     expect(warnSpy).not.toHaveBeenCalled();
     warnSpy.mockRestore();
   });

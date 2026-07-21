@@ -2,11 +2,20 @@
 //
 // Tests the AgentMemory plugin factory with fully-mocked client and $.
 // Every failure mode from §9 is covered; no real DB or git is used.
+//
+// MEMORY_TARGET_AGENTS is set before any AgentMemory() call so the factory
+// (which reads config fresh per instantiation) picks up 'engineer' as a
+// tracked agent. Tests that verify untracked-agent behaviour set or clear
+// the env var locally before calling AgentMemory().
 
 import AgentMemory from '../src/plugin.js';
 import { jest } from '@jest/globals';
 import { reduceSignals, assemblePrimer, MAX_SIGNALS_PER_KIND } from '../src/lib/signal-utils.js';
 import { renderStaleness } from '../src/lib/git-helper.js';
+
+// Make 'engineer' a tracked agent for the duration of this test file.
+// Tests that need a different set manage process.env themselves (save/restore).
+process.env.MEMORY_TARGET_AGENTS = 'engineer';
 
 // ── Test helpers ─────────────────────────────────────────────────────────────
 
@@ -989,7 +998,7 @@ describe('memory_inspect tool execute', () => {
     };
   }
 
-  test('delegates to memory.js inspect with TARGET_AGENT and context.directory', async () => {
+  test('delegates to memory.js inspect with the resolved session agent and context.directory', async () => {
     const inspectResult = { prior: { last_worked_summary: 'done' }, signals: [] };
     const $ = makeMockShell({ inspect: JSON.stringify(inspectResult) });
     const plugin = await AgentMemory({ client: makeMockClient(), $ });
@@ -1060,21 +1069,36 @@ describe('memory_inspect tool execute', () => {
     ).resolves.toBeDefined();
   });
 
-  test('uses TARGET_AGENT (not context.agent) as the agent dimension', async () => {
+  test('uses session agent from session.get (not context.agent) as the CLI agent dimension', async () => {
     const inspectResult = { prior: null, signals: [] };
     const $ = makeMockShell({ inspect: JSON.stringify(inspectResult) });
+    // session.get returns 'engineer' which is in TARGET_AGENTS
     const plugin = await AgentMemory({ client: makeMockClient(), $ });
 
-    // Context agent is a different agent, but the CLI call must use TARGET_AGENT
+    // context.agent is a different value; CLI must use the session's agent, not context.agent
     const ctx = makeContext({ agent: 'other-agent' });
     await plugin.tool.memory_inspect.execute({}, ctx);
 
-    // The CLI invocation must not include 'other-agent' as the agent dimension.
-    // TARGET_AGENT defaults to 'engineer'; at minimum the call must include 'inspect'.
     const inspectCalls = $.calls.filter((c) => c.includes('inspect'));
     expect(inspectCalls.length).toBeGreaterThan(0);
-    // 'other-agent' must NOT appear as a CLI arg
+    // 'other-agent' must NOT appear as a CLI arg (session.get returned 'engineer')
     expect(inspectCalls.every((c) => !c.includes('other-agent'))).toBe(true);
+  });
+
+  test('returns not-tracked message when session agent is not in TARGET_AGENTS', async () => {
+    const savedEnv = process.env.MEMORY_TARGET_AGENTS;
+    process.env.MEMORY_TARGET_AGENTS = 'code-reviewer'; // 'engineer' not tracked
+    const $ = makeMockShell({});
+    // session.get returns 'engineer' which is NOT in TARGET_AGENTS
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const ctx = makeContext();
+
+    const result = await plugin.tool.memory_inspect.execute({}, ctx);
+    const output = typeof result === 'string' ? result : result.output;
+    expect(output).toContain('not tracked');
+    // No inspect CLI call should have been made
+    expect($.calls.filter((c) => c.includes('inspect'))).toHaveLength(0);
+    process.env.MEMORY_TARGET_AGENTS = savedEnv;
   });
 });
 
@@ -1135,7 +1159,7 @@ describe('memory_correct tool execute', () => {
     expect(output.toLowerCase()).toContain('error');
   });
 
-  test('uses TARGET_AGENT (not context.agent) as the agent dimension', async () => {
+  test('uses session agent from session.get (not context.agent) as the CLI agent dimension', async () => {
     const $ = makeMockShell({ correct: JSON.stringify({ ok: true }) });
     const plugin = await AgentMemory({ client: makeMockClient(), $ });
     const ctx = makeContext({ agent: 'different-agent' });
@@ -1145,6 +1169,20 @@ describe('memory_correct tool execute', () => {
     const correctCalls = $.calls.filter((c) => c.includes('correct'));
     expect(correctCalls.length).toBeGreaterThan(0);
     expect(correctCalls.every((c) => !c.includes('different-agent'))).toBe(true);
+  });
+
+  test('returns not-tracked message when session agent is not in TARGET_AGENTS', async () => {
+    const savedEnv = process.env.MEMORY_TARGET_AGENTS;
+    process.env.MEMORY_TARGET_AGENTS = 'code-reviewer';
+    const $ = makeMockShell({});
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const ctx = makeContext();
+
+    const result = await plugin.tool.memory_correct.execute({ patch: { next_action: 'x' } }, ctx);
+    const output = typeof result === 'string' ? result : result.output;
+    expect(output).toContain('not tracked');
+    expect($.calls.filter((c) => c.includes('correct'))).toHaveLength(0);
+    process.env.MEMORY_TARGET_AGENTS = savedEnv;
   });
 });
 
@@ -1452,5 +1490,209 @@ describe('error observability', () => {
     } finally {
       stderrSpy.mockRestore();
     }
+  });
+});
+
+// ── resolveSessionAgent: cache-hit prevents redundant session.get calls ────────
+
+describe('resolveSessionAgent cache-hit behaviour', () => {
+  function makeContext(overrides = {}) {
+    return {
+      sessionID: 'ses_cache_test',
+      messageID: 'msg_c',
+      agent: 'engineer',
+      directory: '/test/project',
+      worktree: '/test/project',
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+      ...overrides,
+    };
+  }
+
+  test('calling memory_inspect twice for the same session only calls session.get once', async () => {
+    const inspectResult = { prior: null, signals: [] };
+    const $ = makeMockShell({ inspect: JSON.stringify(inspectResult) });
+    const client = makeMockClient();
+    const plugin = await AgentMemory({ client, $ });
+    const ctx = makeContext();
+
+    // Two back-to-back tool invocations for the same sessionID
+    await plugin.tool.memory_inspect.execute({}, ctx);
+    await plugin.tool.memory_inspect.execute({}, ctx);
+
+    // session.get must have been called exactly once (cache-hit on second call)
+    const getCallsForSession = client._getCalls.filter((id) => id === ctx.sessionID);
+    expect(getCallsForSession).toHaveLength(1);
+  });
+
+  test('sessionAgents map is pre-populated by session.created; tools use cache without extra session.get', async () => {
+    const inspectResult = { prior: null, signals: [] };
+    const $ = makeMockShell({
+      read: COLD_READ,
+      inspect: JSON.stringify(inspectResult),
+    });
+    const client = makeMockClient();
+    const plugin = await AgentMemory({ client, $ });
+
+    // session.created populates the sessionAgents map
+    await fire(plugin, 'session.created', {
+      sessionID: 'ses_pre_populated',
+      info: { agent: 'engineer', directory: '/proj', title: null },
+    });
+
+    const getCallsAfterCreated = client._getCalls.filter((id) => id === 'ses_pre_populated').length;
+
+    // memory_inspect should use the cached agent — no extra session.get
+    const ctx = makeContext({ sessionID: 'ses_pre_populated' });
+    await plugin.tool.memory_inspect.execute({}, ctx);
+
+    const getCallsAfterInspect = client._getCalls.filter((id) => id === 'ses_pre_populated').length;
+    expect(getCallsAfterInspect).toBe(getCallsAfterCreated); // no new session.get
+  });
+});
+
+// ── memory_distil_force: not-tracked returns informative message ───────────────
+
+describe('memory_distil_force — not-tracked session', () => {
+  function makeContext(overrides = {}) {
+    return {
+      sessionID: 'ses_force_nt',
+      messageID: 'msg_f',
+      agent: 'engineer',
+      directory: '/test/project',
+      worktree: '/test/project',
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+      ...overrides,
+    };
+  }
+
+  test('returns not-tracked message when session agent is not in TARGET_AGENTS', async () => {
+    const savedEnv = process.env.MEMORY_TARGET_AGENTS;
+    process.env.MEMORY_TARGET_AGENTS = 'code-reviewer';
+    const $ = makeMockShell({});
+    const client = makeMockClient();
+    const plugin = await AgentMemory({ client, $ });
+    const ctx = makeContext();
+
+    const result = await plugin.tool.memory_distil_force.execute({}, ctx);
+    const output = typeof result === 'string' ? result : result.output;
+    expect(output).toContain('not tracked');
+    // No ephemeral session should have been created
+    expect(client._createCalls).toHaveLength(0);
+    process.env.MEMORY_TARGET_AGENTS = savedEnv;
+  });
+
+  test('returns not-tracked message when session agent is null', async () => {
+    // session.get returns no agent (null)
+    const client = makeMockClient({
+      sessionGet: () => ({ data: { agent: null, directory: '/proj', title: null } }),
+    });
+    const $ = makeMockShell({});
+    const plugin = await AgentMemory({ client, $ });
+    const ctx = makeContext();
+
+    const result = await plugin.tool.memory_distil_force.execute({}, ctx);
+    const output = typeof result === 'string' ? result : result.output;
+    expect(output).toContain('not tracked');
+  });
+});
+
+// ── multi-agent tracking: two agents each get independent memory ───────────────
+
+describe('multi-agent tracking', () => {
+  test('session.created loads memory for each of multiple tracked agents independently', async () => {
+    const savedEnv = process.env.MEMORY_TARGET_AGENTS;
+    process.env.MEMORY_TARGET_AGENTS = 'engineer,code-reviewer';
+
+    const $ = makeMockShell({ read: WARM_READ });
+    const client = makeMockClient({
+      sessionGet: (id) => ({
+        data: {
+          agent: id === 'ses_eng' ? 'engineer' : 'code-reviewer',
+          directory: '/proj',
+          title: null,
+        },
+      }),
+    });
+    const plugin = await AgentMemory({ client, $ });
+
+    await fire(plugin, 'session.created', {
+      sessionID: 'ses_eng',
+      info: { agent: 'engineer', directory: '/proj', title: null },
+    });
+    await fire(plugin, 'session.created', {
+      sessionID: 'ses_cr',
+      info: { agent: 'code-reviewer', directory: '/proj', title: null },
+    });
+
+    // Both sessions have primers available (WARM_READ returns a prior)
+    const sysEng = await invokeSystemTransform(plugin, 'ses_eng');
+    const sysCr  = await invokeSystemTransform(plugin, 'ses_cr');
+    expect(sysEng).toHaveLength(1);
+    expect(sysCr).toHaveLength(1);
+
+    process.env.MEMORY_TARGET_AGENTS = savedEnv;
+  });
+
+  test('session for an agent not in TARGET_AGENTS is skipped even when other agents are tracked', async () => {
+    const savedEnv = process.env.MEMORY_TARGET_AGENTS;
+    process.env.MEMORY_TARGET_AGENTS = 'engineer'; // only engineer tracked
+
+    const $ = makeMockShell({ read: WARM_READ });
+    const client = makeMockClient({
+      sessionGet: () => ({ data: { agent: 'architect', directory: '/proj', title: null } }),
+    });
+    const plugin = await AgentMemory({ client, $ });
+
+    await fire(plugin, 'session.created', {
+      sessionID: 'ses_arch',
+      info: { agent: 'architect', directory: '/proj', title: null },
+    });
+
+    // architect is not tracked — no primer loaded
+    const sys = await invokeSystemTransform(plugin, 'ses_arch');
+    expect(sys).toHaveLength(0);
+
+    process.env.MEMORY_TARGET_AGENTS = savedEnv;
+  });
+
+  test('session.created with null agent is skipped silently — sessionAgents not populated', async () => {
+    // Spec scenario: GIVEN session.agent is null after payload check + session.get fallback
+    // WHEN session.created fires
+    // THEN no primer loaded, sessionAgents not populated → tool returns not-tracked
+    const $ = makeMockShell({ read: WARM_READ, inspect: JSON.stringify({ prior: null, signals: [] }) });
+    const client = makeMockClient({
+      sessionGet: () => ({ data: { agent: null, directory: '/proj', title: null } }),
+    });
+    const plugin = await AgentMemory({ client, $ });
+
+    await fire(plugin, 'session.created', {
+      sessionID: 'ses_null_agent',
+      info: { agent: null, directory: '/proj', title: null },
+    });
+
+    // No DB read should have been attempted (null agent skipped before loadMemoryForSession)
+    const readCalls = $.calls.filter((c) => c.includes(' read '));
+    expect(readCalls).toHaveLength(0);
+
+    // system.transform: no primer
+    const sys = await invokeSystemTransform(plugin, 'ses_null_agent');
+    expect(sys).toHaveLength(0);
+
+    // memory_inspect should return "not tracked" — sessionAgents was never populated
+    // resolveSessionAgent will call session.get (returns null agent) → returns null
+    function makeNullCtx() {
+      return {
+        sessionID: 'ses_null_agent', messageID: 'msg_n', agent: null,
+        directory: '/proj', worktree: '/proj',
+        abort: new AbortController().signal, metadata: () => {}, ask: async () => {},
+      };
+    }
+    const result = await plugin.tool.memory_inspect.execute({}, makeNullCtx());
+    const output = typeof result === 'string' ? result : result.output;
+    expect(output).toContain('not tracked');
   });
 });

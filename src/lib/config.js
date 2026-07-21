@@ -19,7 +19,7 @@ export const CONFIG_FILE_PATH = join(homedir(), '.config', 'opencode', 'agent-me
  *   - Trailing commas before } or ]
  *
  * Limitation: string values that contain //, /*, or *\/ will be corrupted.
- * The three documented keys (targetAgent, distilMinIntervalMs, distillerModel)
+ * The three documented keys (targetAgents, distilMinIntervalMs, distillerModel)
  * never contain these token sequences, so this is safe for the known keyset.
  *
  * @param {string} str - Raw JSONC string.
@@ -92,22 +92,33 @@ export function loadConfigFile(configPath = CONFIG_FILE_PATH) {
  * @param {object} env - Environment variable map (typically process.env).
  * @param {object} fileCfg - Parsed config file object (from loadConfigFile()).
  * @returns {{
- *   targetAgent: string,
+ *   targetAgents: string[],
  *   distilMinIntervalMs: number,
  *   distillerModel: { providerID: string, modelID: string }
  * }}
  */
 export function resolveConfig(env, fileCfg) {
-  // ── targetAgent ──────────────────────────────────────────────────────────
-  let targetAgent = 'engineer';
-  if (env.MEMORY_TARGET_AGENT !== undefined) {
-    targetAgent = env.MEMORY_TARGET_AGENT;
-  } else if (fileCfg.targetAgent !== undefined) {
-    if (typeof fileCfg.targetAgent === 'string' && fileCfg.targetAgent !== '') {
-      targetAgent = fileCfg.targetAgent;
+  // ── targetAgents ──────────────────────────────────────────────────────────
+  // No hardcoded default — an empty array means no agents are tracked (silent).
+  let targetAgents = [];
+  if (env.MEMORY_TARGET_AGENTS !== undefined) {
+    // Comma-separated env var: "engineer,code-reviewer"
+    targetAgents = env.MEMORY_TARGET_AGENTS
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+  } else if (fileCfg.targetAgents !== undefined) {
+    if (Array.isArray(fileCfg.targetAgents)) {
+      targetAgents = fileCfg.targetAgents.filter((s, i) => {
+        if (typeof s === 'string' && s !== '') return true;
+        console.warn(
+          `[agent-memory] config key "targetAgents[${i}]" must be a non-empty string; skipping element`
+        );
+        return false;
+      });
     } else {
       console.warn(
-        '[agent-memory] config key "targetAgent" must be a non-empty string; using default "engineer"'
+        '[agent-memory] config key "targetAgents" must be an array; using empty array (no agents tracked)'
       );
     }
   }
@@ -146,5 +157,5 @@ export function resolveConfig(env, fileCfg) {
       ? { providerID: _modelRaw.slice(0, _slash), modelID: _modelRaw.slice(_slash + 1) }
       : { providerID: 'github-copilot', modelID: _modelRaw };
 
-  return { targetAgent, distilMinIntervalMs, distillerModel };
+  return { targetAgents, distilMinIntervalMs, distillerModel };
 }
