@@ -94,7 +94,8 @@ export function loadConfigFile(configPath = CONFIG_FILE_PATH) {
  * @returns {{
  *   targetAgents: string[],
  *   distilMinIntervalMs: number,
- *   distillerModel: { providerID: string, modelID: string }
+ *   distillerModel: { providerID: string, modelID: string },
+ *   atomInjectCap: number
  * }}
  */
 export function resolveConfig(env, fileCfg) {
@@ -157,5 +158,27 @@ export function resolveConfig(env, fileCfg) {
       ? { providerID: _modelRaw.slice(0, _slash), modelID: _modelRaw.slice(_slash + 1) }
       : { providerID: 'github-copilot', modelID: _modelRaw };
 
-  return { targetAgents, distilMinIntervalMs, distillerModel };
+  // ── atomInjectCap ─────────────────────────────────────────────────────────
+  let atomInjectCap = 40;
+  if (env.MEMORY_ATOM_INJECT_CAP !== undefined) {
+    const v = Number(env.MEMORY_ATOM_INJECT_CAP);
+    if (Number.isInteger(v) && v > 0) {
+      atomInjectCap = v;
+    } else {
+      console.warn(
+        '[agent-memory] env var "MEMORY_ATOM_INJECT_CAP" must be a positive integer; using default 40'
+      );
+    }
+  } else if (fileCfg.atomInjectCap !== undefined) {
+    const v = Number(fileCfg.atomInjectCap);
+    if (Number.isInteger(v) && v > 0) {
+      atomInjectCap = v;
+    } else {
+      console.warn(
+        '[agent-memory] config key "atomInjectCap" must be a positive integer; using default 40'
+      );
+    }
+  }
+
+  return { targetAgents, distilMinIntervalMs, distillerModel, atomInjectCap };
 }

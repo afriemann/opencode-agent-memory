@@ -482,3 +482,54 @@ describe('end-to-end: file load + resolve', () => {
     warnSpy.mockRestore();
   });
 });
+
+// ── 8.19 atomInjectCap ────────────────────────────────────────────────────────
+
+describe('resolveConfig — atomInjectCap', () => {
+  test('uses file value when set to valid positive integer', () => {
+    const cfg = resolveConfig({}, { atomInjectCap: 20 });
+    expect(cfg.atomInjectCap).toBe(20);
+  });
+
+  test('defaults to 40 when neither env nor file set', () => {
+    const cfg = resolveConfig({}, {});
+    expect(cfg.atomInjectCap).toBe(40);
+  });
+
+  test('env var MEMORY_ATOM_INJECT_CAP overrides file value', () => {
+    const cfg = resolveConfig({ MEMORY_ATOM_INJECT_CAP: '15' }, { atomInjectCap: 20 });
+    expect(cfg.atomInjectCap).toBe(15);
+  });
+
+  test('warns and falls back to 40 for non-integer file value', () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const cfg = resolveConfig({}, { atomInjectCap: 'ten' });
+    expect(cfg.atomInjectCap).toBe(40);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('[agent-memory]'));
+    warnSpy.mockRestore();
+  });
+
+  test('warns and falls back to 40 for zero value', () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const cfg = resolveConfig({}, { atomInjectCap: 0 });
+    expect(cfg.atomInjectCap).toBe(40);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('[agent-memory]'));
+    warnSpy.mockRestore();
+  });
+
+  test('warns and falls back to 40 for negative value', () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const cfg = resolveConfig({}, { atomInjectCap: -5 });
+    expect(cfg.atomInjectCap).toBe(40);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('[agent-memory]'));
+    warnSpy.mockRestore();
+  });
+
+  test('warns and falls back to 40 for invalid env var', () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const cfg = resolveConfig({ MEMORY_ATOM_INJECT_CAP: 'bad' }, {});
+    expect(cfg.atomInjectCap).toBe(40);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('[agent-memory]'));
+    warnSpy.mockRestore();
+  });
+});
