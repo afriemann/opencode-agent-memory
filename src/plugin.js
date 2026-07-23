@@ -562,6 +562,9 @@ const AgentMemory = async ({ client, $ }) => {
       scope: tool.schema.string().optional().describe('"workspace" (default), "global"'),
     },
     async execute({ topic, content, description, tags, scope }, context) {
+      if (scope === 'all') {
+        return { title: 'memory_atom_write', output: 'Error: scope="all" is not valid for write operations. Use "workspace" or "global".' };
+      }
       const { scope: resolvedScope, project } = resolveScope(scope, context.directory);
       try {
         const out = await spawnMemory($, ['atom-write', resolvedScope, project],
@@ -592,6 +595,9 @@ const AgentMemory = async ({ client, $ }) => {
       scope: tool.schema.string().optional().describe('"workspace" (default), "global"'),
     },
     async execute({ topic, content, scope }, context) {
+      if (scope === 'all') {
+        return { title: 'memory_atom_append', output: 'Error: scope="all" is not valid for write operations. Use "workspace" or "global".' };
+      }
       const { scope: resolvedScope, project } = resolveScope(scope, context.directory);
       try {
         const out = await spawnMemory($, ['atom-append', resolvedScope, project], { topic, content });
@@ -728,6 +734,9 @@ const AgentMemory = async ({ client, $ }) => {
       scope: tool.schema.string().optional().describe('"workspace" (default), "global"'),
     },
     async execute({ topic, scope }, context) {
+      if (scope === 'all') {
+        return { title: 'memory_atom_delete', output: 'Error: scope="all" is not valid for delete operations. Use "workspace" or "global".' };
+      }
       const { scope: resolvedScope, project } = resolveScope(scope, context.directory);
       try {
         const out = await spawnMemory($, ['atom-delete', resolvedScope, project, topic]);
@@ -766,11 +775,9 @@ const AgentMemory = async ({ client, $ }) => {
             if (ephemerals.has(sessionId)) return;
             if (primerLoaded.has(sessionId)) return;
 
-            // Capture session name from the event
+            // Capture session name from the event; always store, null when absent
             const title = info?.title ?? null;
-            if (title) {
-              sessionNames.set(sessionId, title);
-            }
+            sessionNames.set(sessionId, title);
 
             let agent = info?.agent;
             let project = info?.directory;

@@ -113,10 +113,11 @@ export function assemblePrimer({ rows, projectAtoms, globalAtoms, agent, project
     for (const atom of display) {
       const preview = atom.preview ? String(atom.preview).slice(0, 80) : '';
       const relTime = atom.updated_at ? formatRelativeTime(atom.updated_at, now) : '';
-      lines.push(`• ${atom.topic} — ${atom.description}${preview ? ` | ${preview}` : ''} (${relTime})`);
+      const contentPart = preview ? ` — ${preview}…` : '';
+      lines.push(`${atom.topic} [${relTime}] — "${atom.description}"${contentPart}`);
     }
     if (projectAtoms.length > cap) {
-      lines.push(`+ ${projectAtoms.length - cap} more`);
+      lines.push(`(+${projectAtoms.length - cap} more — call memory_atom_list to see all)`);
     }
   } else {
     lines.push('No project atoms yet.');
@@ -133,10 +134,11 @@ export function assemblePrimer({ rows, projectAtoms, globalAtoms, agent, project
     for (const atom of display) {
       const preview = atom.preview ? String(atom.preview).slice(0, 80) : '';
       const relTime = atom.updated_at ? formatRelativeTime(atom.updated_at, now) : '';
-      lines.push(`• ${atom.topic} — ${atom.description}${preview ? ` | ${preview}` : ''} (${relTime})`);
+      const contentPart = preview ? ` — ${preview}…` : '';
+      lines.push(`${atom.topic} [${relTime}] — "${atom.description}"${contentPart}`);
     }
     if (globalAtoms.length > cap) {
-      lines.push(`+ ${globalAtoms.length - cap} more`);
+      lines.push(`(+${globalAtoms.length - cap} more — call memory_atom_list to see all)`);
     }
   } else {
     lines.push('No global atoms yet.');

@@ -543,6 +543,78 @@ describe('migration idempotency', () => {
   });
 });
 
+// ── Migration rollback ────────────────────────────────────────────────────────
+
+describe('migration failure rolls back entirely and retries cleanly', () => {
+  test('failed migration leaves hot_state unchanged and user_version < 2; retry succeeds', () => {
+    // Build a v1 DB: hot_state without session_id, with an existing row
+    const db = new DatabaseSync(':memory:');
+    db.exec(`
+      CREATE TABLE hot_state (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scope TEXT NOT NULL DEFAULT 'project',
+        agent TEXT NOT NULL,
+        project TEXT NOT NULL,
+        last_worked_summary TEXT,
+        next_action TEXT,
+        open_questions TEXT,
+        anchored_git_sha TEXT,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE memory_signal (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        scope TEXT NOT NULL DEFAULT 'project',
+        agent TEXT NOT NULL,
+        project TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE TABLE distil_watermark (
+        session_id TEXT PRIMARY KEY,
+        last_signal_ms INTEGER NOT NULL DEFAULT 0,
+        last_distil_ms INTEGER NOT NULL DEFAULT 0
+      );
+    `);
+    db.prepare(`
+      INSERT INTO hot_state (agent, project, last_worked_summary, next_action, open_questions, updated_at)
+      VALUES ('engineer', '/rollback-test', 'v1-summary', '', '[]', 42)
+    `).run();
+
+    // Plant a hot_state_new table to sabotage rebuildHotState
+    db.exec(`CREATE TABLE hot_state_new (id INTEGER PRIMARY KEY)`);
+
+    // ensureSchema must throw because rebuildHotState cannot create hot_state_new
+    expect(() => ensureSchema(db)).toThrow();
+
+    // user_version must still be 0 (not 2)
+    const v = db.prepare('PRAGMA user_version').get().user_version;
+    expect(v).toBe(0);
+
+    // hot_state must still be in v1 shape with the original row
+    const row = db.prepare("SELECT last_worked_summary FROM hot_state").get();
+    expect(row).toBeDefined();
+    expect(row.last_worked_summary).toBe('v1-summary');
+
+    // Remove the sabotage table so the retry can succeed
+    db.exec(`DROP TABLE hot_state_new`);
+
+    // Second ensureSchema call must complete migration successfully
+    expect(() => ensureSchema(db)).not.toThrow();
+    const v2 = db.prepare('PRAGMA user_version').get().user_version;
+    expect(v2).toBe(2);
+
+    // hot_state row preserved after migration
+    const migratedRow = db.prepare(
+      "SELECT last_worked_summary, session_id FROM hot_state WHERE project='/rollback-test'"
+    ).get();
+    expect(migratedRow).toBeDefined();
+    expect(migratedRow.last_worked_summary).toBe('v1-summary');
+    expect(migratedRow.session_id).toBe('');
+  });
+});
+
 // ── 8.11 pruneHotState ───────────────────────────────────────────────────────
 
 describe('pruneHotState', () => {

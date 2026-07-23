@@ -199,6 +199,61 @@ describe('distil-write SQL transaction — session-scoped (v2)', () => {
     expect(row.last_worked_summary).toBe('fresh');
   });
 
+  test('monotonic guard: same-timestamp distil write is not applied', () => {
+    const db = openMemory();
+    runDistilWriteSQL(db, {
+      agent: AGENT, project: PROJECT,
+      distilled: { ...DISTILLED, last_worked_summary: 'original' },
+      anchoredSha: null, lastSignalMs: 0, sessionId: SES_A, now: 5000,
+    });
+    // Second call at the SAME timestamp — should NOT overwrite (guard is strict >)
+    runDistilWriteSQL(db, {
+      agent: AGENT, project: PROJECT,
+      distilled: { ...DISTILLED, last_worked_summary: 'overwrite-attempt' },
+      anchoredSha: null, lastSignalMs: 0, sessionId: SES_A, now: 5000,
+    });
+
+    const row = db.prepare("SELECT last_worked_summary FROM hot_state WHERE session_id=?").get(SES_A);
+    expect(row.last_worked_summary).toBe('original');
+  });
+
+  test('stale distil still prunes own signals and advances watermark', () => {
+    const db = openMemory();
+    // Insert a newer hot_state row directly — no watermark entry yet
+    db.prepare(`
+      INSERT INTO hot_state
+        (scope, agent, project, session_id, last_worked_summary, next_action, open_questions, updated_at)
+      VALUES ('project', ?, ?, ?, 'fresh-from-newer-call', '', '[]', 5000)
+    `).run(AGENT, PROJECT, SES_A);
+
+    // Insert a signal for SES_A
+    db.prepare(`
+      INSERT INTO memory_signal (scope, agent, project, session_id, kind, payload, created_at)
+      VALUES ('project', ?, ?, ?, 'message', 'ping', 200)
+    `).run(AGENT, PROJECT, SES_A);
+
+    // Call distil-write with stale now=1000 but with lastSignalMs=200
+    // hot_state UPSERT is blocked (5000 > 1000), but signals+watermark proceed
+    runDistilWriteSQL(db, {
+      agent: AGENT, project: PROJECT,
+      distilled: { ...DISTILLED, last_worked_summary: 'stale-value' },
+      anchoredSha: null, lastSignalMs: 200, sessionId: SES_A, now: 1000,
+    });
+
+    // hot_state NOT overwritten
+    const row = db.prepare("SELECT last_worked_summary FROM hot_state WHERE session_id=?").get(SES_A);
+    expect(row.last_worked_summary).toBe('fresh-from-newer-call');
+
+    // Signal IS deleted (lastSignalMs=200 ≥ created_at=200)
+    const sig = db.prepare("SELECT id FROM memory_signal WHERE session_id=?").get(SES_A);
+    expect(sig).toBeUndefined();
+
+    // Watermark IS advanced (was 0, now set to last_signal_ms=200, last_distil_ms=1000)
+    const wm = readDistilWatermark(db, SES_A);
+    expect(wm.last_signal_ms).toBe(200);
+    expect(wm.last_distil_ms).toBe(1000);
+  });
+
   test('advances watermark after a successful write', () => {
     const db = openMemory();
     runDistilWriteSQL(db, {

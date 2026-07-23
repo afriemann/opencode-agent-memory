@@ -162,7 +162,7 @@ describe('assemblePrimer', () => {
       staleness: STALENESS,
       cap: 3, // cap of 3 → 2 overflow
     });
-    expect(result).toContain('+ 2 more');
+    expect(result).toContain('(+2 more — call memory_atom_list to see all)');
   });
 
   test('global atom directory section is rendered', () => {

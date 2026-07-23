@@ -308,11 +308,10 @@ export function atomWrite(db, { scope, project, topic, content, description, tag
   `).run(
     scope, project, normTopic, description.trim(), content, tagsJson,
     sessionId ?? null, sessionName ?? null,
-    existing ? existing.created_at ?? now : now,
+    now,  // created_at: ignored on update (ON CONFLICT does not include it)
     now
   );
 
-  // Re-fetch created_at for INSERT case (needed above but simpler to re-read)
   return { action: existing ? 'overwritten' : 'created' };
 }
 
@@ -436,20 +435,6 @@ export function atomSearch(db, { scope, project, query, limit = 20 }) {
     ORDER BY updated_at DESC
     LIMIT ?
   `;
-
-  let whereClause = '';
-  let params;
-
-  if (scope === 'workspace') {
-    whereClause = `AND ((a.scope = ? AND a.project = ?) OR (a.scope = 'global' AND a.project = ''))`;
-    params = [query, scope === 'workspace' ? project : project, '', cap];
-  } else if (scope === 'global') {
-    whereClause = `AND a.scope = 'global' AND a.project = ''`;
-    params = [query, cap];
-  } else {
-    // all workspaces (default)
-    params = [query, cap];
-  }
 
   try {
     if (scope === 'workspace') {
