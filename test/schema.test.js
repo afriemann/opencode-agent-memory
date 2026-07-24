@@ -46,7 +46,7 @@ describe('ensureSchema — fresh DB', () => {
 
     const cols = db.prepare("PRAGMA table_info(memory_atom)").all().map((c) => c.name);
     for (const col of ['id', 'scope', 'project', 'topic', 'description', 'content', 'tags',
-                       'session_id', 'session_name', 'created_at', 'updated_at']) {
+                       'pinned', 'session_id', 'session_name', 'created_at', 'updated_at']) {
       expect(cols).toContain(col);
     }
 
@@ -102,11 +102,11 @@ describe('ensureSchema — fresh DB', () => {
     expect(() => ensureSchema(db)).not.toThrow();
   });
 
-  test('user_version is set to 2 after first ensureSchema', () => {
+  test('user_version is set to 3 after first ensureSchema', () => {
     const db = openMemory();
     ensureSchema(db);
     const v = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v).toBe(2);
+    expect(v).toBe(3);
   });
 });
 
@@ -540,11 +540,11 @@ describe('migration — populated old-schema DB', () => {
     expect(cols).not.toContain('adr_candidate');
   });
 
-  test('user_version is 2 after migration', () => {
+  test('user_version is 3 after migration', () => {
     const db = buildOldSchemaDb();
     ensureSchema(db);
     const v = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v).toBe(2);
+    expect(v).toBe(3);
   });
 
   test('legacy summaries are migrated to work/migrated-summary atom', () => {
@@ -689,7 +689,7 @@ describe('migration failure rolls back entirely and retries cleanly', () => {
     // Second ensureSchema call must complete migration successfully
     expect(() => ensureSchema(db)).not.toThrow();
     const v2 = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v2).toBe(2);
+    expect(v2).toBe(3);
 
     // hot_state row preserved after migration
     const migratedRow = db.prepare(
@@ -893,5 +893,300 @@ describe('atomPatch', () => {
     });
 
     expect(result.patched).toEqual(expect.arrayContaining(['description', 'tags']));
+  });
+});
+
+// ── v2→v3 migration (pinned column) ──────────────────────────────────────────
+// spec: openspec/changes/pin-memory-atoms/specs/memory-atom/spec.md
+
+describe('migration — v2 to v3 (pinned column)', () => {
+  function buildV2SchemaDb() {
+    const db = new DatabaseSync(':memory:');
+    db.exec('PRAGMA busy_timeout = 5000;');
+    db.exec(`
+      CREATE TABLE hot_state (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scope TEXT NOT NULL DEFAULT 'project',
+        agent TEXT NOT NULL,
+        project TEXT NOT NULL,
+        session_id TEXT NOT NULL DEFAULT '',
+        session_name TEXT,
+        last_worked_summary TEXT,
+        next_action TEXT,
+        open_questions TEXT,
+        anchored_git_sha TEXT,
+        schema_version INTEGER NOT NULL DEFAULT 2,
+        updated_at INTEGER NOT NULL,
+        UNIQUE (scope, agent, project, session_id)
+      );
+      CREATE TABLE memory_signal (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        scope TEXT NOT NULL DEFAULT 'project',
+        agent TEXT NOT NULL,
+        project TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE TABLE distil_watermark (
+        session_id TEXT PRIMARY KEY,
+        last_signal_ms INTEGER NOT NULL DEFAULT 0,
+        last_distil_ms INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE memory_atom (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scope TEXT NOT NULL DEFAULT 'project',
+        project TEXT NOT NULL DEFAULT '',
+        topic TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        content TEXT NOT NULL DEFAULT '',
+        tags TEXT NOT NULL DEFAULT '[]',
+        session_id TEXT,
+        session_name TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE (scope, project, topic)
+      );
+      PRAGMA user_version = 2;
+    `);
+    db.prepare(`
+      INSERT INTO memory_atom (scope, project, topic, description, content, tags, created_at, updated_at)
+      VALUES ('project', '/p', 'existing-atom', 'existing atom', 'body', '[]', 100, 200)
+    `).run();
+    return db;
+  }
+
+  test('adds pinned column to existing memory_atom table', () => {
+    const db = buildV2SchemaDb();
+    ensureSchema(db);
+    const cols = db.prepare('PRAGMA table_info(memory_atom)').all().map((c) => c.name);
+    expect(cols).toContain('pinned');
+  });
+
+  test('existing rows get pinned = 0 after migration', () => {
+    const db = buildV2SchemaDb();
+    ensureSchema(db);
+    const row = db.prepare("SELECT pinned FROM memory_atom WHERE topic = 'existing-atom'").get();
+    expect(row).toBeDefined();
+    expect(row.pinned).toBe(0);
+  });
+
+  test('user_version is 3 after v2 to v3 migration', () => {
+    const db = buildV2SchemaDb();
+    ensureSchema(db);
+    const v = db.prepare('PRAGMA user_version').get().user_version;
+    expect(v).toBe(3);
+  });
+
+  test('v3 migration is idempotent — calling ensureSchema twice does not throw', () => {
+    const db = buildV2SchemaDb();
+    ensureSchema(db);
+    expect(() => ensureSchema(db)).not.toThrow();
+  });
+
+  test('v3 migration is idempotent when pinned already present (user_version < 3)', () => {
+    const db = buildV2SchemaDb();
+    db.exec('ALTER TABLE memory_atom ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0');
+    expect(() => ensureSchema(db)).not.toThrow();
+    const v = db.prepare('PRAGMA user_version').get().user_version;
+    expect(v).toBe(3);
+  });
+
+  test('fresh and migrated databases have identical pinned column definition', () => {
+    const fresh = openMemory();
+    ensureSchema(fresh);
+    const migrated = buildV2SchemaDb();
+    ensureSchema(migrated);
+
+    const pinnedCol = (db) => db.prepare('PRAGMA table_info(memory_atom)').all().find((c) => c.name === 'pinned');
+    const f = pinnedCol(fresh);
+    const m = pinnedCol(migrated);
+    expect(f).toBeDefined();
+    expect(m).toBeDefined();
+    expect(f.type).toBe(m.type);
+    expect(f.dflt_value).toBe(m.dflt_value);
+    expect(f.notnull).toBe(m.notnull);
+  });
+});
+
+// ── atomWrite with pinned ─────────────────────────────────────────────────────
+// spec: openspec/changes/pin-memory-atoms/specs/memory-atom/spec.md
+
+describe('atomWrite with pinned', () => {
+  test('pinned=true stores pinned=1 in the DB', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'important', content: 'x', description: 'd', pinned: true });
+    const row = db.prepare("SELECT pinned FROM memory_atom WHERE topic='important'").get();
+    expect(row.pinned).toBe(1);
+  });
+
+  test('pinned omitted defaults to 0', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'normal', content: 'x', description: 'd' });
+    const row = db.prepare("SELECT pinned FROM memory_atom WHERE topic='normal'").get();
+    expect(row.pinned).toBe(0);
+  });
+
+  test('pinned=false stores pinned=0', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'unpinned', content: 'x', description: 'd', pinned: false });
+    const row = db.prepare("SELECT pinned FROM memory_atom WHERE topic='unpinned'").get();
+    expect(row.pinned).toBe(0);
+  });
+
+  test('re-writing a pinned atom does not unpin it (INSERT-only)', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'sticky', content: 'v1', description: 'd', pinned: true });
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'sticky', content: 'v2', description: 'd updated' });
+    const row = db.prepare("SELECT pinned, content FROM memory_atom WHERE topic='sticky'").get();
+    expect(row.pinned).toBe(1);
+    expect(row.content).toBe('v2');
+  });
+
+  test('re-writing with explicit pinned=false does not override existing pin (INSERT-only)', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'anchored', content: 'v1', description: 'd', pinned: true });
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'anchored', content: 'v2', description: 'd', pinned: false });
+    const row = db.prepare("SELECT pinned FROM memory_atom WHERE topic='anchored'").get();
+    expect(row.pinned).toBe(1);
+  });
+});
+
+// ── atomPatch with pinned ─────────────────────────────────────────────────────
+// spec: openspec/changes/pin-memory-atoms/specs/memory-atom/spec.md
+
+describe('atomPatch with pinned', () => {
+  function seedUnpinned(db) {
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'pin-target', content: 'body', description: 'desc' });
+  }
+
+  function seedPinned(db) {
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'pin-target', content: 'body', description: 'desc', pinned: true });
+  }
+
+  test('atomPatch with pinned:true pins the atom and bumps updated_at', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    db.prepare(`
+      INSERT INTO memory_atom (scope, project, topic, description, content, tags, pinned, created_at, updated_at)
+      VALUES ('project', '/p', 'pin-target', 'desc', 'body', '[]', 0, 1000, 2000)
+    `).run();
+
+    atomPatch(db, { scope: 'project', project: '/p', topic: 'pin-target', patch: { pinned: true } });
+
+    const row = db.prepare("SELECT pinned, updated_at FROM memory_atom WHERE topic='pin-target'").get();
+    expect(row.pinned).toBe(1);
+    expect(row.updated_at).toBeGreaterThan(2000);
+  });
+
+  test('atomPatch with pinned:false unpins the atom and bumps updated_at', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    db.prepare(`
+      INSERT INTO memory_atom (scope, project, topic, description, content, tags, pinned, created_at, updated_at)
+      VALUES ('project', '/p', 'pin-target', 'desc', 'body', '[]', 1, 1000, 2000)
+    `).run();
+
+    atomPatch(db, { scope: 'project', project: '/p', topic: 'pin-target', patch: { pinned: false } });
+
+    const row = db.prepare("SELECT pinned, updated_at FROM memory_atom WHERE topic='pin-target'").get();
+    expect(row.pinned).toBe(0);
+    expect(row.updated_at).toBeGreaterThan(2000);
+  });
+
+  test('atomPatch with pinned alone is accepted (single-field patch)', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    seedUnpinned(db);
+
+    const result = atomPatch(db, { scope: 'project', project: '/p', topic: 'pin-target', patch: { pinned: true } });
+    expect(result.patched).toContain('pinned');
+  });
+
+  test('atomPatch without pinned field leaves existing pinned value unchanged', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    db.prepare(`
+      INSERT INTO memory_atom (scope, project, topic, description, content, tags, pinned, created_at, updated_at)
+      VALUES ('project', '/p', 'pin-target', 'desc', 'body', '[]', 1, 1000, 2000)
+    `).run();
+
+    atomPatch(db, { scope: 'project', project: '/p', topic: 'pin-target', patch: { description: 'updated' } });
+
+    const row = db.prepare("SELECT pinned FROM memory_atom WHERE topic='pin-target'").get();
+    expect(row.pinned).toBe(1);
+  });
+
+  test('atomPatch with pinned does not change content', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    db.prepare(`
+      INSERT INTO memory_atom (scope, project, topic, description, content, tags, pinned, created_at, updated_at)
+      VALUES ('project', '/p', 'pin-target', 'desc', 'original body', '[]', 0, 1000, 2000)
+    `).run();
+
+    atomPatch(db, { scope: 'project', project: '/p', topic: 'pin-target', patch: { pinned: true } });
+
+    const row = db.prepare("SELECT content FROM memory_atom WHERE topic='pin-target'").get();
+    expect(row.content).toBe('original body');
+  });
+
+  test('atomPatch empty patch still requires at least one field (pinned extends PATCHABLE)', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    seedUnpinned(db);
+
+    expect(() =>
+      atomPatch(db, { scope: 'project', project: '/p', topic: 'pin-target', patch: {} })
+    ).toThrow(/at least one/i);
+  });
+});
+
+// ── atomList with pinned ──────────────────────────────────────────────────────
+// spec: openspec/changes/pin-memory-atoms/specs/memory-atom/spec.md
+
+describe('atomList with pinned', () => {
+  test('pinned field is returned in list rows', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'pinned-atom', content: 'x', description: 'd', pinned: true });
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'regular-atom', content: 'y', description: 'd' });
+
+    const results = atomList(db, { scope: 'project', project: '/p' });
+    const pinned = results.find((r) => r.topic === 'pinned-atom');
+    const regular = results.find((r) => r.topic === 'regular-atom');
+    expect(pinned).toBeDefined();
+    expect(pinned.pinned).toBe(1);
+    expect(regular).toBeDefined();
+    expect(regular.pinned).toBe(0);
+  });
+
+  test('pinned atoms appear before non-pinned atoms in the returned list', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'zzz-regular', content: 'x', description: 'd' });
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'aaa-pinned', content: 'y', description: 'd', pinned: true });
+
+    const results = atomList(db, { scope: 'project', project: '/p' });
+    const pinnedIdx = results.findIndex((r) => r.topic === 'aaa-pinned');
+    const regularIdx = results.findIndex((r) => r.topic === 'zzz-regular');
+    expect(pinnedIdx).toBeLessThan(regularIdx);
+  });
+
+  test('scope=all includes pinned field for all rows', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'global', project: '', topic: 'global-pinned', content: 'x', description: 'd', pinned: true });
+
+    const results = atomList(db, { scope: 'all', project: '' });
+    const row = results.find((r) => r.topic === 'global-pinned');
+    expect(row).toBeDefined();
+    expect(row.pinned).toBe(1);
   });
 });

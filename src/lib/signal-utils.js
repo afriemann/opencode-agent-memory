@@ -48,6 +48,22 @@ export function lastTwoSegments(absPath) {
 }
 
 /**
+ * Render a single atom directory entry line.
+ *
+ * @param {object} atom — atom row with topic, description, preview, updated_at
+ * @param {number} now — reference epoch ms
+ * @param {{ pinned?: boolean }} [opts]
+ * @returns {string}
+ */
+function renderAtomLine(atom, now, { pinned = false } = {}) {
+  const preview = atom.preview ? String(atom.preview).slice(0, 80) : '';
+  const relTime = atom.updated_at ? formatRelativeTime(atom.updated_at, now) : '';
+  const contentPart = preview ? ` — ${preview}…` : '';
+  const prefix = pinned ? '[pinned] ' : '';
+  return `${prefix}${atom.topic} [${relTime}] — "${atom.description}"${contentPart}`;
+}
+
+/**
  * Assemble the memory primer text injected at session start.
  *
  * Supports multi-row session threads and atom directory sections.
@@ -109,15 +125,17 @@ export function assemblePrimer({ rows, projectAtoms, globalAtoms, agent, project
   if (hasProjectAtoms) {
     lines.push('Fetch atoms on demand when relevant — do not pre-fetch at session start.');
     lines.push('');
-    const display = projectAtoms.slice(0, cap);
-    for (const atom of display) {
-      const preview = atom.preview ? String(atom.preview).slice(0, 80) : '';
-      const relTime = atom.updated_at ? formatRelativeTime(atom.updated_at, now) : '';
-      const contentPart = preview ? ` — ${preview}…` : '';
-      lines.push(`${atom.topic} [${relTime}] — "${atom.description}"${contentPart}`);
+    const pinnedProject = projectAtoms.filter((a) => a.pinned).sort((a, b) => a.topic.localeCompare(b.topic));
+    const regularProject = projectAtoms.filter((a) => !a.pinned);
+    const visibleProject = regularProject.slice(0, cap);
+    for (const atom of pinnedProject) {
+      lines.push(renderAtomLine(atom, now, { pinned: true }));
     }
-    if (projectAtoms.length > cap) {
-      lines.push(`(+${projectAtoms.length - cap} more — call memory_atom_list to see all)`);
+    for (const atom of visibleProject) {
+      lines.push(renderAtomLine(atom, now));
+    }
+    if (regularProject.length > cap) {
+      lines.push(`(+${regularProject.length - cap} more — call memory_atom_list to see all)`);
     }
   } else {
     lines.push('No project atoms yet.');
@@ -130,15 +148,17 @@ export function assemblePrimer({ rows, projectAtoms, globalAtoms, agent, project
   if (hasGlobalAtoms) {
     lines.push('Fetch atoms on demand when relevant — do not pre-fetch at session start.');
     lines.push('');
-    const display = globalAtoms.slice(0, cap);
-    for (const atom of display) {
-      const preview = atom.preview ? String(atom.preview).slice(0, 80) : '';
-      const relTime = atom.updated_at ? formatRelativeTime(atom.updated_at, now) : '';
-      const contentPart = preview ? ` — ${preview}…` : '';
-      lines.push(`${atom.topic} [${relTime}] — "${atom.description}"${contentPart}`);
+    const pinnedGlobal = globalAtoms.filter((a) => a.pinned).sort((a, b) => a.topic.localeCompare(b.topic));
+    const regularGlobal = globalAtoms.filter((a) => !a.pinned);
+    const visibleGlobal = regularGlobal.slice(0, cap);
+    for (const atom of pinnedGlobal) {
+      lines.push(renderAtomLine(atom, now, { pinned: true }));
     }
-    if (globalAtoms.length > cap) {
-      lines.push(`(+${globalAtoms.length - cap} more — call memory_atom_list to see all)`);
+    for (const atom of visibleGlobal) {
+      lines.push(renderAtomLine(atom, now));
+    }
+    if (regularGlobal.length > cap) {
+      lines.push(`(+${regularGlobal.length - cap} more — call memory_atom_list to see all)`);
     }
   } else {
     lines.push('No global atoms yet.');

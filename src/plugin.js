@@ -75,7 +75,7 @@ You have persistent memory via the \`memory_atom_*\` and \`memory_state_*\` tool
 
 **Scope**: use \`workspace\` (default) for project-specific facts; use \`global\` for facts true across all projects (host config, tool versions, cross-repo conventions).
 
-**Update atom metadata** (\`memory_atom_patch\`) when you need to correct description, tags, or created_at without rewriting content — e.g. re-dating a migrated atom. Use \`memory_atom_write\` when content itself changes.
+**Update atom metadata** (\`memory_atom_patch\`) when you need to correct description, tags, created_at, or pin state without rewriting content — e.g. re-dating a migrated atom or pinning it. Use \`memory_atom_write\` when content itself changes.
 
 **Hot-state** (\`memory_state_*\`) is managed automatically — it distils on session idle. Call \`memory_state_distil\` to force an immediate save when finishing a meaningful chunk of work.`;
 
@@ -578,20 +578,27 @@ const AgentMemory = async ({ client, $ }) => {
     description:
       'Write (upsert) a durable named memory atom. ' +
       'The `description` field is required and describes what the atom is for. ' +
-      'Returns confirmation of whether the atom was created or an existing one was overwritten.',
+      'Returns confirmation of whether the atom was created or an existing one was overwritten. ' +
+      'Optional `pinned: true` marks the atom so it always appears at the top of the session primer regardless of the cap. ' +
+      'Pin state is set on the first insert and is NOT overwritten by subsequent content updates — use memory_atom_patch to change the pin state of an existing atom.',
     args: {
       topic: tool.schema.string().describe('Hierarchical key, e.g. "arch/db-layer"'),
       content: tool.schema.string().describe('Full atom content'),
       description: tool.schema.string().describe('What this atom is for (required)'),
       tags: tool.schema.array(tool.schema.string()).optional().describe('Optional tags'),
       scope: tool.schema.string().optional().describe('"workspace" (default), "global"'),
+      pinned: tool.schema.boolean().optional().describe(
+        'Pin this atom so it always appears in the session primer. ' +
+        'Pinned atoms are listed first, before the regular capped list. ' +
+        'Default false. INSERT-only: re-writing an existing atom does not change its pin state.'
+      ),
       created_at: tool.schema.union([tool.schema.string(), tool.schema.number()]).optional().describe(
         'Optional creation timestamp to preserve when migrating atoms. ' +
         'Accepts an ISO 8601 date string or an epoch-ms integer. ' +
         'When omitted, the current time is used.'
       ),
     },
-    async execute({ topic, content, description, tags, scope, created_at }, context) {
+    async execute({ topic, content, description, tags, scope, pinned, created_at }, context) {
       if (scope === 'all') {
         return { title: 'memory_atom_write', output: 'Error: scope="all" is not valid for write operations. Use "workspace" or "global".' };
       }
@@ -616,7 +623,7 @@ const AgentMemory = async ({ client, $ }) => {
 
       try {
         const out = await spawnMemory($, ['atom-write', resolvedScope, project],
-          { topic, content, description, tags, sessionId: context.sessionID,
+          { topic, content, description, tags, pinned, sessionId: context.sessionID,
             sessionName: sessionNames.get(context.sessionID) ?? null,
             ...(createdAt !== undefined ? { createdAt } : {}) });
         const result = JSON.parse(out.trim());
@@ -766,7 +773,8 @@ const AgentMemory = async ({ client, $ }) => {
     description:
       'List memory atoms by topic prefix. ' +
       'Defaults to current workspace + global. ' +
-      'Use scope="all" to include all workspaces.',
+      'Use scope="all" to include all workspaces. ' +
+      'Pinned atoms are listed first with a `[pinned]` prefix.',
     args: {
       prefix: tool.schema.string().optional().describe('Topic prefix filter (e.g. "arch/")'),
       scope: tool.schema.string().optional().describe('"workspace" (default), "global", "all"'),
@@ -782,7 +790,8 @@ const AgentMemory = async ({ client, $ }) => {
         const lines = results.map((r) => {
           const createdRel = r.created_at ? formatRelativeTime(r.created_at) : 'unknown';
           const updatedRel = r.updated_at ? formatRelativeTime(r.updated_at) : 'unknown';
-          return `• [${r.scope}/${r.project || 'global'}] ${r.topic} — ${r.description} | ${r.preview || ''} [created: ${createdRel}, updated: ${updatedRel}]`;
+          const pinnedPrefix = r.pinned ? '[pinned] ' : '';
+          return `• ${pinnedPrefix}[${r.scope}/${r.project || 'global'}] ${r.topic} — ${r.description} | ${r.preview || ''} [created: ${createdRel}, updated: ${updatedRel}]`;
         });
         return { title: 'memory_atom_list', output: lines.join('\n') };
       } catch (err) {
@@ -805,6 +814,7 @@ const AgentMemory = async ({ client, $ }) => {
       'To CLEAR tags, supply `tags: []` explicitly inside `patch` — omitting `tags` leaves existing tags unchanged. ' +
       '`patch.created_at` accepts an ISO 8601 date string or an epoch-ms number. ' +
       'A created_at-only patch does NOT update the atom\'s updated_at timestamp. ' +
+      '`patch.pinned` pins or unpins the atom; pinned atoms always appear at the top of the session primer. ' +
       'Use memory_atom_write when you need to change the atom\'s content.',
     args: {
       topic: tool.schema.string().describe('Topic key of the atom to patch'),
@@ -818,6 +828,9 @@ const AgentMemory = async ({ client, $ }) => {
         created_at: tool.schema.union([tool.schema.string(), tool.schema.number()]).optional().describe(
           'Replacement creation timestamp. Accepts ISO 8601 string or epoch-ms number.'
         ),
+        pinned: tool.schema.boolean().optional().describe(
+          'Pin or unpin the atom. Pinned atoms appear at the top of the session primer, before the regular capped list.'
+        ),
       }).describe('Fields to patch. At least one field must be present.'),
     },
     async execute({ topic, patch = {}, scope, workspace }, context) {
@@ -827,15 +840,15 @@ const AgentMemory = async ({ client, $ }) => {
         return { title: 'memory_atom_patch', output: 'Error: scope="all" is not valid for patch operations. Use "workspace" or "global".' };
       }
 
-      const { description, tags, created_at } = patch;
+      const { description, tags, created_at, pinned } = patch;
 
       // tool.schema (Zod) .optional() produces T | undefined — null is rejected at
       // schema validation before execute is called, so `!== undefined` is sufficient
       // to distinguish "caller supplied tags: []" (clear) from "caller omitted tags" (keep).
-      const PATCHABLE = ['description', 'tags', 'created_at'];
+      const PATCHABLE = ['description', 'tags', 'created_at', 'pinned'];
       const present = PATCHABLE.filter((f) => patch[f] !== undefined);
       if (present.length === 0) {
-        return { title: 'memory_atom_patch', output: 'Error: at least one of description, tags, created_at is required in `patch`.' };
+        return { title: 'memory_atom_patch', output: 'Error: at least one of description, tags, created_at, pinned is required in `patch`.' };
       }
 
       // Normalise created_at to epoch ms (mirrors memory_atom_write)
@@ -863,6 +876,7 @@ const AgentMemory = async ({ client, $ }) => {
       if (description !== undefined) patchPayload.description = description;
       if (tags !== undefined) patchPayload.tags = tags;
       if (normCreatedAt !== undefined) patchPayload.created_at = normCreatedAt;
+      if (pinned !== undefined) patchPayload.pinned = pinned;
 
       try {
         const out = await spawnMemory($, ['atom-patch', resolvedScope, project], patchPayload);

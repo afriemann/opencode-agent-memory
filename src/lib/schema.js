@@ -12,6 +12,10 @@
 //   - memory_atom_fts: FTS5 virtual table (external-content) over memory_atom.
 //   - Three FTS sync triggers: memory_atom_ai, memory_atom_ad, memory_atom_au.
 //   - PRAGMA user_version = 2 marks migration complete.
+//
+// Schema version 3 changes:
+//   - memory_atom: new column pinned INTEGER NOT NULL DEFAULT 0.
+//   - PRAGMA user_version = 3 marks migration complete.
 
 // ── Topic normalisation ───────────────────────────────────────────────────────
 
@@ -174,6 +178,7 @@ export function ensureSchema(db) {
       description  TEXT    NOT NULL DEFAULT '',
       content      TEXT    NOT NULL DEFAULT '',
       tags         TEXT    NOT NULL DEFAULT '[]',
+      pinned       INTEGER NOT NULL DEFAULT 0,
       session_id   TEXT,
       session_name TEXT,
       created_at   INTEGER NOT NULL,
@@ -242,6 +247,29 @@ export function ensureSchema(db) {
       db.exec('PRAGMA user_version = 2');
     }
   }
+
+  // ── Phase 3: migration to schema version 3 ───────────────────────────────
+  //   Gate: PRAGMA user_version < 3 AND pinned column absent (shape probe)
+  //   ALTER TABLE ADD COLUMN is not idempotent in SQLite (no IF NOT EXISTS),
+  //   so the column-existence probe prevents a duplicate-column error on re-run.
+  const versionAfterV2 = db.prepare('PRAGMA user_version').get()?.user_version ?? 0;
+  if (versionAfterV2 < 3) {
+    const atomCols = db.prepare("PRAGMA table_info(memory_atom)").all().map((c) => c.name);
+    if (!atomCols.includes('pinned')) {
+      db.exec('BEGIN');
+      try {
+        db.exec('ALTER TABLE memory_atom ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0');
+        db.exec('PRAGMA user_version = 3');
+        db.exec('COMMIT');
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
+      }
+    } else {
+      // pinned already present — just bump the version marker
+      db.exec('PRAGMA user_version = 3');
+    }
+  }
 }
 
 // ── pruneHotState ─────────────────────────────────────────────────────────────
@@ -276,11 +304,12 @@ export function pruneHotState(db, agent, project) {
  * @param {import('node:sqlite').DatabaseSync} db
  * @param {{ scope:string, project:string, topic:string, content:string,
  *            description:string, tags?:string[]|string,
+ *            pinned?:boolean,
  *            sessionId?:string, sessionName?:string,
  *            createdAt?:number }} opts
  * @returns {{ action: 'created'|'overwritten' }}
  */
-export function atomWrite(db, { scope, project, topic, content, description, tags, sessionId, sessionName, createdAt }) {
+export function atomWrite(db, { scope, project, topic, content, description, tags, pinned, sessionId, sessionName, createdAt }) {
   const normTopic = normaliseTopic(topic);
   if (!description || typeof description !== 'string' || !description.trim()) {
     throw new Error('Atom description is required and must be a non-empty string');
@@ -292,6 +321,9 @@ export function atomWrite(db, { scope, project, topic, content, description, tag
   // Use caller-supplied creation timestamp when provided; ignored on update (ON CONFLICT
   // does not include created_at), so it only affects the initial INSERT row.
   const insertCreatedAt = typeof createdAt === 'number' ? createdAt : now;
+  // pinned is INSERT-only: set on first insert, never overwritten by a content update.
+  // Pin state must be changed via atomPatch to prevent silent unpinning on re-write.
+  const pinnedValue = pinned ? 1 : 0;
 
   // Check existence before upsert to report created vs overwritten
   const existing = db
@@ -300,8 +332,8 @@ export function atomWrite(db, { scope, project, topic, content, description, tag
 
   db.prepare(`
     INSERT INTO memory_atom
-      (scope, project, topic, description, content, tags, session_id, session_name, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (scope, project, topic, description, content, tags, pinned, session_id, session_name, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(scope, project, topic) DO UPDATE SET
       description  = excluded.description,
       content      = excluded.content,
@@ -310,7 +342,7 @@ export function atomWrite(db, { scope, project, topic, content, description, tag
       session_name = excluded.session_name,
       updated_at   = excluded.updated_at
   `).run(
-    scope, project, normTopic, description.trim(), content, tagsJson,
+    scope, project, normTopic, description.trim(), content, tagsJson, pinnedValue,
     sessionId ?? null, sessionName ?? null,
     insertCreatedAt,
     now
@@ -354,23 +386,23 @@ export function atomAppend(db, { scope, project, topic, content }) {
 /**
  * Partial, content-preserving metadata update for an existing atom.
  *
- * Patches one or more of description, tags, created_at in-place.
+ * Patches one or more of description, tags, created_at, pinned in-place.
  * - Absent fields are left unchanged.
  * - tags:[] clears tags; omitted tags keeps existing tags.
- * - updated_at is bumped only when description or tags is present.
+ * - updated_at is bumped when description, tags, or pinned is present.
  * - created_at-only patch leaves updated_at unchanged.
  *
  * @param {import('node:sqlite').DatabaseSync} db
  * @param {{ scope:string, project:string, topic:string,
- *            patch: { description?:string, tags?:string[], created_at?:number } }} opts
+ *            patch: { description?:string, tags?:string[], created_at?:number, pinned?:boolean } }} opts
  * @returns {{ patched: string[] }}
  */
 export function atomPatch(db, { scope, project, topic, patch }) {
   const normTopic = normaliseTopic(topic);
-  const PATCHABLE = ['description', 'tags', 'created_at'];
+  const PATCHABLE = ['description', 'tags', 'created_at', 'pinned'];
   const present = PATCHABLE.filter((f) => f in patch);
   if (present.length === 0) {
-    throw new Error('at least one of description, tags, created_at is required');
+    throw new Error('at least one of description, tags, created_at, pinned is required');
   }
 
   db.exec('BEGIN IMMEDIATE');
@@ -406,8 +438,12 @@ export function atomPatch(db, { scope, project, topic, patch }) {
       setClauses.push('created_at = ?');
       values.push(patch.created_at);
     }
+    if ('pinned' in patch) {
+      setClauses.push('pinned = ?');
+      values.push(patch.pinned ? 1 : 0);
+    }
 
-    const bumpUpdatedAt = ('description' in patch) || ('tags' in patch);
+    const bumpUpdatedAt = ('description' in patch) || ('tags' in patch) || ('pinned' in patch);
     if (bumpUpdatedAt) {
       setClauses.push('updated_at = ?');
       values.push(Date.now());
@@ -556,21 +592,21 @@ export function atomList(db, { scope, project, prefix }) {
   if (scope === 'all') {
     return db.prepare(`
       SELECT scope, project, topic, description,
-             substr(content, 1, 80) AS preview, created_at, updated_at
+             substr(content, 1, 80) AS preview, pinned, created_at, updated_at
       FROM memory_atom
       WHERE topic LIKE ?
-      ORDER BY scope, project, topic
+      ORDER BY pinned DESC, scope, project, topic
     `).all(likePattern);
   }
 
   // Default: current workspace + global
   return db.prepare(`
     SELECT scope, project, topic, description,
-           substr(content, 1, 80) AS preview, created_at, updated_at
+           substr(content, 1, 80) AS preview, pinned, created_at, updated_at
     FROM memory_atom
     WHERE topic LIKE ?
       AND ((scope = ? AND project = ?) OR (scope = 'global' AND project = ''))
-    ORDER BY scope, project, topic
+    ORDER BY pinned DESC, scope, project, topic
   `).all(likePattern, scope, project);
 }
 

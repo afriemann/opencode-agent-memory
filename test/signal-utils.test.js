@@ -244,3 +244,103 @@ describe('assemblePrimer', () => {
     expect(result).toContain('Staleness:');
   });
 });
+
+// ── assemblePrimer — pinned atom rendering ────────────────────────────────────
+// spec: openspec/changes/pin-memory-atoms/specs/signal-processing/spec.md
+
+describe('assemblePrimer — pinned atom rendering', () => {
+  const PROJECT = '/home/user/repos/my/project';
+  const NOW = Date.now();
+  const STALENESS = { status: '0 commit(s) since this note' };
+
+  test('pinned project atom appears before non-pinned atoms in primer', () => {
+    const atoms = [
+      { topic: 'zzz-normal', description: 'normal atom', preview: 'content', pinned: 0, updated_at: NOW },
+      { topic: 'aaa-pinned', description: 'pinned atom', preview: 'pinned', pinned: 1, updated_at: NOW },
+    ];
+    const result = assemblePrimer({ rows: [], projectAtoms: atoms, globalAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    const pinnedIdx = result.indexOf('aaa-pinned');
+    const normalIdx = result.indexOf('zzz-normal');
+    expect(pinnedIdx).toBeGreaterThanOrEqual(0);
+    expect(normalIdx).toBeGreaterThanOrEqual(0);
+    expect(pinnedIdx).toBeLessThan(normalIdx);
+  });
+
+  test('pinned project atom has [pinned] prefix in primer', () => {
+    const atoms = [{ topic: 'key-fact', description: 'a pinned fact', preview: 'fact body', pinned: 1, updated_at: NOW }];
+    const result = assemblePrimer({ rows: [], projectAtoms: atoms, globalAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    expect(result).toContain('[pinned] key-fact');
+  });
+
+  test('non-pinned project atom does not have [pinned] prefix', () => {
+    const atoms = [{ topic: 'regular', description: 'regular atom', preview: 'body', pinned: 0, updated_at: NOW }];
+    const result = assemblePrimer({ rows: [], projectAtoms: atoms, globalAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    expect(result).not.toContain('[pinned] regular');
+    expect(result).toContain('regular');
+  });
+
+  test('pinned atoms are not capped — all appear even when regular atoms overflow cap', () => {
+    const pinned = Array.from({ length: 5 }, (_, i) => ({
+      topic: `pinned/${i}`, description: `pinned ${i}`, preview: '', pinned: 1, updated_at: NOW,
+    }));
+    const regular = Array.from({ length: 5 }, (_, i) => ({
+      topic: `regular/${i}`, description: `regular ${i}`, preview: '', pinned: 0, updated_at: NOW,
+    }));
+    const result = assemblePrimer({
+      rows: [], projectAtoms: [...pinned, ...regular], globalAtoms: [],
+      agent: 'engineer', project: PROJECT, staleness: STALENESS, cap: 2,
+    });
+    for (const a of pinned) {
+      expect(result).toContain(a.topic);
+    }
+    expect(result).toContain('(+3 more — call memory_atom_list to see all)');
+  });
+
+  test('overflow message counts only non-pinned atoms', () => {
+    const pinned = [{ topic: 'pinned/z', description: 'pinned', preview: '', pinned: 1, updated_at: NOW }];
+    const regular = Array.from({ length: 4 }, (_, i) => ({
+      topic: `reg/${i}`, description: `reg`, preview: '', pinned: 0, updated_at: NOW,
+    }));
+    const result = assemblePrimer({
+      rows: [], projectAtoms: [...pinned, ...regular], globalAtoms: [],
+      agent: 'engineer', project: PROJECT, staleness: STALENESS, cap: 2,
+    });
+    expect(result).toContain('(+2 more — call memory_atom_list to see all)');
+  });
+
+  test('pinned global atom appears before non-pinned globals in primer', () => {
+    const globals = [
+      { topic: 'zzz-global', description: 'normal global', preview: '', pinned: 0, updated_at: NOW },
+      { topic: 'aaa-global-pinned', description: 'pinned global', preview: '', pinned: 1, updated_at: NOW },
+    ];
+    const result = assemblePrimer({ rows: [], projectAtoms: [], globalAtoms: globals, agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    const pinnedIdx = result.indexOf('aaa-global-pinned');
+    const normalIdx = result.indexOf('zzz-global');
+    expect(pinnedIdx).toBeLessThan(normalIdx);
+  });
+
+  test('pinned global atom has [pinned] prefix in primer', () => {
+    const globals = [{ topic: 'must-know', description: 'critical global', preview: '', pinned: 1, updated_at: NOW }];
+    const result = assemblePrimer({ rows: [], projectAtoms: [], globalAtoms: globals, agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    expect(result).toContain('[pinned] must-know');
+  });
+
+  test('multiple pinned atoms appear in topic order within the pinned group', () => {
+    const atoms = [
+      { topic: 'zzz/last',   description: 'z', preview: '', pinned: 1, updated_at: NOW },
+      { topic: 'aaa/first',  description: 'a', preview: '', pinned: 1, updated_at: NOW },
+      { topic: 'mmm/middle', description: 'm', preview: '', pinned: 1, updated_at: NOW },
+    ];
+    const result = assemblePrimer({ rows: [], projectAtoms: atoms, globalAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    const positions = ['aaa/first', 'mmm/middle', 'zzz/last'].map((t) => result.indexOf(t));
+    expect(positions[0]).toBeLessThan(positions[1]);
+    expect(positions[1]).toBeLessThan(positions[2]);
+  });
+
+  test('pinned atom appears exactly once in the primer section (no duplication)', () => {
+    const atoms = [{ topic: 'arch/db', description: 'DB', preview: '', pinned: 1, updated_at: NOW }];
+    const result = assemblePrimer({ rows: [], projectAtoms: atoms, globalAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    const occurrences = result.split('\n').filter((l) => l.includes('[pinned] arch/db'));
+    expect(occurrences).toHaveLength(1);
+  });
+});

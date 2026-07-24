@@ -2335,3 +2335,228 @@ describe('memory_atom_patch plugin-layer spec coverage', () => {
     expect(result.output).toMatch(/error/i);
   });
 });
+
+// ── memory_atom_write pinned support ──────────────────────────────────────────
+// spec: openspec/changes/pin-memory-atoms/specs/memory-atom-tools/spec.md
+
+describe('memory_atom_write pinned support', () => {
+  function makeCtx(directory = '/my/workspace') {
+    return {
+      sessionID: 'ses-pin-write',
+      messageID: 'msg-pin-write',
+      agent: 'engineer',
+      directory,
+      worktree: directory,
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+    };
+  }
+
+  test('memory_atom_write forwards pinned:true to CLI', async () => {
+    const fakeWriteResponse = JSON.stringify({ ok: true, action: 'created', message: 'Created atom at pinned/fact' });
+    const $ = makeMockShell({ 'atom-write': fakeWriteResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    await plugin.tool.memory_atom_write.execute(
+      { topic: 'pinned/fact', content: 'x', description: 'd', pinned: true },
+      makeCtx()
+    );
+
+    const atomWriteCall = $.calls.find((c) => c.includes('atom-write'));
+    expect(atomWriteCall).toBeDefined();
+    const jsonMatch = atomWriteCall.match(/\{.*\}$/);
+    expect(jsonMatch).not.toBeNull();
+    const payload = JSON.parse(jsonMatch[0]);
+    expect(payload.pinned).toBe(true);
+  });
+
+  test('memory_atom_write with pinned omitted does not set pinned in payload', async () => {
+    const fakeWriteResponse = JSON.stringify({ ok: true, action: 'created', message: 'Created atom at regular/fact' });
+    const $ = makeMockShell({ 'atom-write': fakeWriteResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    await plugin.tool.memory_atom_write.execute(
+      { topic: 'regular/fact', content: 'x', description: 'd' },
+      makeCtx()
+    );
+
+    const atomWriteCall = $.calls.find((c) => c.includes('atom-write'));
+    expect(atomWriteCall).toBeDefined();
+    const jsonMatch = atomWriteCall.match(/\{.*\}$/);
+    const payload = jsonMatch ? JSON.parse(jsonMatch[0]) : {};
+    expect(payload.pinned).toBeFalsy();
+  });
+});
+
+// ── memory_atom_patch pinned support ─────────────────────────────────────────
+// spec: openspec/changes/pin-memory-atoms/specs/memory-atom-tools/spec.md
+
+describe('memory_atom_patch pinned support', () => {
+  function makeCtx(directory = '/my/workspace') {
+    return {
+      sessionID: 'ses-pin-patch',
+      messageID: 'msg-pin-patch',
+      agent: 'engineer',
+      directory,
+      worktree: directory,
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+    };
+  }
+
+  test('memory_atom_patch with patch:{pinned:true} is accepted and forwarded to CLI', async () => {
+    const fakePatchResponse = JSON.stringify({ ok: true, topic: 'work/notes', patched: ['pinned'] });
+    const $ = makeMockShell({ 'atom-patch': fakePatchResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    const result = await plugin.tool.memory_atom_patch.execute(
+      { topic: 'work/notes', patch: { pinned: true } },
+      makeCtx()
+    );
+
+    expect(result.output).not.toMatch(/error/i);
+    const atomPatchCall = $.calls.find((c) => c.includes('atom-patch'));
+    expect(atomPatchCall).toBeDefined();
+    const jsonMatch = atomPatchCall.match(/\{.*\}$/);
+    expect(jsonMatch).not.toBeNull();
+    const payload = JSON.parse(jsonMatch[0]);
+    expect(payload.pinned).toBe(true);
+  });
+
+  test('memory_atom_patch with patch:{pinned:false} unpins and is forwarded to CLI', async () => {
+    const fakePatchResponse = JSON.stringify({ ok: true, topic: 'work/notes', patched: ['pinned'] });
+    const $ = makeMockShell({ 'atom-patch': fakePatchResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    await plugin.tool.memory_atom_patch.execute(
+      { topic: 'work/notes', patch: { pinned: false } },
+      makeCtx()
+    );
+
+    const atomPatchCall = $.calls.find((c) => c.includes('atom-patch'));
+    const jsonMatch = atomPatchCall.match(/\{.*\}$/);
+    const payload = JSON.parse(jsonMatch[0]);
+    expect(payload.pinned).toBe(false);
+  });
+
+  test('memory_atom_patch with empty patch rejects when no fields present', async () => {
+    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
+    const result = await plugin.tool.memory_atom_patch.execute(
+      { topic: 'work/notes', patch: {} },
+      makeCtx()
+    );
+    expect(result.output).toMatch(/at least one/i);
+  });
+});
+
+// ── memory_atom_list [pinned] display ────────────────────────────────────────
+// spec: openspec/changes/pin-memory-atoms/specs/memory-atom-tools/spec.md
+
+describe('memory_atom_list [pinned] display', () => {
+  function makeCtx(directory = '/my/workspace') {
+    return {
+      sessionID: 'ses-pin-list',
+      messageID: 'msg-pin-list',
+      agent: 'engineer',
+      directory,
+      worktree: directory,
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+    };
+  }
+
+  test('pinned atom row has [pinned] prefix in list output', async () => {
+    const fakeListResponse = JSON.stringify([
+      {
+        scope: 'project', project: '/my/workspace', topic: 'must-read',
+        description: 'critical fact', preview: 'fact body', pinned: 1,
+        created_at: 1_700_000_000_000, updated_at: 1_700_086_400_000,
+      },
+    ]);
+
+    const $ = makeMockShell({ 'atom-list': fakeListResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const result = await plugin.tool.memory_atom_list.execute({}, makeCtx());
+
+    expect(result.output).toContain('[pinned]');
+    expect(result.output).toContain('must-read');
+  });
+
+  test('non-pinned atom row does not have [pinned] prefix', async () => {
+    const fakeListResponse = JSON.stringify([
+      {
+        scope: 'project', project: '/my/workspace', topic: 'regular-fact',
+        description: 'regular atom', preview: 'body', pinned: 0,
+        created_at: 1_700_000_000_000, updated_at: 1_700_086_400_000,
+      },
+    ]);
+
+    const $ = makeMockShell({ 'atom-list': fakeListResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const result = await plugin.tool.memory_atom_list.execute({}, makeCtx());
+
+    expect(result.output).not.toContain('[pinned]');
+    expect(result.output).toContain('regular-fact');
+  });
+
+  test('mixed pinned and non-pinned atoms: [pinned] prefix only on pinned row', async () => {
+    const fakeListResponse = JSON.stringify([
+      {
+        scope: 'project', project: '/my/workspace', topic: 'pinned-topic',
+        description: 'pinned', preview: '', pinned: 1,
+        created_at: 1_700_000_000_000, updated_at: 1_700_086_400_000,
+      },
+      {
+        scope: 'project', project: '/my/workspace', topic: 'regular-topic',
+        description: 'not pinned', preview: '', pinned: 0,
+        created_at: 1_700_000_000_000, updated_at: 1_700_086_400_000,
+      },
+    ]);
+
+    const $ = makeMockShell({ 'atom-list': fakeListResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const result = await plugin.tool.memory_atom_list.execute({}, makeCtx());
+
+    const lines = result.output.split('\n');
+    const pinnedLine = lines.find((l) => l.includes('pinned-topic'));
+    const regularLine = lines.find((l) => l.includes('regular-topic'));
+    expect(pinnedLine).toMatch(/\[pinned\]/);
+    expect(regularLine).not.toMatch(/\[pinned\]/);
+  });
+});
+// W2 — patch without pinned field does not include pinned in CLI payload
+describe('memory_atom_patch pinned — absent field does not leak into payload', () => {
+  function makeCtx(directory = '/my/workspace') {
+    return {
+      sessionID: 'ses-pin-absent',
+      messageID: 'msg-pin-absent',
+      agent: 'engineer',
+      directory,
+      worktree: directory,
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+    };
+  }
+
+  test('patch without pinned field does not include pinned in CLI payload', async () => {
+    const fakePatchResponse = JSON.stringify({ ok: true, topic: 'work/notes', patched: ['description'] });
+    const $ = makeMockShell({ 'atom-patch': fakePatchResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    await plugin.tool.memory_atom_patch.execute(
+      { topic: 'work/notes', patch: { description: 'updated desc' } },
+      makeCtx()
+    );
+
+    const call = $.calls.find((c) => c.includes('atom-patch'));
+    expect(call).toBeDefined();
+    const jsonMatch = call.match(/\{.*\}$/);
+    expect(jsonMatch).not.toBeNull();
+    const payload = JSON.parse(jsonMatch[0]);
+    expect('pinned' in payload).toBe(false);
+  });
+});

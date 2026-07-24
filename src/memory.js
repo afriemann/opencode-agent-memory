@@ -443,7 +443,7 @@ function cmdAtomWrite(scope, project, jsonArg) {
     process.exit(1);
   }
 
-  const { topic, content, description, tags, sessionId, sessionName, createdAt } = data;
+  const { topic, content, description, tags, pinned, sessionId, sessionName, createdAt } = data;
   if (!topic) {
     process.stderr.write('[agent-memory/atom-write] topic is required\n');
     process.exit(1);
@@ -454,7 +454,7 @@ function cmdAtomWrite(scope, project, jsonArg) {
     const normTopic = normaliseTopic(topic);
     const result = atomWrite(db, {
       scope, project, topic: normTopic, content: content ?? '',
-      description, tags, sessionId, sessionName, createdAt
+      description, tags, pinned, sessionId, sessionName, createdAt
     });
     db.close();
     const msg = result.action === 'created'
@@ -541,7 +541,7 @@ function cmdAtomPatch(scope, project, jsonArg) {
     process.exit(1);
   }
 
-  const { topic, description, tags, created_at: createdAt } = data;
+  const { topic, description, tags, created_at: createdAt, pinned } = data;
   if (!topic) {
     process.stderr.write('[agent-memory/atom-patch] topic is required\n');
     process.exit(1);
@@ -551,6 +551,7 @@ function cmdAtomPatch(scope, project, jsonArg) {
   if ('description' in data) patch.description = description;
   if ('tags' in data) patch.tags = tags;
   if ('created_at' in data) patch.created_at = createdAt;
+  if ('pinned' in data) patch.pinned = pinned;
 
   const db = openAndInit();
   try {
