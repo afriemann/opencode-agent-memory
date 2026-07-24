@@ -1,11 +1,11 @@
 // src/lib/distil-prompt.js — distil prompt builder, parser, and JSON schema.
 //
-// DISTIL_SCHEMA is the single source of truth for the 4-key shape; plugin.js
-// imports it from here (never duplicates it).
+// DISTIL_SCHEMA is the single source of truth for the 3-key shape; plugin.js
+// imports it from here (never duplicates it). adr_candidate removed in v2.
 
 /**
  * JSON Schema for the distiller's structured output.
- * adr_candidate is nullable; open_questions is an array of strings.
+ * Three keys only: last_worked_summary, next_action, open_questions.
  */
 export const DISTIL_SCHEMA = {
   type: 'object',
@@ -16,9 +16,8 @@ export const DISTIL_SCHEMA = {
       type: 'array',
       items: { type: 'string' },
     },
-    adr_candidate: { anyOf: [{ type: 'string' }, { type: 'null' }] },
   },
-  required: ['last_worked_summary', 'next_action', 'open_questions', 'adr_candidate'],
+  required: ['last_worked_summary', 'next_action', 'open_questions'],
   additionalProperties: false,
 };
 
@@ -29,7 +28,6 @@ export const EMPTY_RECORD = {
   last_worked_summary: '',
   next_action: '',
   open_questions: [],
-  adr_candidate: null,
 };
 
 /**
@@ -37,6 +35,7 @@ export const EMPTY_RECORD = {
  *
  * PRIOR is the prior hot_state row (or null for cold start).
  * signals is the array of reduced memory_signal rows.
+ * sessionId is the current session's ID (used to scope signals in the DB read).
  *
  * @param {object|null} prior
  * @param {Array<{kind:string,payload:string}>} signals
@@ -51,7 +50,6 @@ export function buildDistilPrompt(prior, signals) {
           open_questions: Array.isArray(prior.open_questions)
             ? prior.open_questions
             : parseJsonField(prior.open_questions, []),
-          adr_candidate: prior.adr_candidate ?? null,
         },
         null,
         2
@@ -67,14 +65,15 @@ export function buildDistilPrompt(prior, signals) {
 }
 
 /**
- * Parse the distiller reply text into the 4-key object, or return null if
+ * Parse the distiller reply text into the 3-key object, or return null if
  * it cannot be parsed or fails the shape check.
  *
  * Tolerant: tries direct JSON.parse first, then extracts from a markdown
- * code fence if that fails.
+ * code fence if that fails. A 4th key (e.g. adr_candidate from an older
+ * prompt) is silently ignored.
  *
  * @param {string} text
- * @returns {{ last_worked_summary:string, next_action:string, open_questions:string[], adr_candidate:string|null }|null}
+ * @returns {{ last_worked_summary:string, next_action:string, open_questions:string[] }|null}
  */
 export function parseDistilReply(text) {
   if (!text || typeof text !== 'string') return null;
@@ -108,14 +107,13 @@ export function parseDistilReply(text) {
 
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
 
-  const { last_worked_summary, next_action, open_questions, adr_candidate } = obj;
+  const { last_worked_summary, next_action, open_questions } = obj;
 
   if (typeof last_worked_summary !== 'string') return null;
   if (typeof next_action !== 'string') return null;
   if (!Array.isArray(open_questions)) return null;
-  if (adr_candidate !== null && typeof adr_candidate !== 'string') return null;
 
-  return { last_worked_summary, next_action, open_questions, adr_candidate };
+  return { last_worked_summary, next_action, open_questions };
 }
 
 // ── Internal helpers ────────────────────────────────────────────────────────

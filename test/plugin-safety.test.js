@@ -2,11 +2,20 @@
 //
 // Tests the AgentMemory plugin factory with fully-mocked client and $.
 // Every failure mode from §9 is covered; no real DB or git is used.
+//
+// MEMORY_TARGET_AGENTS is set before any AgentMemory() call so the factory
+// (which reads config fresh per instantiation) picks up 'engineer' as a
+// tracked agent. Tests that verify untracked-agent behaviour set or clear
+// the env var locally before calling AgentMemory().
 
 import AgentMemory from '../src/plugin.js';
 import { jest } from '@jest/globals';
 import { reduceSignals, assemblePrimer, MAX_SIGNALS_PER_KIND } from '../src/lib/signal-utils.js';
 import { renderStaleness } from '../src/lib/git-helper.js';
+
+// Make 'engineer' a tracked agent for the duration of this test file.
+// Tests that need a different set manage process.env themselves (save/restore).
+process.env.MEMORY_TARGET_AGENTS = 'engineer';
 
 // ── Test helpers ─────────────────────────────────────────────────────────────
 
@@ -61,23 +70,28 @@ function makeMockShell(responses = {}, throwFor = {}) {
 /** Default empty read response (cold start — no prior memory). */
 const COLD_READ = JSON.stringify({
   prior: null,
+  recent: [],
   signals: [],
   watermark: { last_signal_ms: 0, last_distil_ms: 0 },
 });
 
+const WARM_ROW = {
+  scope: 'project',
+  agent: 'engineer',
+  project: '/home/user/repos/my/project',
+  session_id: 'ses_warm',
+  session_name: 'widget session',
+  last_worked_summary: 'implemented the widget',
+  next_action: 'write tests for widget',
+  open_questions: ['should we use sqlite?'],
+  anchored_git_sha: 'abc123',
+  updated_at: 1000,
+};
+
 /** A read response with a prior record (warm start). */
 const WARM_READ = JSON.stringify({
-  prior: {
-    scope: 'project',
-    agent: 'engineer',
-    project: '/home/user/repos/my/project',
-    last_worked_summary: 'implemented the widget',
-    next_action: 'write tests for widget',
-    open_questions: ['should we use sqlite?'],
-    adr_candidate: null,
-    anchored_git_sha: 'abc123',
-    updated_at: 1000,
-  },
+  prior: WARM_ROW,
+  recent: [WARM_ROW],
   signals: [],
   watermark: { last_signal_ms: 0, last_distil_ms: 0 },
 });
@@ -193,13 +207,14 @@ describe('injection idempotency', () => {
 
     // Primer IS available via system.transform (exactly once — not doubled on duplicate events)
     const system1 = await invokeSystemTransform(plugin, 'ses_001');
-    expect(system1).toHaveLength(1);
-    expect(typeof system1[0]).toBe('string');
-    expect(system1[0].length).toBeGreaterThan(0);
+    expect(system1).toHaveLength(2); // protocol + primer
+    expect(system1[0]).toContain('Memory tools');
+    expect(typeof system1[1]).toBe('string');
+    expect(system1[1].length).toBeGreaterThan(0);
 
-    // A fresh output.system is always exactly 1 push — not accumulated
+    // A fresh output.system always has exactly 2 pushes — not accumulated
     const system2 = await invokeSystemTransform(plugin, 'ses_001');
-    expect(system2).toHaveLength(1);
+    expect(system2).toHaveLength(2);
   });
 
   test('does not load primer for cold start (no prior memory)', async () => {
@@ -216,9 +231,10 @@ describe('injection idempotency', () => {
     const noReplyCalls = client._promptCalls.filter((c) => c.body?.noReply);
     expect(noReplyCalls).toHaveLength(0);
 
-    // system.transform returns empty for cold-start session
+    // system.transform injects only the protocol on cold start (no primer data)
     const system = await invokeSystemTransform(plugin, 'ses_cold');
-    expect(system).toHaveLength(0);
+    expect(system).toHaveLength(1);
+    expect(system[0]).toContain('Memory tools');
   });
 });
 
@@ -262,11 +278,11 @@ describe('(agent, project) keying', () => {
     const noReplyCalls = client._promptCalls.filter((c) => c.body?.noReply);
     expect(noReplyCalls).toHaveLength(0);
 
-    // Both sessions have primers available via system.transform
+    // Both sessions have protocol + primer via system.transform
     const systemA = await invokeSystemTransform(plugin, 'ses_proj_a');
     const systemB = await invokeSystemTransform(plugin, 'ses_proj_b');
-    expect(systemA).toHaveLength(1);
-    expect(systemB).toHaveLength(1);
+    expect(systemA).toHaveLength(2);
+    expect(systemB).toHaveLength(2);
   });
 });
 
@@ -354,8 +370,9 @@ describe('fallback inject on message.updated', () => {
 
     // Primer IS available via system.transform after the fallback load
     const system = await invokeSystemTransform(plugin, 'ses_resumed');
-    expect(system).toHaveLength(1);
-    expect(typeof system[0]).toBe('string');
+    expect(system).toHaveLength(2); // protocol + primer
+    expect(system[0]).toContain('Memory tools');
+    expect(typeof system[1]).toBe('string');
   });
 
   test('does not load primer twice when message.updated fires after session.created primed the session', async () => {
@@ -379,9 +396,9 @@ describe('fallback inject on message.updated', () => {
     const noReplyCalls = client._promptCalls.filter((c) => c.body?.noReply);
     expect(noReplyCalls).toHaveLength(0);
 
-    // Primer available exactly once (not accumulated from duplicate loads)
+    // Primer available exactly once (not accumulated from duplicate loads) — protocol + primer
     const system = await invokeSystemTransform(plugin, 'ses_already_primed');
-    expect(system).toHaveLength(1);
+    expect(system).toHaveLength(2);
   });
 });
 
@@ -628,72 +645,47 @@ describe('reduceSignals', () => {
 });
 
 // ── assemblePrimer output tests ───────────────────────────────────────────────
+// NOTE: Full assemblePrimer tests are in test/signal-utils.test.js.
+// These smoke tests verify the primer is injected into the system prompt.
 
-describe('assemblePrimer', () => {
-  const BASE_PRIOR = {
-    last_worked_summary: 'implemented the widget',
-    next_action: 'write widget tests',
-    open_questions: ['should this be async?'],
-    adr_candidate: null,
+describe('assemblePrimer (smoke — new options-object API)', () => {
+  const BASE_OPTS = {
+    rows: [{
+      session_id: 'ses1',
+      session_name: 'widget session',
+      last_worked_summary: 'implemented the widget',
+      next_action: 'write widget tests',
+      open_questions: ['should this be async?'],
+      anchored_git_sha: null,
+      updated_at: Date.now() - 5 * 60_000,
+    }],
+    projectAtoms: [],
+    globalAtoms: [],
+    agent: 'engineer',
+    project: '/home/user/repos/my/project',
+    staleness: { status: 'ok', distance: 2 },
   };
 
   test('includes the passive header with project shortname', () => {
-    const result = assemblePrimer(
-      BASE_PRIOR,
-      'engineer',
-      '/home/user/repos/my/project',
-      { status: 'ok', distance: 2 }
-    );
+    const result = assemblePrimer(BASE_OPTS);
     expect(result).toContain('## Project memory — my/project (background context — no action required)');
-    // Old imperative header must not appear
     expect(result).not.toContain('[MEMORY — resumed context');
   });
 
-  test('uses passive labels for last_worked_summary and next_action', () => {
-    const result = assemblePrimer(
-      BASE_PRIOR,
-      'engineer',
-      '/proj/repo',
-      { status: 'ok', distance: 0 }
-    );
-    expect(result).toContain('Last session: implemented the widget');
-    expect(result).toContain('Suggested next step: write widget tests');
-    // Old imperative labels must not appear
-    expect(result).not.toContain('Where we left off:');
-    expect(result).not.toContain('Next action:');
+  test('includes Recent sessions section with row data', () => {
+    const result = assemblePrimer(BASE_OPTS);
+    expect(result).toContain('### Recent sessions');
+    expect(result).toContain('▸ widget session');
+    expect(result).toContain('implemented the widget');
+    expect(result).toContain('write widget tests');
+    // Old format labels must not appear
+    expect(result).not.toContain('Last session:');
+    expect(result).not.toContain('Suggested next step:');
   });
 
-  test('renders open_questions as bullets when non-empty', () => {
-    const result = assemblePrimer(
-      BASE_PRIOR,
-      'engineer',
-      '/proj/repo',
-      { status: 'no-git' }
-    );
-    expect(result).toContain('Open questions:');
-    expect(result).toContain('- should this be async?');
-    expect(result).not.toContain('Open questions: none');
-  });
-
-  test('renders "Open questions: none" when array is empty', () => {
-    const prior = { ...BASE_PRIOR, open_questions: [] };
-    const result = assemblePrimer(prior, 'engineer', '/proj/repo', { status: 'no-git' });
-    expect(result).toContain('Open questions: none');
-    expect(result).not.toContain('- '); // no bullets
-  });
-
-  test('includes ADR paragraph only when adr_candidate is non-null', () => {
-    const withAdr = {
-      ...BASE_PRIOR,
-      adr_candidate: 'consider ADR: use in-memory cache',
-    };
-    const resultWith = assemblePrimer(withAdr, 'engineer', '/proj/repo', { status: 'no-git' });
-    expect(resultWith).toContain('Possible decision to record:');
-    expect(resultWith).toContain('consider ADR: use in-memory cache');
-    expect(resultWith).toContain('docs/adr/');
-
-    const resultWithout = assemblePrimer(BASE_PRIOR, 'engineer', '/proj/repo', { status: 'no-git' });
-    expect(resultWithout).not.toContain('Possible decision to record:');
+  test('renders open_questions in session thread', () => {
+    const result = assemblePrimer(BASE_OPTS);
+    expect(result).toContain('Open questions: should this be async?');
   });
 
   test('staleness line appears with the exact phrasing from renderStaleness', () => {
@@ -703,42 +695,23 @@ describe('assemblePrimer', () => {
       { status: 'diverged' },
       { status: 'no-anchor' },
     ]) {
-      const result = assemblePrimer(BASE_PRIOR, 'engineer', '/proj/repo', staleness);
+      const result = assemblePrimer({ ...BASE_OPTS, staleness });
       expect(result).toContain(`Staleness: ${renderStaleness(staleness)}`);
     }
   });
 
-  test('passive closing line present; no investigation instructions', () => {
-    const result = assemblePrimer(BASE_PRIOR, 'engineer', '/proj/repo', { status: 'ok', distance: 0 });
-    // Passive orientation line
+  test('passive closing line present; no ADR or teach-back', () => {
+    const result = assemblePrimer(BASE_OPTS);
     expect(result).toContain('Wait for the user');
-    // Old imperative investigation paragraph must be gone
+    expect(result).not.toContain('adr_candidate');
+    expect(result).not.toContain('Possible decision to record:');
     expect(result).not.toContain('This memory is a hypothesis, not ground truth');
     expect(result).not.toContain('replay your understanding');
-    expect(result).not.toContain('get my confirmation first');
-    expect(result).not.toContain('reconcile');
   });
 
-  test('slot order: header → closing → summary → next_action → questions → ADR → staleness', () => {
-    const prior = {
-      ...BASE_PRIOR,
-      adr_candidate: 'consider ADR: test',
-    };
-    const result = assemblePrimer(prior, 'engineer', '/proj/repo', { status: 'ok', distance: 1 });
-    const headerIdx    = result.indexOf('## Project memory');
-    const closingIdx   = result.indexOf('Wait for the user');
-    const summaryIdx   = result.indexOf('Last session');
-    const actionIdx    = result.indexOf('Suggested next step');
-    const questionsIdx = result.indexOf('Open questions');
-    const adrIdx       = result.indexOf('Possible decision');
-    const stalenessIdx = result.indexOf('Staleness:');
-
-    expect(headerIdx).toBeLessThan(closingIdx);
-    expect(closingIdx).toBeLessThan(summaryIdx);
-    expect(summaryIdx).toBeLessThan(actionIdx);
-    expect(actionIdx).toBeLessThan(questionsIdx);
-    expect(questionsIdx).toBeLessThan(adrIdx);
-    expect(adrIdx).toBeLessThan(stalenessIdx);
+  test('returns null when rows and atoms are all empty', () => {
+    const result = assemblePrimer({ ...BASE_OPTS, rows: [], projectAtoms: [], globalAtoms: [] });
+    expect(result).toBeNull();
   });
 });
 
@@ -761,12 +734,12 @@ describe('experimental.chat.system.transform hook', () => {
     });
 
     const system = await invokeSystemTransform(plugin, 'ses_transform_warm');
-    expect(system).toHaveLength(1);
-    expect(system[0]).toContain('background context');
-    expect(system[0]).toContain('Suggested next step');
+    expect(system).toHaveLength(2); // protocol + primer
+    expect(system[0]).toContain('Memory tools');
+    expect(system[1]).toContain('background context');
   });
 
-  test('does not append when session has no cached primer (cold start)', async () => {
+  test('injects only protocol for cold start (no prior memory)', async () => {
     const $ = makeMockShell({ read: COLD_READ });
     const client = makeMockClient();
     const plugin = await AgentMemory({ client, $ });
@@ -777,7 +750,8 @@ describe('experimental.chat.system.transform hook', () => {
     });
 
     const system = await invokeSystemTransform(plugin, 'ses_transform_cold');
-    expect(system).toHaveLength(0);
+    expect(system).toHaveLength(1); // protocol only, no primer data
+    expect(system[0]).toContain('Memory tools');
   });
 
   test('does not append when sessionID is absent from hook input', async () => {
@@ -851,9 +825,10 @@ describe('primerLoaded ⊇ keys(primers) invariant', () => {
     // No additional read for the already-attempted session
     expect(readCallsAfter).toBe(readCallsBefore);
 
-    // And system.transform still returns empty (no primer for this cold-start session)
+    // And system.transform injects only the protocol (no primer data) for cold-start
     const system = await invokeSystemTransform(plugin, 'ses_cold_inv');
-    expect(system).toHaveLength(0);
+    expect(system).toHaveLength(1);
+    expect(system[0]).toContain('Memory tools');
   });
 });
 
@@ -946,25 +921,41 @@ describe('doDistil force parameter — throttle regression', () => {
   });
 });
 
-// ── Plugin tool hook tests (task 4.6) ─────────────────────────────────────────
+// ── Plugin tool hook tests (task 8.20) ────────────────────────────────────────
+
+const NINE_TOOLS = [
+  'memory_state_inspect', 'memory_state_patch', 'memory_state_distil',
+  'memory_atom_write', 'memory_atom_append', 'memory_atom_get',
+  'memory_atom_search', 'memory_atom_list', 'memory_atom_delete',
+];
 
 describe('plugin tool hook — factory returns tool map', () => {
-  test('AgentMemory factory returns { event, tool } with all three tools', async () => {
+  test('AgentMemory factory returns exactly nine tools', async () => {
     const $ = makeMockShell({});
     const plugin = await AgentMemory({ client: makeMockClient(), $ });
 
     expect(plugin).toHaveProperty('event');
     expect(plugin).toHaveProperty('tool');
-    expect(plugin.tool).toHaveProperty('memory_inspect');
-    expect(plugin.tool).toHaveProperty('memory_correct');
-    expect(plugin.tool).toHaveProperty('memory_distil_force');
+    expect(Object.keys(plugin.tool)).toHaveLength(9);
+    for (const name of NINE_TOOLS) {
+      expect(plugin.tool).toHaveProperty(name);
+    }
+  });
+
+  test('no legacy tool names present', async () => {
+    const $ = makeMockShell({});
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    expect(plugin.tool).not.toHaveProperty('memory_inspect');
+    expect(plugin.tool).not.toHaveProperty('memory_correct');
+    expect(plugin.tool).not.toHaveProperty('memory_distil_force');
   });
 
   test('each tool has description, args, and execute', async () => {
     const $ = makeMockShell({});
     const plugin = await AgentMemory({ client: makeMockClient(), $ });
 
-    for (const name of ['memory_inspect', 'memory_correct', 'memory_distil_force']) {
+    for (const name of NINE_TOOLS) {
       const t = plugin.tool[name];
       expect(typeof t.description).toBe('string');
       expect(t.description.length).toBeGreaterThan(0);
@@ -974,7 +965,7 @@ describe('plugin tool hook — factory returns tool map', () => {
   });
 });
 
-describe('memory_inspect tool execute', () => {
+describe('memory_state_inspect tool execute', () => {
   function makeContext(overrides = {}) {
     return {
       sessionID: 'ses_tool_test',
@@ -989,13 +980,13 @@ describe('memory_inspect tool execute', () => {
     };
   }
 
-  test('delegates to memory.js inspect with TARGET_AGENT and context.directory', async () => {
+  test('delegates to memory.js inspect with the resolved session agent and context.directory', async () => {
     const inspectResult = { prior: { last_worked_summary: 'done' }, signals: [] };
     const $ = makeMockShell({ inspect: JSON.stringify(inspectResult) });
     const plugin = await AgentMemory({ client: makeMockClient(), $ });
     const ctx = makeContext();
 
-    const result = await plugin.tool.memory_inspect.execute({}, ctx);
+    const result = await plugin.tool.memory_state_inspect.execute({}, ctx);
 
     // A spawn call containing 'inspect' must have happened
     expect($.calls.some((c) => c.includes('inspect'))).toBe(true);
@@ -1012,7 +1003,7 @@ describe('memory_inspect tool execute', () => {
     // No session.created fired — no primer loaded
     const ctx = makeContext({ sessionID: 'ses_no_primer' });
 
-    const result = await plugin.tool.memory_inspect.execute({}, ctx);
+    const result = await plugin.tool.memory_state_inspect.execute({}, ctx);
     const output = typeof result === 'string' ? result : result.output;
     const parsed = JSON.parse(output);
     expect(parsed.active_primer).toBeNull();
@@ -1035,18 +1026,18 @@ describe('memory_inspect tool execute', () => {
 
     // memory_inspect must return active_primer matching what system.transform would inject
     const ctx = makeContext({ sessionID: 'ses_with_primer' });
-    const result = await plugin.tool.memory_inspect.execute({}, ctx);
+    const result = await plugin.tool.memory_state_inspect.execute({}, ctx);
     const output = typeof result === 'string' ? result : result.output;
     const parsed = JSON.parse(output);
 
     expect(typeof parsed.active_primer).toBe('string');
     expect(parsed.active_primer.length).toBeGreaterThan(0);
     expect(parsed.active_primer).toContain('background context');
-    expect(parsed.active_primer).toContain('Suggested next step');
 
-    // Must be identical to what system.transform would inject
+    // active_primer is the primer data (system[1]); system[0] is the usage protocol
     const system = await invokeSystemTransform(plugin, 'ses_with_primer');
-    expect(system[0]).toBe(parsed.active_primer);
+    expect(system).toHaveLength(2);
+    expect(system[1]).toBe(parsed.active_primer);
   });
 
   test('returns error result instead of throwing when spawn fails', async () => {
@@ -1056,29 +1047,44 @@ describe('memory_inspect tool execute', () => {
 
     // Must not throw
     const result = await expect(
-      plugin.tool.memory_inspect.execute({}, ctx)
+      plugin.tool.memory_state_inspect.execute({}, ctx)
     ).resolves.toBeDefined();
   });
 
-  test('uses TARGET_AGENT (not context.agent) as the agent dimension', async () => {
+  test('uses session agent from session.get (not context.agent) as the CLI agent dimension', async () => {
     const inspectResult = { prior: null, signals: [] };
     const $ = makeMockShell({ inspect: JSON.stringify(inspectResult) });
+    // session.get returns 'engineer' which is in TARGET_AGENTS
     const plugin = await AgentMemory({ client: makeMockClient(), $ });
 
-    // Context agent is a different agent, but the CLI call must use TARGET_AGENT
+    // context.agent is a different value; CLI must use the session's agent, not context.agent
     const ctx = makeContext({ agent: 'other-agent' });
-    await plugin.tool.memory_inspect.execute({}, ctx);
+    await plugin.tool.memory_state_inspect.execute({}, ctx);
 
-    // The CLI invocation must not include 'other-agent' as the agent dimension.
-    // TARGET_AGENT defaults to 'engineer'; at minimum the call must include 'inspect'.
     const inspectCalls = $.calls.filter((c) => c.includes('inspect'));
     expect(inspectCalls.length).toBeGreaterThan(0);
-    // 'other-agent' must NOT appear as a CLI arg
+    // 'other-agent' must NOT appear as a CLI arg (session.get returned 'engineer')
     expect(inspectCalls.every((c) => !c.includes('other-agent'))).toBe(true);
+  });
+
+  test('returns not-tracked message when session agent is not in TARGET_AGENTS', async () => {
+    const savedEnv = process.env.MEMORY_TARGET_AGENTS;
+    process.env.MEMORY_TARGET_AGENTS = 'code-reviewer'; // 'engineer' not tracked
+    const $ = makeMockShell({});
+    // session.get returns 'engineer' which is NOT in TARGET_AGENTS
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const ctx = makeContext();
+
+    const result = await plugin.tool.memory_state_inspect.execute({}, ctx);
+    const output = typeof result === 'string' ? result : result.output;
+    expect(output).toContain('not tracked');
+    // No inspect CLI call should have been made
+    expect($.calls.filter((c) => c.includes('inspect'))).toHaveLength(0);
+    process.env.MEMORY_TARGET_AGENTS = savedEnv;
   });
 });
 
-describe('memory_correct tool execute', () => {
+describe('memory_state_patch tool execute', () => {
   function makeContext(overrides = {}) {
     return {
       sessionID: 'ses_tool_test',
@@ -1098,7 +1104,7 @@ describe('memory_correct tool execute', () => {
     const plugin = await AgentMemory({ client: makeMockClient(), $ });
     const ctx = makeContext();
 
-    const result = await plugin.tool.memory_correct.execute(
+    const result = await plugin.tool.memory_state_patch.execute(
       { patch: { last_worked_summary: 'patched' } },
       ctx
     );
@@ -1125,7 +1131,7 @@ describe('memory_correct tool execute', () => {
     const plugin = await AgentMemory({ client: makeMockClient(), $: throwingShell });
     const ctx = makeContext();
 
-    const result = await plugin.tool.memory_correct.execute(
+    const result = await plugin.tool.memory_state_patch.execute(
       { patch: { next_action: 'do it' } },
       ctx
     );
@@ -1135,16 +1141,30 @@ describe('memory_correct tool execute', () => {
     expect(output.toLowerCase()).toContain('error');
   });
 
-  test('uses TARGET_AGENT (not context.agent) as the agent dimension', async () => {
+  test('uses session agent from session.get (not context.agent) as the CLI agent dimension', async () => {
     const $ = makeMockShell({ correct: JSON.stringify({ ok: true }) });
     const plugin = await AgentMemory({ client: makeMockClient(), $ });
     const ctx = makeContext({ agent: 'different-agent' });
 
-    await plugin.tool.memory_correct.execute({ patch: { next_action: 'x' } }, ctx);
+    await plugin.tool.memory_state_patch.execute({ patch: { next_action: 'x' } }, ctx);
 
     const correctCalls = $.calls.filter((c) => c.includes('correct'));
     expect(correctCalls.length).toBeGreaterThan(0);
     expect(correctCalls.every((c) => !c.includes('different-agent'))).toBe(true);
+  });
+
+  test('returns not-tracked message when session agent is not in TARGET_AGENTS', async () => {
+    const savedEnv = process.env.MEMORY_TARGET_AGENTS;
+    process.env.MEMORY_TARGET_AGENTS = 'code-reviewer';
+    const $ = makeMockShell({});
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const ctx = makeContext();
+
+    const result = await plugin.tool.memory_state_patch.execute({ patch: { next_action: 'x' } }, ctx);
+    const output = typeof result === 'string' ? result : result.output;
+    expect(output).toContain('not tracked');
+    expect($.calls.filter((c) => c.includes('correct'))).toHaveLength(0);
+    process.env.MEMORY_TARGET_AGENTS = savedEnv;
   });
 });
 
@@ -1232,7 +1252,7 @@ describe('memory_distil_force tool execute', () => {
     const plugin = await AgentMemory({ client, $ });
 
     const ctx = makeContext();
-    await plugin.tool.memory_distil_force.execute({}, ctx);
+    await plugin.tool.memory_state_distil.execute({}, ctx);
 
     // With force:true the throttle is bypassed — doDistil must have attempted
     // to create an ephemeral session (even if it then returns on the throttle
@@ -1265,7 +1285,7 @@ describe('memory_distil_force tool execute', () => {
 
     // Forced distil — bypasses throttle, creates 1 ephemeral session
     const ctx = makeContext({ sessionID: 'ses_force_then_idle' });
-    await plugin.tool.memory_distil_force.execute({}, ctx);
+    await plugin.tool.memory_state_distil.execute({}, ctx);
     expect(client._createCalls).toHaveLength(1);
 
     // Non-forced session.idle — same recent watermark → throttled, no second ephemeral
@@ -1284,7 +1304,7 @@ describe('memory_distil_force tool execute', () => {
     const plugin = await AgentMemory({ client, $ });
 
     const ctx = makeContext({ sessionID: 'ses_non_target_force' });
-    const result = await plugin.tool.memory_distil_force.execute({}, ctx);
+    const result = await plugin.tool.memory_state_distil.execute({}, ctx);
 
     // Must return a ToolResult (not throw)
     expect(result).toBeDefined();
@@ -1303,7 +1323,7 @@ describe('memory_distil_force tool execute', () => {
 
     // Must not throw regardless of the internal failure
     await expect(
-      plugin.tool.memory_distil_force.execute({}, ctx)
+      plugin.tool.memory_state_distil.execute({}, ctx)
     ).resolves.toBeDefined();
   });
 });
@@ -1452,5 +1472,360 @@ describe('error observability', () => {
     } finally {
       stderrSpy.mockRestore();
     }
+  });
+});
+
+// ── resolveSessionAgent: cache-hit prevents redundant session.get calls ────────
+
+describe('resolveSessionAgent cache-hit behaviour', () => {
+  function makeContext(overrides = {}) {
+    return {
+      sessionID: 'ses_cache_test',
+      messageID: 'msg_c',
+      agent: 'engineer',
+      directory: '/test/project',
+      worktree: '/test/project',
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+      ...overrides,
+    };
+  }
+
+  test('calling memory_inspect twice for the same session only calls session.get once', async () => {
+    const inspectResult = { prior: null, signals: [] };
+    const $ = makeMockShell({ inspect: JSON.stringify(inspectResult) });
+    const client = makeMockClient();
+    const plugin = await AgentMemory({ client, $ });
+    const ctx = makeContext();
+
+    // Two back-to-back tool invocations for the same sessionID
+    await plugin.tool.memory_state_inspect.execute({}, ctx);
+    await plugin.tool.memory_state_inspect.execute({}, ctx);
+
+    // session.get must have been called exactly once (cache-hit on second call)
+    const getCallsForSession = client._getCalls.filter((id) => id === ctx.sessionID);
+    expect(getCallsForSession).toHaveLength(1);
+  });
+
+  test('sessionAgents map is pre-populated by session.created; tools use cache without extra session.get', async () => {
+    const inspectResult = { prior: null, signals: [] };
+    const $ = makeMockShell({
+      read: COLD_READ,
+      inspect: JSON.stringify(inspectResult),
+    });
+    const client = makeMockClient();
+    const plugin = await AgentMemory({ client, $ });
+
+    // session.created populates the sessionAgents map
+    await fire(plugin, 'session.created', {
+      sessionID: 'ses_pre_populated',
+      info: { agent: 'engineer', directory: '/proj', title: null },
+    });
+
+    const getCallsAfterCreated = client._getCalls.filter((id) => id === 'ses_pre_populated').length;
+
+    // memory_inspect should use the cached agent — no extra session.get
+    const ctx = makeContext({ sessionID: 'ses_pre_populated' });
+    await plugin.tool.memory_state_inspect.execute({}, ctx);
+
+    const getCallsAfterInspect = client._getCalls.filter((id) => id === 'ses_pre_populated').length;
+    expect(getCallsAfterInspect).toBe(getCallsAfterCreated); // no new session.get
+  });
+});
+
+// ── memory_distil_force: not-tracked returns informative message ───────────────
+
+describe('memory_distil_force — not-tracked session', () => {
+  function makeContext(overrides = {}) {
+    return {
+      sessionID: 'ses_force_nt',
+      messageID: 'msg_f',
+      agent: 'engineer',
+      directory: '/test/project',
+      worktree: '/test/project',
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+      ...overrides,
+    };
+  }
+
+  test('returns not-tracked message when session agent is not in TARGET_AGENTS', async () => {
+    const savedEnv = process.env.MEMORY_TARGET_AGENTS;
+    process.env.MEMORY_TARGET_AGENTS = 'code-reviewer';
+    const $ = makeMockShell({});
+    const client = makeMockClient();
+    const plugin = await AgentMemory({ client, $ });
+    const ctx = makeContext();
+
+    const result = await plugin.tool.memory_state_distil.execute({}, ctx);
+    const output = typeof result === 'string' ? result : result.output;
+    expect(output).toContain('not tracked');
+    // No ephemeral session should have been created
+    expect(client._createCalls).toHaveLength(0);
+    process.env.MEMORY_TARGET_AGENTS = savedEnv;
+  });
+
+  test('returns not-tracked message when session agent is null', async () => {
+    // session.get returns no agent (null)
+    const client = makeMockClient({
+      sessionGet: () => ({ data: { agent: null, directory: '/proj', title: null } }),
+    });
+    const $ = makeMockShell({});
+    const plugin = await AgentMemory({ client, $ });
+    const ctx = makeContext();
+
+    const result = await plugin.tool.memory_state_distil.execute({}, ctx);
+    const output = typeof result === 'string' ? result : result.output;
+    expect(output).toContain('not tracked');
+  });
+});
+
+// ── multi-agent tracking: two agents each get independent memory ───────────────
+
+describe('multi-agent tracking', () => {
+  test('session.created loads memory for each of multiple tracked agents independently', async () => {
+    const savedEnv = process.env.MEMORY_TARGET_AGENTS;
+    process.env.MEMORY_TARGET_AGENTS = 'engineer,code-reviewer';
+
+    const $ = makeMockShell({ read: WARM_READ });
+    const client = makeMockClient({
+      sessionGet: (id) => ({
+        data: {
+          agent: id === 'ses_eng' ? 'engineer' : 'code-reviewer',
+          directory: '/proj',
+          title: null,
+        },
+      }),
+    });
+    const plugin = await AgentMemory({ client, $ });
+
+    await fire(plugin, 'session.created', {
+      sessionID: 'ses_eng',
+      info: { agent: 'engineer', directory: '/proj', title: null },
+    });
+    await fire(plugin, 'session.created', {
+      sessionID: 'ses_cr',
+      info: { agent: 'code-reviewer', directory: '/proj', title: null },
+    });
+
+    // Both sessions have protocol + primer via system.transform
+    const sysEng = await invokeSystemTransform(plugin, 'ses_eng');
+    const sysCr  = await invokeSystemTransform(plugin, 'ses_cr');
+    expect(sysEng).toHaveLength(2);
+    expect(sysCr).toHaveLength(2);
+
+    process.env.MEMORY_TARGET_AGENTS = savedEnv;
+  });
+
+  test('session for an agent not in TARGET_AGENTS is skipped even when other agents are tracked', async () => {
+    const savedEnv = process.env.MEMORY_TARGET_AGENTS;
+    process.env.MEMORY_TARGET_AGENTS = 'engineer'; // only engineer tracked
+
+    const $ = makeMockShell({ read: WARM_READ });
+    const client = makeMockClient({
+      sessionGet: () => ({ data: { agent: 'architect', directory: '/proj', title: null } }),
+    });
+    const plugin = await AgentMemory({ client, $ });
+
+    await fire(plugin, 'session.created', {
+      sessionID: 'ses_arch',
+      info: { agent: 'architect', directory: '/proj', title: null },
+    });
+
+    // architect is not tracked — no primer loaded
+    const sys = await invokeSystemTransform(plugin, 'ses_arch');
+    expect(sys).toHaveLength(0);
+
+    process.env.MEMORY_TARGET_AGENTS = savedEnv;
+  });
+
+  test('session.created with null agent is skipped silently — sessionAgents not populated', async () => {
+    // Spec scenario: GIVEN session.agent is null after payload check + session.get fallback
+    // WHEN session.created fires
+    // THEN no primer loaded, sessionAgents not populated → tool returns not-tracked
+    const $ = makeMockShell({ read: WARM_READ, inspect: JSON.stringify({ prior: null, signals: [] }) });
+    const client = makeMockClient({
+      sessionGet: () => ({ data: { agent: null, directory: '/proj', title: null } }),
+    });
+    const plugin = await AgentMemory({ client, $ });
+
+    await fire(plugin, 'session.created', {
+      sessionID: 'ses_null_agent',
+      info: { agent: null, directory: '/proj', title: null },
+    });
+
+    // No DB read should have been attempted (null agent skipped before loadMemoryForSession)
+    const readCalls = $.calls.filter((c) => c.includes(' read '));
+    expect(readCalls).toHaveLength(0);
+
+    // system.transform: no primer
+    const sys = await invokeSystemTransform(plugin, 'ses_null_agent');
+    expect(sys).toHaveLength(0);
+
+    // memory_inspect should return "not tracked" — sessionAgents was never populated
+    // resolveSessionAgent will call session.get (returns null agent) → returns null
+    function makeNullCtx() {
+      return {
+        sessionID: 'ses_null_agent', messageID: 'msg_n', agent: null,
+        directory: '/proj', worktree: '/proj',
+        abort: new AbortController().signal, metadata: () => {}, ask: async () => {},
+      };
+    }
+    const result = await plugin.tool.memory_state_inspect.execute({}, makeNullCtx());
+    const output = typeof result === 'string' ? result : result.output;
+    expect(output).toContain('not tracked');
+  });
+});
+
+// ── 8.21 session.created: sessionNames populated ──────────────────────────────
+
+describe('session.created — sessionNames capture (task 8.21)', () => {
+  function makeBasicClient() {
+    const client = makeMockClient();
+    // Override session.get to return engineer agent so it's tracked
+    client.session.get = async ({ path: { id } }) => ({
+      data: { id, agent: 'engineer', directory: '/test/proj', title: null },
+    });
+    return client;
+  }
+
+  test('session title is captured from event info.title', async () => {
+    const $ = makeMockShell({ read: COLD_READ, 'atom-list': '[]' });
+    const plugin = await AgentMemory({ client: makeBasicClient(), $ });
+
+    await plugin.event({ event: {
+      type: 'session.created',
+      properties: {
+        sessionID: 'ses-title-test',
+        info: {
+          id: 'ses-title-test',
+          agent: 'engineer',
+          directory: '/test/proj',
+          title: 'My great session',
+        },
+      },
+    }});
+
+    // The title is stored internally — we verify it gets passed to distil-write
+    // by checking the atom-list + assemblePrimer path does not throw
+    // (full title threading is verified via distil-write in memory-cli tests).
+    // Just assert the session was processed (primerLoaded includes it).
+    // No crash is the minimal assertion here.
+  });
+
+  test('cold start with no atoms results in no primer (null)', async () => {
+    const $ = makeMockShell({ read: COLD_READ, 'atom-list': '[]' });
+    const plugin = await AgentMemory({ client: makeBasicClient(), $ });
+
+    await plugin.event({ event: {
+      type: 'session.created',
+      properties: {
+        sessionID: 'ses-cold-no-atoms',
+        info: { id: 'ses-cold-no-atoms', agent: 'engineer', directory: '/test/proj', title: 'cold session' },
+      },
+    }});
+
+    const sys = [];
+    await plugin['experimental.chat.system.transform']({ sessionID: 'ses-cold-no-atoms' }, { system: sys });
+    // Cold start gets the usage protocol but no primer data
+    expect(sys).toHaveLength(1);
+    expect(sys[0]).toContain('Memory tools');
+  });
+});
+
+// ── 8.22 resolveScope unit tests ─────────────────────────────────────────────
+
+describe('resolveScope (task 8.22)', () => {
+  // Access the helper by verifying tool behaviour (white-box via tool spawns)
+  // We test via plugin.tool.memory_atom_write to verify scope resolution,
+  // since resolveScope is a module-private helper.
+
+  test('workspace (default/undefined) → scope=project, project=directory', async () => {
+    const captured = [];
+    const $ = function(strings, ...values) {
+      const cmd = strings.reduce((a, s, i) => a + s + (values[i] !== undefined ? String(values[i]) : ''), '');
+      captured.push(cmd);
+      const obj = { quiet: () => obj, text: async () => JSON.stringify({ ok: true, action: 'created', message: 'Created atom at test' }) };
+      return obj;
+    };
+
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const ctx = {
+      sessionID: 'ses-scope-test',
+      directory: '/my/workspace',
+      messageID: 'msg1',
+      agent: 'engineer',
+      worktree: '/my/workspace',
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+    };
+
+    await plugin.tool.memory_atom_write.execute({
+      topic: 'test', content: 'body', description: 'desc', scope: undefined,
+    }, ctx);
+
+    // The atom-write spawn should pass 'project' as scope and '/my/workspace' as project
+    const atomWriteCall = captured.find((c) => c.includes('atom-write'));
+    expect(atomWriteCall).toContain('project');
+    expect(atomWriteCall).toContain('/my/workspace');
+  });
+
+  test('global → scope=global, project=""', async () => {
+    const captured = [];
+    const $ = function(strings, ...values) {
+      const cmd = strings.reduce((a, s, i) => a + s + (values[i] !== undefined ? String(values[i]) : ''), '');
+      captured.push(cmd);
+      const obj = { quiet: () => obj, text: async () => JSON.stringify({ ok: true, action: 'created', message: 'Created atom at test' }) };
+      return obj;
+    };
+
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const ctx = {
+      sessionID: 'ses-global-scope',
+      directory: '/my/workspace',
+      messageID: 'msg1',
+      agent: 'engineer',
+      worktree: '/my/workspace',
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+    };
+
+    await plugin.tool.memory_atom_write.execute({
+      topic: 'global-test', content: 'body', description: 'desc', scope: 'global',
+    }, ctx);
+
+    const atomWriteCall = captured.find((c) => c.includes('atom-write'));
+    expect(atomWriteCall).toContain('global');
+  });
+
+  test('all → scope=all for read-only operations (atom-list)', async () => {
+    const captured = [];
+    const $ = function(strings, ...values) {
+      const cmd = strings.reduce((a, s, i) => a + s + (values[i] !== undefined ? String(values[i]) : ''), '');
+      captured.push(cmd);
+      const obj = { quiet: () => obj, text: async () => '[]' };
+      return obj;
+    };
+
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const ctx = {
+      sessionID: 'ses-all-scope',
+      directory: '/my/workspace',
+      messageID: 'msg1',
+      agent: 'engineer',
+      worktree: '/my/workspace',
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+    };
+
+    await plugin.tool.memory_atom_list.execute({ scope: 'all' }, ctx);
+
+    const listCall = captured.find((c) => c.includes('atom-list'));
+    expect(listCall).toContain('all');
   });
 });

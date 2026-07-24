@@ -5,6 +5,7 @@
 //   2. Continuous signal accumulator (in-memory buffer, no LLM)
 //   3. Idle-distil worker (throttle + watermark via CLI)
 //   4. Injection module (session.created + fallback on message.updated)
+//   5. Plugin tools (nine tool registrations)
 //   6. Git reconciliation helper (rev-parse / rev-list)
 //
 // The plugin NEVER opens the SQLite DB directly. All DB access is
@@ -48,34 +49,36 @@ function getDistillerPrompt() {
     _distillerPrompt = raw.replace(/^<!--[\s\S]*?-->\s*/m, '').trim();
   } catch (err) {
     _distillerPrompt =
-      'Summarise the work session. Return ONLY a JSON object with exactly these four keys: ' +
-      'last_worked_summary (string), next_action (string), open_questions (array of strings), ' +
-      'adr_candidate (string or null). No prose, no code fence.';
+      'Summarise the work session. Return ONLY a JSON object with exactly these three keys: ' +
+      'last_worked_summary (string), next_action (string), open_questions (array of strings). ' +
+      'No prose, no code fence.';
     console.error(`[agent-memory] distiller prompt file missing — using inline fallback: ${err}`);
   }
   return _distillerPrompt;
 }
 
-// Resolve tuneable config: env var > config file > hardcoded default (per key).
-const _fileCfg = loadConfigFile();
-const {
-  targetAgent: TARGET_AGENT,
-  distilMinIntervalMs: DISTIL_MIN_INTERVAL_MS,
-  distillerModel: DISTILLER_MODEL,
-} = resolveConfig(process.env, _fileCfg);
-
-// Title used for ephemeral distil sub-sessions. Used in two places:
-// - ephemerals.add(ephId) after session.create (primary guard)
-// - title check in session.created handler (race-condition guard: W3 fix)
+// Title used for ephemeral distil sub-sessions.
 const EPHEMERAL_TITLE = 'agent-memory distil';
+
+// Usage protocol injected into every tracked session's system prompt.
+const MEMORY_PROTOCOL = `## Memory tools — usage protocol
+
+You have persistent memory via the \`memory_atom_*\` and \`memory_state_*\` tools.
+
+**Write an atom** (\`memory_atom_write\`) when you discover:
+- A non-obvious architectural decision or design constraint for this project
+- A fact that would take real effort to re-discover: API quirks, undocumented behaviour, environment specifics
+- A reality correction — something that contradicts what documentation or prior assumptions suggest
+
+**Read before re-investigating**: before exploring a familiar domain, call \`memory_atom_search\` or \`memory_atom_list\` — previous findings may already be recorded. Use \`memory_atom_get\` to retrieve the full content of a specific atom.
+
+**Scope**: use \`workspace\` (default) for project-specific facts; use \`global\` for facts true across all projects (host config, tool versions, cross-repo conventions).
+
+**Hot-state** (\`memory_state_*\`) is managed automatically — it distils on session idle. Call \`memory_state_distil\` to force an immediate save when finishing a meaningful chunk of work.`;
 
 const MAX_IN_FLIGHT = 5000;
 
 // ── D1 message-classification keywords ──────────────────────────────────────
-// Deterministic heuristic (no LLM). Only user messages that match at least one
-// of these categories are recorded as 'message' signals. Conservative by design:
-// false negatives are acceptable; false positives waste a signal slot.
-
 const D1_STOP_PARK    = ['stop', 'pause', 'park', 'hold off', 'cancel', 'abort'];
 const D1_PLAN_CHANGE  = ['actually', 'instead', 'scratch that', 'change the plan', 'different approach'];
 const D1_CORRECTION   = ['no,', "that's wrong", 'correction:'];
@@ -125,9 +128,34 @@ async function spawnMemory($, args, stdinData) {
   return await $`node ${SCRIPT} ${sub} ${rest}`.quiet().text();
 }
 
+// ── Scope resolution ─────────────────────────────────────────────────────────
+
+/**
+ * Resolve a user-facing scope string to { scope, project } positional args.
+ *
+ * @param {string|undefined} scope — 'workspace' | 'global' | 'all' | undefined
+ * @param {string} directory — session working directory
+ * @returns {{ scope: string, project: string }}
+ */
+function resolveScope(scope, directory) {
+  if (scope === 'global') return { scope: 'global', project: '' };
+  if (scope === 'all')    return { scope: 'all',    project: '' };
+  return { scope: 'project', project: directory };
+}
+
 // ── Plugin factory ───────────────────────────────────────────────────────────
 
 const AgentMemory = async ({ client, $ }) => {
+  // ── Config (read fresh per factory call for testability) ──────────────────
+  const _fileCfg = loadConfigFile();
+  const {
+    targetAgents,
+    distilMinIntervalMs: DISTIL_MIN_INTERVAL_MS,
+    distillerModel: DISTILLER_MODEL,
+    atomInjectCap: ATOM_INJECT_CAP,
+  } = resolveConfig(process.env, _fileCfg);
+  const TARGET_AGENTS = new Set(targetAgents);
+
   // Fire-and-forget; never throws into opencode.
   spawnMemory($, ['prune']).catch(() => {});
 
@@ -137,25 +165,19 @@ const AgentMemory = async ({ client, $ }) => {
   const primers = new Map();        // sessionId → assembled primer text (warm sessions only)
   const ephemerals = new Set();     // distiller sub-session IDs (skip injection + idle)
   const buffers = new Map();        // sessionId → { files, todos, messages }
+  const sessionAgents = new Map();  // sessionId → resolved agent name
+  const sessionNames = new Map();   // sessionId → session title (from session.created)
   // Last active session for file.edited attribution (heuristic — see I5).
-  // NOTE: This is a single-worktree approximation; multi-worktree concurrency
-  // may misattribute edits. Acceptable for Phase-1 scope; see README limitations.
   let lastActiveSessionId = null;
   let queue = Promise.resolve(); // Serialized promise chain
 
   /**
-   * Log an error-level message to the opencode session log via client.app.log.
-   * Falls back to process.stderr.write if the client call throws synchronously
-   * or rejects asynchronously (e.g. during startup or when the server is
-   * unavailable).
-   *
-   * When `err` is a Bun ShellError (or any Error-like with a `.stderr` Buffer),
-   * the child-process stderr is appended to the message so failures in
-   * memory.js are fully visible without a separate stderr scan.
-   *
-   * Fire-and-forget: never awaited so it cannot block the plugin's hot paths.
+   * Log a message to the opencode session log via client.app.log.
+   * @param {string} msg
+   * @param {Error|unknown} [err] — when provided, appends stack/message and stderr; forces level='error'
+   * @param {'info'|'error'} [level]
    */
-  const log = (msg, err) => {
+  const log = (msg, err, level = err ? 'error' : 'info') => {
     const errDetail = err
       ? `: ${err instanceof Error ? err.stack ?? err.message : err}`
       : '';
@@ -164,9 +186,7 @@ const AgentMemory = async ({ client, $ }) => {
       : '';
     const message = `[agent-memory] ${msg}${errDetail}${stderrDetail}`;
     try {
-      const result = client.app.log({ body: { service: 'agent-memory', level: 'error', message } });
-      // client.app.log is an HTTP call and may return a rejected Promise; ensure
-      // any async rejection also falls back to stderr rather than going unhandled.
+      const result = client.app.log({ body: { service: 'agent-memory', level, message } });
       result?.catch?.(() => process.stderr.write(message + '\n'));
     } catch {
       process.stderr.write(message + '\n');
@@ -174,18 +194,11 @@ const AgentMemory = async ({ client, $ }) => {
   };
 
   /**
-   * Surface a critical plugin error as an in-TUI toast notification so the
-   * user sees it without needing to inspect log files.
-   *
-   * Prepends "agent-memory: " to every message so toast consumers can identify
-   * the source without the call site needing to repeat the prefix.
-   *
-   * Fire-and-forget and never throws — a toast failure must not propagate.
+   * Surface a critical plugin error as an in-TUI toast notification.
    */
   const notify = (msg) => {
     try {
       const result = client.tui.showToast({ body: { message: `agent-memory: ${msg}`, variant: 'error' } });
-      // showToast is an HTTP call; suppress any async rejection silently.
       result?.catch?.(() => {});
     } catch {
       // Intentionally silent — toast is best-effort.
@@ -197,12 +210,6 @@ const AgentMemory = async ({ client, $ }) => {
   /**
    * Load the memory primer for a session into the in-process `primers` Map.
    * Populates the cache exactly once per session (guarded by `primerLoaded`).
-   * Cold-start sessions (no prior hot_state) are added to `primerLoaded` but
-   * receive no `primers` entry — preserving the `primerLoaded ⊇ keys(primers)`
-   * invariant so repeated message.updated events don't re-spawn the DB read.
-   *
-   * No `session.prompt` call is made. Injection is handled by the
-   * `experimental.chat.system.transform` hook on every subsequent LLM call.
    */
   async function loadMemoryForSession(sessionId, agent, project) {
     if (primerLoaded.has(sessionId)) return;
@@ -219,29 +226,74 @@ const AgentMemory = async ({ client, $ }) => {
         return;
       }
 
-      // Cold start: no prior memory → no primer cached; session proceeds normally.
-      if (!state.prior) return;
+      const rows = state.recent ?? [];
 
-      const storedSha = state.prior.anchored_git_sha ?? null;
+      // Fetch atom directory: current workspace + global
+      let projectAtoms = [];
+      let globalAtoms = [];
+      try {
+        const [wOut, gOut] = await Promise.all([
+          spawnMemory($, ['atom-list', 'project', project]),
+          spawnMemory($, ['atom-list', 'global', '']),
+        ]);
+        projectAtoms = JSON.parse(wOut.trim());
+        globalAtoms = JSON.parse(gOut.trim());
+      } catch (err) {
+        log(`inject: atom-list failed for ${sessionId}`, err);
+      }
+
+      // Cold start: no prior memory and no atoms → no primer
+      if (rows.length === 0 && projectAtoms.length === 0 && globalAtoms.length === 0) return;
+
+      const storedSha = rows.length > 0 ? (rows[0].anchored_git_sha ?? null) : null;
       const staleness = await gitStaleness($, project, storedSha);
-      const primer = assemblePrimer(state.prior, agent, project, staleness);
+      const primer = assemblePrimer({
+        rows,
+        projectAtoms,
+        globalAtoms,
+        agent,
+        project,
+        staleness,
+        cap: ATOM_INJECT_CAP,
+      });
 
-      primers.set(sessionId, primer);
+      if (primer) {
+        primers.set(sessionId, primer);
+        log(`inject: primer ready for ${sessionId} (${rows.length} sessions, ${projectAtoms.length} workspace atoms, ${globalAtoms.length} global atoms)`);
+      } else {
+        log(`inject: cold start for ${sessionId} — no prior memory or atoms, no primer`);
+      }
     } catch (err) {
       log(`inject: failed for ${sessionId}`, err);
     } finally {
-      // Mark load-attempted regardless of outcome — prevents re-read on cold start.
+      // Mark load-attempted regardless of outcome.
       primerLoaded.add(sessionId);
+    }
+  }
+
+  /**
+   * Resolve the tracked agent name for a session.
+   */
+  async function resolveSessionAgent(sessionId) {
+    if (sessionAgents.has(sessionId)) return sessionAgents.get(sessionId);
+    try {
+      const got = await client.session.get({ path: { id: sessionId } });
+      const data = got && got.data;
+      const agent = data && data.agent;
+      if (!agent || !TARGET_AGENTS.has(agent)) return null;
+      sessionAgents.set(sessionId, agent);
+      return agent;
+    } catch (err) {
+      log(`resolveSessionAgent: session.get failed for ${sessionId}`, err);
+      return null;
     }
   }
 
   // ── Idle-distil worker (component 3) ──────────────────────────────────────
 
   async function doDistil(sessionId, { force = false } = {}) {
-    // Skip known ephemeral distil sessions.
     if (ephemerals.has(sessionId)) return;
 
-    // Resolve session agent + project via session.get (authoritative, per §6).
     let session;
     try {
       const got = await client.session.get({ path: { id: sessionId } });
@@ -254,20 +306,18 @@ const AgentMemory = async ({ client, $ }) => {
     const agent = session && session.agent;
     const project = session && session.directory;
 
-    // Only distil for the target agent; undefined agent = default = TARGET_AGENT.
-    if (agent && agent !== TARGET_AGENT) return;
+    if (!agent || !TARGET_AGENTS.has(agent)) return;
     if (!project) return;
 
-    // Fallback load: cache the primer for this session if not yet attempted.
+    sessionAgents.set(sessionId, agent);
+
     if (!primerLoaded.has(sessionId)) {
-      await loadMemoryForSession(sessionId, TARGET_AGENT, project);
+      await loadMemoryForSession(sessionId, agent, project);
     }
 
-    // Read prior + signals + watermark (watermark is returned by the CLI, no
-    // DB access here — B1 fix).
     let state;
     try {
-      const out = await spawnMemory($, ['read', sessionId, TARGET_AGENT, project]);
+      const out = await spawnMemory($, ['read', sessionId, agent, project]);
       state = JSON.parse(out.trim());
     } catch (err) {
       log(`distil: read failed for ${sessionId}`, err);
@@ -277,7 +327,6 @@ const AgentMemory = async ({ client, $ }) => {
 
     const { prior, signals: storedSignals, watermark } = state;
 
-    // Throttle check (in-memory only, no DB). Skipped when force === true.
     const now = Date.now();
     const buf = buffers.get(sessionId);
     const bufEmpty = !buf || bufferIsEmpty(buf);
@@ -288,10 +337,9 @@ const AgentMemory = async ({ client, $ }) => {
       (storedSignals ?? []).length === 0 &&
       bufEmpty
     ) {
-      return; // Within throttle window and no new signals — skip.
+      return;
     }
 
-    // Flush in-memory buffer to scratch (accrue).
     if (buf && !bufferIsEmpty(buf)) {
       const delta = {
         files: [...buf.files],
@@ -302,41 +350,33 @@ const AgentMemory = async ({ client, $ }) => {
       buf.todos.length = 0;
       buf.messages.length = 0;
       try {
-        await spawnMemory($, ['accrue', sessionId, TARGET_AGENT, project], delta);
+        await spawnMemory($, ['accrue', sessionId, agent, project], delta);
       } catch (err) {
         log(`distil: accrue flush failed for ${sessionId}`, err);
-        // Continue — use whatever signals are already in the DB.
       }
     }
 
-    // Re-read signals after flush.
     let allSignals;
     try {
-      const out2 = await spawnMemory($, ['read', sessionId, TARGET_AGENT, project]);
+      const out2 = await spawnMemory($, ['read', sessionId, agent, project]);
       const state2 = JSON.parse(out2.trim());
       allSignals = state2.signals ?? [];
     } catch {
       allSignals = storedSignals ?? [];
     }
 
-    // D2: reduce signals before building the prompt.
     const reducedSignals = reduceSignals(allSignals);
 
-    // Determine highest signal created_at for the watermark advance.
     const lastSignalMs = allSignals.reduce(
       (max, s) => Math.max(max, s.created_at ?? 0),
       0
     );
 
-    // Create ephemeral distil sub-session.
     let ephId;
     try {
       const created = await client.session.create({ body: { title: EPHEMERAL_TITLE, agent: 'distiller' } });
       ephId = created && created.data && created.data.id;
       if (!ephId) throw new Error('no session id in create response');
-      // Add to ephemerals IMMEDIATELY after receiving the ID — before any
-      // subsequent await that could allow session.created to fire for this
-      // ephemeral and bypass the title check (W3 fix).
       ephemerals.add(ephId);
     } catch (err) {
       log(`distil: create ephemeral session failed`, err);
@@ -346,7 +386,6 @@ const AgentMemory = async ({ client, $ }) => {
     try {
       const distilPrompt = buildDistilPrompt(prior, reducedSignals);
 
-      // Primary attempt: json_schema structured output.
       let distilled = null;
       try {
         const res = await client.session.prompt({
@@ -368,7 +407,6 @@ const AgentMemory = async ({ client, $ }) => {
         log(`distil: json_schema call failed for ${sessionId}, trying text fallback`, err);
       }
 
-      // Fallback: plain text prompt + strict JSON.parse.
       if (!distilled) {
         try {
           const res2 = await client.session.prompt({
@@ -391,30 +429,27 @@ const AgentMemory = async ({ client, $ }) => {
         }
       }
 
-      // Both calls failed or returned unparseable output — keep prior, keep
-      // scratch signals (folded on the next cycle), log and return.
       if (!distilled) {
         log(`distil: could not parse distil reply for ${sessionId}; keeping prior state`);
         return;
       }
 
-      // Anchor the distilled state to current HEAD.
       const anchoredSha = await gitRevParse($, project);
+      const sessionName = sessionNames.get(sessionId) ?? null;
 
-      // Write via CLI (sole writer — never touches DB here).
       try {
-        await spawnMemory($, ['distil-write', TARGET_AGENT, project], {
+        await spawnMemory($, ['distil-write', agent, project], {
           distilled,
           anchoredSha,
           lastSignalMs,
           sessionId,
+          sessionName,
         });
       } catch (err) {
         log(`distil: distil-write failed for ${sessionId}`, err);
         return;
       }
     } finally {
-      // Delete the ephemeral session (fire-and-forget — non-fatal if unavailable).
       try {
         await client.session.delete({ path: { id: ephId } });
       } catch { /* non-fatal */ }
@@ -425,26 +460,33 @@ const AgentMemory = async ({ client, $ }) => {
   // ── Plugin tools (component 5) ────────────────────────────────────────────
 
   /**
-   * memory_inspect — non-destructive read of the current hot state + signals.
-   * The agent dimension is always TARGET_AGENT (single-agent store invariant).
+   * memory_state_inspect — non-destructive read of current hot state + signals.
    */
-  const memory_inspect = tool({
+  const memory_state_inspect = tool({
     description:
-      'Read the current agent memory state (hot state + signals) for the current project. ' +
-      'Non-destructive — does not insert, update, or delete any database row.',
+      'Read the current agent memory hot state for this session: recent session threads, ' +
+      'current signals, and the loaded primer. Does not list durable atoms — use ' +
+      'memory_atom_list for the atom directory or memory_atom_get to fetch a specific atom by topic.',
     args: {},
     async execute(_args, context) {
+      const agent = await resolveSessionAgent(context.sessionID);
+      if (!agent) {
+        return {
+          title: 'memory_state_inspect',
+          output: 'Session agent is not tracked by agent-memory.',
+        };
+      }
       try {
-        const out = await spawnMemory($, ['inspect', TARGET_AGENT, context.directory]);
+        const out = await spawnMemory($, ['inspect', agent, context.directory]);
         const result = JSON.parse(out.trim());
         const activePrimer = primers.get(context.sessionID) ?? null;
         return {
-          title: 'memory_inspect',
+          title: 'memory_state_inspect',
           output: JSON.stringify({ ...result, active_primer: activePrimer }, null, 2),
         };
       } catch (err) {
         return {
-          title: 'memory_inspect',
+          title: 'memory_state_inspect',
           output: `Error reading memory: ${err && err.message ? err.message : String(err)}`,
         };
       }
@@ -452,11 +494,9 @@ const AgentMemory = async ({ client, $ }) => {
   });
 
   /**
-   * memory_correct — apply a partial patch to the hot state.
-   * Only supplied fields are updated; all others keep their current values.
-   * The agent dimension is always TARGET_AGENT.
+   * memory_state_patch — apply a partial patch to the hot state.
    */
-  const memory_correct = tool({
+  const memory_state_patch = tool({
     description:
       'Apply a partial correction to the agent memory hot state. ' +
       'Only fields included in `patch` are updated; omitted fields are unchanged. ' +
@@ -469,24 +509,27 @@ const AgentMemory = async ({ client, $ }) => {
           .array(tool.schema.string())
           .optional()
           .describe('Open questions or blockers'),
-        adr_candidate: tool.schema
-          .string()
-          .nullable()
-          .optional()
-          .describe('Architecture decision candidate, or null to clear'),
       }).describe('Partial patch. Include only the fields you want to change.'),
     },
     async execute({ patch }, context) {
+      const agent = await resolveSessionAgent(context.sessionID);
+      if (!agent) {
+        return {
+          title: 'memory_state_patch',
+          output: 'Session agent is not tracked by agent-memory.',
+        };
+      }
       try {
         const patchJson = JSON.stringify(patch);
-        await spawnMemory($, ['correct', TARGET_AGENT, context.directory, patchJson]);
+        const out = await spawnMemory($, ['correct', agent, context.directory, context.sessionID, patchJson]);
+        const result = JSON.parse(out.trim());
         return {
-          title: 'memory_correct',
-          output: 'Memory corrected successfully.',
+          title: 'memory_state_patch',
+          output: result.created ? 'Memory patch applied (new session row created).' : 'Memory corrected successfully.',
         };
       } catch (err) {
         return {
-          title: 'memory_correct',
+          title: 'memory_state_patch',
           output: `Error correcting memory: ${err && err.message ? err.message : String(err)}`,
         };
       }
@@ -494,26 +537,237 @@ const AgentMemory = async ({ client, $ }) => {
   });
 
   /**
-   * memory_distil_force — force an immediate distillation, bypassing the throttle.
-   * There is no CLI form for this tool; it can only be invoked in-process.
+   * memory_state_distil — force an immediate distillation.
    */
-  const memory_distil_force = tool({
+  const memory_state_distil = tool({
     description:
       'Force an immediate memory distillation for the current session, bypassing the idle ' +
-      'throttle window. All other guards (ephemeral skip, TARGET_AGENT check) still apply. ' +
+      'throttle window. All other guards (ephemeral skip, tracked-agent check) still apply. ' +
       'The distil-force subcommand has no CLI form; only this plugin tool triggers it.',
     args: {},
     async execute(_args, context) {
+      const agent = await resolveSessionAgent(context.sessionID);
+      if (!agent) {
+        return {
+          title: 'memory_state_distil',
+          output: 'Session agent is not tracked by agent-memory.',
+        };
+      }
       try {
         await doDistil(context.sessionID, { force: true });
         return {
-          title: 'memory_distil_force',
+          title: 'memory_state_distil',
           output: 'Distillation triggered.',
         };
       } catch (err) {
         return {
-          title: 'memory_distil_force',
+          title: 'memory_state_distil',
           output: `Error during forced distil: ${err && err.message ? err.message : String(err)}`,
+        };
+      }
+    },
+  });
+
+  /**
+   * memory_atom_write — upsert a durable named atom.
+   */
+  const memory_atom_write = tool({
+    description:
+      'Write (upsert) a durable named memory atom. ' +
+      'The `description` field is required and describes what the atom is for. ' +
+      'Returns confirmation of whether the atom was created or an existing one was overwritten.',
+    args: {
+      topic: tool.schema.string().describe('Hierarchical key, e.g. "arch/db-layer"'),
+      content: tool.schema.string().describe('Full atom content'),
+      description: tool.schema.string().describe('What this atom is for (required)'),
+      tags: tool.schema.array(tool.schema.string()).optional().describe('Optional tags'),
+      scope: tool.schema.string().optional().describe('"workspace" (default), "global"'),
+    },
+    async execute({ topic, content, description, tags, scope }, context) {
+      if (scope === 'all') {
+        return { title: 'memory_atom_write', output: 'Error: scope="all" is not valid for write operations. Use "workspace" or "global".' };
+      }
+      const { scope: resolvedScope, project } = resolveScope(scope, context.directory);
+      try {
+        const out = await spawnMemory($, ['atom-write', resolvedScope, project],
+          { topic, content, description, tags, sessionId: context.sessionID,
+            sessionName: sessionNames.get(context.sessionID) ?? null });
+        const result = JSON.parse(out.trim());
+        return { title: 'memory_atom_write', output: result.message };
+      } catch (err) {
+        return {
+          title: 'memory_atom_write',
+          output: `Error writing atom: ${err && err.message ? err.message : String(err)}`,
+        };
+      }
+    },
+  });
+
+  /**
+   * memory_atom_append — append to an existing atom's content.
+   */
+  const memory_atom_append = tool({
+    description:
+      'Append content to an existing memory atom. ' +
+      'Uses a "\\n---\\n" separator. Errors if the topic does not exist — ' +
+      'use memory_atom_write to create it first.',
+    args: {
+      topic: tool.schema.string().describe('Topic key of the atom to append to'),
+      content: tool.schema.string().describe('Content to append'),
+      scope: tool.schema.string().optional().describe('"workspace" (default), "global"'),
+    },
+    async execute({ topic, content, scope }, context) {
+      if (scope === 'all') {
+        return { title: 'memory_atom_append', output: 'Error: scope="all" is not valid for write operations. Use "workspace" or "global".' };
+      }
+      const { scope: resolvedScope, project } = resolveScope(scope, context.directory);
+      try {
+        const out = await spawnMemory($, ['atom-append', resolvedScope, project], { topic, content });
+        const result = JSON.parse(out.trim());
+        return { title: 'memory_atom_append', output: result.content };
+      } catch (err) {
+        return {
+          title: 'memory_atom_append',
+          output: `Error appending to atom: ${err && err.message ? err.message : String(err)}`,
+        };
+      }
+    },
+  });
+
+  /**
+   * memory_atom_get — fetch an atom by topic.
+   */
+  const memory_atom_get = tool({
+    description:
+      'Fetch a memory atom by topic. ' +
+      'Returns the full content of the best match (current workspace → global priority). ' +
+      'Also shows atoms at the same topic in other workspaces.',
+    args: {
+      topic: tool.schema.string().describe('Topic key to look up'),
+      scope: tool.schema.string().optional().describe('"workspace" (default), "global"'),
+    },
+    async execute({ topic, scope }, context) {
+      const { scope: resolvedScope, project } = resolveScope(scope, context.directory);
+      try {
+        const out = await spawnMemory($, ['atom-get', resolvedScope, project, topic]);
+        const result = JSON.parse(out.trim());
+        const lines = [];
+        if (result.match) {
+          lines.push(`## ${result.match.topic}`);
+          lines.push(`**Description:** ${result.match.description}`);
+          lines.push('');
+          lines.push(result.match.content);
+        } else {
+          lines.push('No matching atom found in this workspace or globally.');
+        }
+        if (result.alsoIn && result.alsoIn.length > 0) {
+          lines.push('');
+          lines.push('**Also in other workspaces:**');
+          for (const a of result.alsoIn) {
+            lines.push(`• ${a.scope}/${a.project || '(global)'}: ${a.topic} — ${a.description} | ${a.preview || ''}`);
+          }
+        }
+        return { title: 'memory_atom_get', output: lines.join('\n') };
+      } catch (err) {
+        return {
+          title: 'memory_atom_get',
+          output: `Error fetching atom: ${err && err.message ? err.message : String(err)}`,
+        };
+      }
+    },
+  });
+
+  /**
+   * memory_atom_search — full-text search across atoms.
+   */
+  const memory_atom_search = tool({
+    description:
+      'Full-text search across memory atoms. ' +
+      'Searches all workspaces by default. ' +
+      'Use scope="workspace" to restrict to current workspace + global, or scope="global" for global only.',
+    args: {
+      query: tool.schema.string().describe('Search query'),
+      limit: tool.schema.number().optional().describe('Max results (default 20)'),
+      scope: tool.schema.string().optional().describe('"all" (default), "workspace", "global"'),
+    },
+    async execute({ query, limit, scope }, context) {
+      const { scope: resolvedScope, project } = resolveScope(scope ?? 'all', context.directory);
+      try {
+        const out = await spawnMemory($, ['atom-search', resolvedScope, project], { query, limit });
+        const results = JSON.parse(out.trim());
+        if (!results || results.length === 0) {
+          return { title: 'memory_atom_search', output: 'No results found.' };
+        }
+        const lines = results.map((r) =>
+          `• [${r.scope}/${r.project || 'global'}] ${r.topic} — ${r.description} | ${r.preview || ''}`
+        );
+        return { title: 'memory_atom_search', output: lines.join('\n') };
+      } catch (err) {
+        return {
+          title: 'memory_atom_search',
+          output: `Error searching atoms: ${err && err.message ? err.message : String(err)}`,
+        };
+      }
+    },
+  });
+
+  /**
+   * memory_atom_list — list atoms by topic prefix.
+   */
+  const memory_atom_list = tool({
+    description:
+      'List memory atoms by topic prefix. ' +
+      'Defaults to current workspace + global. ' +
+      'Use scope="all" to include all workspaces.',
+    args: {
+      prefix: tool.schema.string().optional().describe('Topic prefix filter (e.g. "arch/")'),
+      scope: tool.schema.string().optional().describe('"workspace" (default), "global", "all"'),
+    },
+    async execute({ prefix, scope }, context) {
+      const { scope: resolvedScope, project } = resolveScope(scope, context.directory);
+      try {
+        const out = await spawnMemory($, ['atom-list', resolvedScope, project, ...(prefix ? [prefix] : [])]);
+        const results = JSON.parse(out.trim());
+        if (!results || results.length === 0) {
+          return { title: 'memory_atom_list', output: 'No atoms found.' };
+        }
+        const lines = results.map((r) =>
+          `• [${r.scope}/${r.project || 'global'}] ${r.topic} — ${r.description} | ${r.preview || ''}`
+        );
+        return { title: 'memory_atom_list', output: lines.join('\n') };
+      } catch (err) {
+        return {
+          title: 'memory_atom_list',
+          output: `Error listing atoms: ${err && err.message ? err.message : String(err)}`,
+        };
+      }
+    },
+  });
+
+  /**
+   * memory_atom_delete — remove a memory atom.
+   */
+  const memory_atom_delete = tool({
+    description:
+      'Delete a memory atom by topic. ' +
+      'Errors if the atom does not exist.',
+    args: {
+      topic: tool.schema.string().describe('Topic key of the atom to delete'),
+      scope: tool.schema.string().optional().describe('"workspace" (default), "global"'),
+    },
+    async execute({ topic, scope }, context) {
+      if (scope === 'all') {
+        return { title: 'memory_atom_delete', output: 'Error: scope="all" is not valid for delete operations. Use "workspace" or "global".' };
+      }
+      const { scope: resolvedScope, project } = resolveScope(scope, context.directory);
+      try {
+        const out = await spawnMemory($, ['atom-delete', resolvedScope, project, topic]);
+        const result = JSON.parse(out.trim());
+        return { title: 'memory_atom_delete', output: `Deleted atom '${topic}' (${result.deleted} row removed).` };
+      } catch (err) {
+        return {
+          title: 'memory_atom_delete',
+          output: `Error deleting atom: ${err && err.message ? err.message : String(err)}`,
         };
       }
     },
@@ -531,25 +785,22 @@ const AgentMemory = async ({ client, $ }) => {
           // ── session.created: primary injection trigger ─────────────────────
           case 'session.created': {
             const info = event.properties?.info;
-            // v1 SDK: sessionID lives at info.id; v2 SDK: also at properties.sessionID
             const sessionId = event.properties?.sessionID ?? info?.id;
             if (!sessionId) return;
 
-            // Title check: skip ephemeral distil sessions even before ephemerals.add
-            // fires, guarding the session.create→session.created race (W3 fix).
+            // Title check: skip ephemeral distil sessions
             if (info?.title === EPHEMERAL_TITLE) {
               ephemerals.add(sessionId);
               return;
             }
 
-            // Skip sessions we already know are ephemeral.
             if (ephemerals.has(sessionId)) return;
-            // Skip sessions where memory load has already been attempted.
             if (primerLoaded.has(sessionId)) return;
 
-            // Resolve agent + directory from the event payload.
-            // The SDK's Session type carries both fields on EventSessionCreated.
-            // Fall back to session.get() if either is absent (W2 fix).
+            // Capture session name from the event; always store, null when absent
+            const title = info?.title ?? null;
+            sessionNames.set(sessionId, title);
+
             let agent = info?.agent;
             let project = info?.directory;
 
@@ -564,11 +815,11 @@ const AgentMemory = async ({ client, $ }) => {
               }
             }
 
-            // Only handle the target agent; undefined = default = TARGET_AGENT.
-            if (agent && agent !== TARGET_AGENT) return;
+            if (!agent || !TARGET_AGENTS.has(agent)) return;
             if (!project) return;
 
-            await loadMemoryForSession(sessionId, TARGET_AGENT, project);
+            sessionAgents.set(sessionId, agent);
+            await loadMemoryForSession(sessionId, agent, project);
             break;
           }
 
@@ -579,16 +830,11 @@ const AgentMemory = async ({ client, $ }) => {
             if (ephemerals.has(sessionId)) return;
             if (inFlight.has(sessionId)) return;
             if (inFlight.size >= MAX_IN_FLIGHT) {
-              log(
-                `in-flight cap reached (${MAX_IN_FLIGHT}); deferring idle for ${sessionId}`
-              );
+              log(`in-flight cap reached (${MAX_IN_FLIGHT}); deferring idle for ${sessionId}`);
               return;
             }
             inFlight.add(sessionId);
 
-            // Chain onto the serialized queue; await only this session's link
-            // so a burst of idle events does not make each block on every other
-            // session's model round-trip.
             const mine = (queue = queue
               .then(() => doDistil(sessionId))
               .catch((err) => log(`unhandled error in distil for ${sessionId}`, err))
@@ -600,8 +846,6 @@ const AgentMemory = async ({ client, $ }) => {
           // ── file.edited: accumulate into buffer ───────────────────────────
           case 'file.edited': {
             const file = event.properties?.file;
-            // file.edited carries no sessionID; we attribute to the last active
-            // session (single-worktree heuristic; see module comment).
             if (!file || !lastActiveSessionId) return;
             if (ephemerals.has(lastActiveSessionId)) return;
             if (!buffers.has(lastActiveSessionId)) {
@@ -618,7 +862,6 @@ const AgentMemory = async ({ client, $ }) => {
             if (!sessionId || !todos) return;
             if (ephemerals.has(sessionId)) return;
             if (!buffers.has(sessionId)) buffers.set(sessionId, makeBuffer());
-            // Append the full todo list as a JSON string; D2 caps to N most recent.
             buffers.get(sessionId).todos.push(JSON.stringify(todos));
             break;
           }
@@ -626,15 +869,12 @@ const AgentMemory = async ({ client, $ }) => {
           // ── message.updated: D1 classification + attribution + fallback ───
           case 'message.updated': {
             const msgInfo = event.properties?.info;
-            // v1 SDK: sessionID lives at info.sessionID; v2 SDK: also at properties.sessionID
             const sessionId = event.properties?.sessionID ?? msgInfo?.sessionID;
             if (!sessionId || !msgInfo) return;
             if (ephemerals.has(sessionId)) return;
 
-            // Update attribution for file.edited (heuristic).
             lastActiveSessionId = sessionId;
 
-            // D1 classification: record only qualifying user messages.
             if (msgInfo.role === 'user') {
               const text =
                 typeof msgInfo.text === 'string'
@@ -651,16 +891,16 @@ const AgentMemory = async ({ client, $ }) => {
               }
             }
 
-            // Fallback load (W9 fix / §4): if the session was not loaded by
-            // session.created (e.g. on resume), load it on the first message.
+            // Fallback load (W9 fix / §4)
             if (!primerLoaded.has(sessionId)) {
               try {
                 const got = await client.session.get({ path: { id: sessionId } });
                 const data = got && got.data;
                 const agent = data && data.agent;
                 const project = data && data.directory;
-                if ((!agent || agent === TARGET_AGENT) && project) {
-                  await loadMemoryForSession(sessionId, TARGET_AGENT, project);
+                if (agent && TARGET_AGENTS.has(agent) && project) {
+                  sessionAgents.set(sessionId, agent);
+                  await loadMemoryForSession(sessionId, agent, project);
                 }
               } catch (err) {
                 log(`message.updated: fallback load failed for ${sessionId}`, err);
@@ -677,19 +917,20 @@ const AgentMemory = async ({ client, $ }) => {
         notify(`event handler error for ${event.type}`);
       }
     },
-    tool: { memory_inspect, memory_correct, memory_distil_force },
+    tool: {
+      memory_state_inspect,
+      memory_state_patch,
+      memory_state_distil,
+      memory_atom_write,
+      memory_atom_append,
+      memory_atom_get,
+      memory_atom_search,
+      memory_atom_list,
+      memory_atom_delete,
+    },
     /**
      * Inject the memory primer into the LLM system prompt on every call for
-     * sessions with a cached prior record. Guards in order:
-     *   (a) sessionID must be present in hook input (it is optional per SDK)
-     *   (b) skip ephemeral distil sessions
-     *   (c) skip sessions with no cached primer (cold start or unloaded resume)
-     * The whole body is wrapped in try/catch — failures degrade to no-injection
-     * (consistent with the plugin's global safety contract).
-     *
-     * NOTE: output.system is assumed to be a fresh array per LLM call per the
-     * transform-hook contract. Confirmed at implementation time (task 3.4) —
-     * no idempotent-append guard is needed.
+     * sessions with a cached prior record.
      */
     'experimental.chat.system.transform': async (input, output) => {
       let sessionID;
@@ -697,23 +938,19 @@ const AgentMemory = async ({ client, $ }) => {
         ({ sessionID } = input ?? {});
         if (!sessionID) return;
         if (ephemerals.has(sessionID)) return;
+        // Inject usage protocol for every tracked session (cold start included).
+        if (primerLoaded.has(sessionID)) {
+          output.system.push(MEMORY_PROTOCOL);
+        }
+        // Inject primer data only when warm (prior sessions or atoms exist).
         const primer = primers.get(sessionID);
-        if (!primer) return;
-        output.system.push(primer);
+        if (primer) output.system.push(primer);
       } catch (err) {
         log(`system.transform: error for session ${sessionID ?? '(unknown)'}`, err);
       }
     },
     config: async (cfg) => {
       cfg.agent ??= {};
-      // Register a hidden no-tool agent used for ephemeral distil sub-sessions.
-      // Agent-level permission must be an object; { '*': 'deny' } uses the
-      // wildcard key so whollyDisabled() returns true for every tool.
-      // external_directory is added explicitly because the path-level gate fires
-      // before tool-level denies — without it, the distiller LLM can trigger a
-      // desktop permission prompt by attempting to read file paths from its prompt
-      // (e.g. /tmp files recorded as file.edited signals).
-      // ??= avoids clobbering a user-defined 'distiller' agent.
       cfg.agent['distiller'] ??= {
         mode: 'subagent',
         hidden: true,

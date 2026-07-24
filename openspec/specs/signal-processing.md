@@ -42,28 +42,82 @@ The system SHALL return an empty array when `reduceSignals` is called with `null
 
 ## Primer Assembly
 
-### Requirement: assemblePrimer produces a header with the agent name and last-two-path-segments
+### Requirement: assemblePrimer accepts an options object
 
-The primer SHALL begin with a header line of the form `[MEMORY — resumed context for <agent> in <last-two-segments-of-project-path>]`.
+The system SHALL accept a single options object `{ rows, projectAtoms, globalAtoms, agent, project, staleness, cap }` and SHALL NOT support the legacy positional-argument signature.
 
-### Requirement: assemblePrimer emits slots in a fixed order
+### Requirement: assemblePrimer returns null when rows and atoms are all absent
 
-The primer SHALL emit content slots in the following order: header → summary → next_action → questions → ADR (only if non-null) → staleness line → teach-back block.
+The system SHALL return `null` when `rows` is empty or null AND `projectAtoms` is empty AND `globalAtoms` is empty.
 
-#### Scenario: All slots populated
-- GIVEN a hot_state row with summary, next_action, questions, and ADR all non-null
+#### Scenario: All inputs empty
+- GIVEN rows=[], projectAtoms=[], globalAtoms=[]
 - WHEN `assemblePrimer` is called
-- THEN the output contains all slots in the specified order
+- THEN the return value is `null`
 
-#### Scenario: ADR slot absent when null
-- GIVEN a hot_state row where the ADR field is null
+#### Scenario: Global atoms only (cold start)
+- GIVEN rows=[], projectAtoms=[], globalAtoms=[{ topic, description, preview, updated_at }]
 - WHEN `assemblePrimer` is called
-- THEN no ADR section appears in the output
+- THEN the return value is non-null and contains the global atom directory
 
-### Requirement: assemblePrimer always includes the teach-back block
+### Requirement: assemblePrimer produces a header with the last two path segments
 
-The system SHALL include the teach-back block at the end of every primer, regardless of which other slots are populated.
+The primer SHALL begin with a header line of the form `## Project memory — <last-two-path-segments> (background context — no action required)`.
 
-### Requirement: assemblePrimer staleness line matches renderStaleness output
+### Requirement: assemblePrimer renders a Recent sessions section when rows are present
 
-The staleness line in the primer SHALL be produced by `renderStaleness` and SHALL match its exact output format.
+The system SHALL render a `### Recent sessions` section containing one entry per row in the `rows` array, each entry formatted as `▸ <session_name|short_id> — <relative time>`, followed by `  Last: …`, `  Next: …`, and `  Open questions: …` lines.
+
+#### Scenario: Single session row
+- GIVEN rows=[{ session_name, last_worked_summary, next_action, open_questions, updated_at }]
+- WHEN `assemblePrimer` is called
+- THEN the output contains `### Recent sessions` and the row's data under a `▸` line
+
+#### Scenario: Cold start — no Recent sessions section
+- GIVEN rows=[] with non-empty projectAtoms or globalAtoms
+- WHEN `assemblePrimer` is called
+- THEN the output does NOT contain `### Recent sessions`
+
+### Requirement: assemblePrimer renders a Project atoms directory section
+
+The system SHALL render a `### Project atoms — search: memory_atom_search · fetch: memory_atom_get` section. When `projectAtoms` is non-empty it SHALL include a no-action framing line and one bullet per atom (topic · description · 80-char preview · relative time). When `projectAtoms` is empty it SHALL display a placeholder.
+
+#### Scenario: Project atoms present
+- GIVEN projectAtoms=[{ topic, description, preview, updated_at }]
+- WHEN `assemblePrimer` is called
+- THEN the output contains the atom's topic and description under the Project atoms section
+
+#### Scenario: Project atoms empty
+- GIVEN projectAtoms=[]
+- WHEN `assemblePrimer` is called
+- THEN the output contains `No project atoms yet.`
+
+### Requirement: assemblePrimer renders a Global atoms directory section
+
+The system SHALL render a `### Global atoms` section. When `globalAtoms` is non-empty it SHALL include the same entry format as project atoms. When `globalAtoms` is empty it SHALL display a placeholder.
+
+#### Scenario: Global atoms empty
+- GIVEN globalAtoms=[]
+- WHEN `assemblePrimer` is called
+- THEN the output contains `No global atoms yet.`
+
+### Requirement: assemblePrimer includes a no-action framing line when atoms are present
+
+The system SHALL include the line `Fetch atoms on demand when relevant — do not pre-fetch at session start` when the respective atom list is non-empty.
+
+### Requirement: assemblePrimer shows a per-section overflow line when atom count exceeds cap
+
+The system SHALL append a `+ N more` line to a section when the number of atoms in that section exceeds `cap`.
+
+#### Scenario: Atom count exceeds cap
+- GIVEN projectAtoms.length > cap
+- WHEN `assemblePrimer` is called
+- THEN the output contains `+ N more` where N = projectAtoms.length - cap
+
+### Requirement: assemblePrimer appends a staleness line
+
+The primer SHALL end with `Staleness: <renderStaleness(staleness)>` using the exact output of `renderStaleness`.
+
+### Requirement: assemblePrimer does not emit ADR or teach-back content
+
+The system SHALL NOT include any `adr_candidate`, `Possible decision to record`, or teach-back block in the primer output.
