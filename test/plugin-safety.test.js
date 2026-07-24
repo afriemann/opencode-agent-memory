@@ -2560,3 +2560,362 @@ describe('memory_atom_patch pinned — absent field does not leak into payload',
     expect('pinned' in payload).toBe(false);
   });
 });
+
+// ── atom-status: memory_atom_patch status support ─────────────────────────────
+// spec: openspec/changes/atom-status/specs/memory-atom-tools/spec.md
+
+describe('memory_atom_patch status support', () => {
+  function makeCtx(directory = '/my/workspace') {
+    return {
+      sessionID: 'ses-status-patch',
+      messageID: 'msg-status-patch',
+      agent: 'engineer',
+      directory,
+      worktree: directory,
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+    };
+  }
+
+  test('patch with status="resolved" passes status in CLI payload', async () => {
+    const fakePatchResponse = JSON.stringify({ ok: true, topic: 'arch/notes', patched: ['status'] });
+    const $ = makeMockShell({ 'atom-patch': fakePatchResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    await plugin.tool.memory_atom_patch.execute(
+      { topic: 'arch/notes', patch: { status: 'resolved' } },
+      makeCtx()
+    );
+
+    const call = $.calls.find((c) => c.includes('atom-patch'));
+    expect(call).toBeDefined();
+    const payload = JSON.parse(call.match(/\{.*\}$/)[0]);
+    expect(payload.status).toBe('resolved');
+  });
+
+  test('patch with status="deprecated" passes status in CLI payload', async () => {
+    const fakePatchResponse = JSON.stringify({ ok: true, topic: 'arch/notes', patched: ['status'] });
+    const $ = makeMockShell({ 'atom-patch': fakePatchResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    await plugin.tool.memory_atom_patch.execute(
+      { topic: 'arch/notes', patch: { status: 'deprecated' } },
+      makeCtx()
+    );
+
+    const call = $.calls.find((c) => c.includes('atom-patch'));
+    const payload = JSON.parse(call.match(/\{.*\}$/)[0]);
+    expect(payload.status).toBe('deprecated');
+  });
+
+  test('patch with invalid status returns error output', async () => {
+    const $ = makeMockShell({});
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    const result = await plugin.tool.memory_atom_patch.execute(
+      { topic: 'arch/notes', patch: { status: 'invalid-value' } },
+      makeCtx()
+    );
+
+    expect(result.output).toMatch(/Error/i);
+    expect(result.output).toContain('status');
+  });
+
+  test('patch without status field does not include status in CLI payload', async () => {
+    const fakePatchResponse = JSON.stringify({ ok: true, topic: 'arch/notes', patched: ['description'] });
+    const $ = makeMockShell({ 'atom-patch': fakePatchResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    await plugin.tool.memory_atom_patch.execute(
+      { topic: 'arch/notes', patch: { description: 'updated' } },
+      makeCtx()
+    );
+
+    const call = $.calls.find((c) => c.includes('atom-patch'));
+    const payload = JSON.parse(call.match(/\{.*\}$/)[0]);
+    expect('status' in payload).toBe(false);
+  });
+});
+
+// ── atom-status: memory_atom_list status/includeDeprecated ────────────────────
+// spec: openspec/changes/atom-status/specs/memory-atom-tools/spec.md
+
+describe('memory_atom_list status and includeDeprecated', () => {
+  function makeCtx(directory = '/my/workspace') {
+    return {
+      sessionID: 'ses-status-list',
+      messageID: 'msg-status-list',
+      agent: 'engineer',
+      directory,
+      worktree: directory,
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+    };
+  }
+
+  test('resolved atom row has [resolved] prefix in list output', async () => {
+    const fakeListResponse = JSON.stringify([
+      {
+        scope: 'project', project: '/my/workspace', topic: 'old-work',
+        description: 'done', preview: '', pinned: 0, status: 'resolved',
+        created_at: 1_700_000_000_000, updated_at: 1_700_086_400_000,
+      },
+    ]);
+
+    const $ = makeMockShell({ 'atom-list': fakeListResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const result = await plugin.tool.memory_atom_list.execute({}, makeCtx());
+
+    expect(result.output).toContain('[resolved]');
+    expect(result.output).toContain('old-work');
+  });
+
+  test('deprecated atom row has [deprecated] prefix in list output', async () => {
+    const fakeListResponse = JSON.stringify([
+      {
+        scope: 'project', project: '/my/workspace', topic: 'stale-fact',
+        description: 'stale', preview: '', pinned: 0, status: 'deprecated',
+        created_at: 1_700_000_000_000, updated_at: 1_700_086_400_000,
+      },
+    ]);
+
+    const $ = makeMockShell({ 'atom-list': fakeListResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const result = await plugin.tool.memory_atom_list.execute({}, makeCtx());
+
+    expect(result.output).toContain('[deprecated]');
+    expect(result.output).toContain('stale-fact');
+  });
+
+  test('active atom row does not have status prefix in list output', async () => {
+    const fakeListResponse = JSON.stringify([
+      {
+        scope: 'project', project: '/my/workspace', topic: 'current-fact',
+        description: 'current', preview: '', pinned: 0, status: 'active',
+        created_at: 1_700_000_000_000, updated_at: 1_700_086_400_000,
+      },
+    ]);
+
+    const $ = makeMockShell({ 'atom-list': fakeListResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const result = await plugin.tool.memory_atom_list.execute({}, makeCtx());
+
+    expect(result.output).not.toContain('[resolved]');
+    expect(result.output).not.toContain('[deprecated]');
+    expect(result.output).toContain('current-fact');
+  });
+
+  test('includeDeprecated=true passes options JSON to CLI', async () => {
+    const fakeListResponse = JSON.stringify([]);
+    const $ = makeMockShell({ 'atom-list': fakeListResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    await plugin.tool.memory_atom_list.execute({ includeDeprecated: true }, makeCtx());
+
+    const call = $.calls.find((c) => c.includes('atom-list'));
+    expect(call).toBeDefined();
+    expect(call).toContain('includeDeprecated');
+  });
+
+  test('status="deprecated" passes status options JSON to CLI', async () => {
+    const fakeListResponse = JSON.stringify([]);
+    const $ = makeMockShell({ 'atom-list': fakeListResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    await plugin.tool.memory_atom_list.execute({ status: 'deprecated' }, makeCtx());
+
+    const call = $.calls.find((c) => c.includes('atom-list'));
+    expect(call).toBeDefined();
+    expect(call).toContain('"status"');
+    expect(call).toContain('deprecated');
+  });
+});
+
+// ── atom-status: memory_atom_search status/includeDeprecated ──────────────────
+// spec: openspec/changes/atom-status/specs/memory-atom-tools/spec.md
+
+describe('memory_atom_search status and includeDeprecated', () => {
+  function makeCtx(directory = '/my/workspace') {
+    return {
+      sessionID: 'ses-status-search',
+      messageID: 'msg-status-search',
+      agent: 'engineer',
+      directory,
+      worktree: directory,
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+    };
+  }
+
+  test('resolved result has [resolved] prefix in search output', async () => {
+    const fakeSearchResponse = JSON.stringify([
+      {
+        scope: 'project', project: '/my/workspace', topic: 'old-decision',
+        description: 'resolved decision', preview: '', status: 'resolved',
+        created_at: 1_700_000_000_000, updated_at: 1_700_086_400_000,
+      },
+    ]);
+
+    const $ = makeMockShell({ 'atom-search': fakeSearchResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const result = await plugin.tool.memory_atom_search.execute({ query: 'decision' }, makeCtx());
+
+    expect(result.output).toContain('[resolved]');
+    expect(result.output).toContain('old-decision');
+  });
+
+  test('deprecated result has [deprecated] prefix in search output', async () => {
+    const fakeSearchResponse = JSON.stringify([
+      {
+        scope: 'project', project: '/my/workspace', topic: 'stale-fact',
+        description: 'stale', preview: '', status: 'deprecated',
+        created_at: 1_700_000_000_000, updated_at: 1_700_086_400_000,
+      },
+    ]);
+
+    const $ = makeMockShell({ 'atom-search': fakeSearchResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const result = await plugin.tool.memory_atom_search.execute({ query: 'stale' }, makeCtx());
+
+    expect(result.output).toContain('[deprecated]');
+    expect(result.output).toContain('stale-fact');
+  });
+
+  test('includeDeprecated=true is passed through to CLI JSON payload', async () => {
+    const fakeSearchResponse = JSON.stringify([]);
+    const $ = makeMockShell({ 'atom-search': fakeSearchResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    await plugin.tool.memory_atom_search.execute({ query: 'anything', includeDeprecated: true }, makeCtx());
+
+    const call = $.calls.find((c) => c.includes('atom-search'));
+    expect(call).toBeDefined();
+    expect(call).toContain('includeDeprecated');
+  });
+
+  test('status="deprecated" is passed through to CLI JSON payload', async () => {
+    const fakeSearchResponse = JSON.stringify([]);
+    const $ = makeMockShell({ 'atom-search': fakeSearchResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    await plugin.tool.memory_atom_search.execute({ query: 'anything', status: 'deprecated' }, makeCtx());
+
+    const call = $.calls.find((c) => c.includes('atom-search'));
+    expect(call).toBeDefined();
+    expect(call).toContain('"status"');
+    expect(call).toContain('deprecated');
+  });
+});
+
+// ── atom-status: memory_atom_get shows status in output ──────────────────────
+// spec: openspec/changes/atom-status/specs/memory-atom-tools/spec.md
+
+describe('memory_atom_get shows status in output', () => {
+  function makeCtx(directory = '/my/workspace') {
+    return {
+      sessionID: 'ses-status-get',
+      messageID: 'msg-status-get',
+      agent: 'engineer',
+      directory,
+      worktree: directory,
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+    };
+  }
+
+  test('output includes Status line for active atom', async () => {
+    const fakeGetResponse = JSON.stringify({
+      match: {
+        topic: 'arch/db',
+        description: 'DB design',
+        content: 'SQLite is used',
+        tags: '[]',
+        status: 'active',
+        created_at: 1_700_000_000_000,
+        updated_at: 1_700_086_400_000,
+      },
+      alsoIn: [],
+    });
+
+    const $ = makeMockShell({ 'atom-get': fakeGetResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const result = await plugin.tool.memory_atom_get.execute({ topic: 'arch/db' }, makeCtx());
+
+    expect(result.output).toContain('**Status:**');
+    expect(result.output).toContain('active');
+  });
+
+  test('output includes Status line for deprecated atom', async () => {
+    const fakeGetResponse = JSON.stringify({
+      match: {
+        topic: 'arch/old',
+        description: 'old design',
+        content: 'outdated info',
+        tags: '[]',
+        status: 'deprecated',
+        created_at: 1_700_000_000_000,
+        updated_at: 1_700_086_400_000,
+      },
+      alsoIn: [],
+    });
+
+    const $ = makeMockShell({ 'atom-get': fakeGetResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const result = await plugin.tool.memory_atom_get.execute({ topic: 'arch/old' }, makeCtx());
+
+    expect(result.output).toContain('**Status:**');
+    expect(result.output).toContain('deprecated');
+  });
+
+  test('alsoIn entry with deprecated atom shows [deprecated] label', async () => {
+    const fakeGetResponse = JSON.stringify({
+      match: null,
+      alsoIn: [
+        {
+          scope: 'project', project: '/other', topic: 'shared/fact',
+          description: 'a fact', preview: 'body snippet',
+          status: 'deprecated',
+          created_at: 1_700_000_000_000,
+          updated_at: 1_700_086_400_000,
+        },
+      ],
+    });
+
+    const $ = makeMockShell({ 'atom-get': fakeGetResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const result = await plugin.tool.memory_atom_get.execute({ topic: 'shared/fact' }, makeCtx());
+
+    expect(result.output).toContain('[deprecated]');
+    expect(result.output).toContain('shared/fact');
+  });
+});
+
+// ── atom-status: MEMORY_PROTOCOL contains status lifecycle ────────────────────
+// spec: openspec/changes/atom-status/specs/memory-atom-tools/spec.md
+
+describe('MEMORY_PROTOCOL contains status lifecycle section', () => {
+  test('MEMORY_PROTOCOL is injected and mentions atom lifecycle', async () => {
+    const $ = makeMockShell({
+      read: COLD_READ,
+      'atom-list': JSON.stringify([{ topic: 'any', description: 'd', preview: '', pinned: 0, status: 'active', created_at: 1, updated_at: 1 }]),
+    });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    // Simulate session.created with a tracked agent
+    await plugin.event({ event: { type: 'session.created', properties: { sessionID: 'ses-test' } } });
+
+    const injected = [];
+    await plugin['experimental.chat.system.transform']({ sessionID: 'ses-test' }, { system: { push: (s) => injected.push(s) } });
+
+    const protocol = injected.find((s) => s.includes('Memory tools'));
+    expect(protocol).toBeDefined();
+    expect(protocol).toContain('Atom lifecycle');
+    expect(protocol).toContain('resolved');
+    expect(protocol).toContain('deprecated');
+    expect(protocol).toContain('memory_atom_delete');
+  });
+});

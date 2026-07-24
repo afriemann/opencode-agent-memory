@@ -46,7 +46,7 @@ describe('ensureSchema — fresh DB', () => {
 
     const cols = db.prepare("PRAGMA table_info(memory_atom)").all().map((c) => c.name);
     for (const col of ['id', 'scope', 'project', 'topic', 'description', 'content', 'tags',
-                       'pinned', 'session_id', 'session_name', 'created_at', 'updated_at']) {
+                       'pinned', 'status', 'session_id', 'session_name', 'created_at', 'updated_at']) {
       expect(cols).toContain(col);
     }
 
@@ -102,11 +102,11 @@ describe('ensureSchema — fresh DB', () => {
     expect(() => ensureSchema(db)).not.toThrow();
   });
 
-  test('user_version is set to 3 after first ensureSchema', () => {
+  test('user_version is set to 4 after first ensureSchema', () => {
     const db = openMemory();
     ensureSchema(db);
     const v = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v).toBe(3);
+    expect(v).toBe(4);
   });
 });
 
@@ -540,11 +540,11 @@ describe('migration — populated old-schema DB', () => {
     expect(cols).not.toContain('adr_candidate');
   });
 
-  test('user_version is 3 after migration', () => {
+  test('user_version is 4 after migration', () => {
     const db = buildOldSchemaDb();
     ensureSchema(db);
     const v = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v).toBe(3);
+    expect(v).toBe(4);
   });
 
   test('legacy summaries are migrated to work/migrated-summary atom', () => {
@@ -689,7 +689,7 @@ describe('migration failure rolls back entirely and retries cleanly', () => {
     // Second ensureSchema call must complete migration successfully
     expect(() => ensureSchema(db)).not.toThrow();
     const v2 = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v2).toBe(3);
+    expect(v2).toBe(4);
 
     // hot_state row preserved after migration
     const migratedRow = db.prepare(
@@ -972,11 +972,11 @@ describe('migration — v2 to v3 (pinned column)', () => {
     expect(row.pinned).toBe(0);
   });
 
-  test('user_version is 3 after v2 to v3 migration', () => {
+  test('user_version is 4 after v2 to v3 migration', () => {
     const db = buildV2SchemaDb();
     ensureSchema(db);
     const v = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v).toBe(3);
+    expect(v).toBe(4);
   });
 
   test('v3 migration is idempotent — calling ensureSchema twice does not throw', () => {
@@ -990,7 +990,7 @@ describe('migration — v2 to v3 (pinned column)', () => {
     db.exec('ALTER TABLE memory_atom ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0');
     expect(() => ensureSchema(db)).not.toThrow();
     const v = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v).toBe(3);
+    expect(v).toBe(4);
   });
 
   test('fresh and migrated databases have identical pinned column definition', () => {
@@ -1188,5 +1188,450 @@ describe('atomList with pinned', () => {
     const row = results.find((r) => r.topic === 'global-pinned');
     expect(row).toBeDefined();
     expect(row.pinned).toBe(1);
+  });
+});
+
+// ── migration — v3 to v4 (status column) ─────────────────────────────────────
+// spec: openspec/changes/atom-status/specs/memory-atom/spec.md
+
+describe('migration — v3 to v4 (status column)', () => {
+  function buildV3SchemaDb() {
+    const db = new DatabaseSync(':memory:');
+    db.exec('PRAGMA busy_timeout = 5000;');
+    db.exec(`
+      CREATE TABLE hot_state (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scope TEXT NOT NULL DEFAULT 'project',
+        agent TEXT NOT NULL,
+        project TEXT NOT NULL,
+        session_id TEXT NOT NULL DEFAULT '',
+        session_name TEXT,
+        last_worked_summary TEXT,
+        next_action TEXT,
+        open_questions TEXT,
+        anchored_git_sha TEXT,
+        schema_version INTEGER NOT NULL DEFAULT 2,
+        updated_at INTEGER NOT NULL,
+        UNIQUE (scope, agent, project, session_id)
+      );
+      CREATE TABLE memory_signal (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        scope TEXT NOT NULL DEFAULT 'project',
+        agent TEXT NOT NULL,
+        project TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE TABLE distil_watermark (
+        session_id TEXT PRIMARY KEY,
+        last_signal_ms INTEGER NOT NULL DEFAULT 0,
+        last_distil_ms INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE memory_atom (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scope TEXT NOT NULL DEFAULT 'project',
+        project TEXT NOT NULL DEFAULT '',
+        topic TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        content TEXT NOT NULL DEFAULT '',
+        tags TEXT NOT NULL DEFAULT '[]',
+        pinned INTEGER NOT NULL DEFAULT 0,
+        session_id TEXT,
+        session_name TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE (scope, project, topic)
+      );
+      PRAGMA user_version = 3;
+    `);
+    db.prepare(`
+      INSERT INTO memory_atom (scope, project, topic, description, content, tags, pinned, created_at, updated_at)
+      VALUES ('project', '/p', 'existing-atom', 'existing atom', 'body', '[]', 0, 100, 200)
+    `).run();
+    return db;
+  }
+
+  test('adds status column to existing memory_atom table', () => {
+    const db = buildV3SchemaDb();
+    ensureSchema(db);
+    const cols = db.prepare('PRAGMA table_info(memory_atom)').all().map((c) => c.name);
+    expect(cols).toContain('status');
+  });
+
+  test('existing rows get status = "active" after migration', () => {
+    const db = buildV3SchemaDb();
+    ensureSchema(db);
+    const row = db.prepare("SELECT status FROM memory_atom WHERE topic = 'existing-atom'").get();
+    expect(row).toBeDefined();
+    expect(row.status).toBe('active');
+  });
+
+  test('user_version is 4 after v3 to v4 migration', () => {
+    const db = buildV3SchemaDb();
+    ensureSchema(db);
+    const v = db.prepare('PRAGMA user_version').get().user_version;
+    expect(v).toBe(4);
+  });
+
+  test('v4 migration is idempotent — calling ensureSchema twice does not throw', () => {
+    const db = buildV3SchemaDb();
+    ensureSchema(db);
+    expect(() => ensureSchema(db)).not.toThrow();
+  });
+
+  test('v4 migration is idempotent when status already present (user_version < 4)', () => {
+    const db = buildV3SchemaDb();
+    db.exec(`ALTER TABLE memory_atom ADD COLUMN status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'resolved', 'deprecated'))`);
+    expect(() => ensureSchema(db)).not.toThrow();
+    const v = db.prepare('PRAGMA user_version').get().user_version;
+    expect(v).toBe(4);
+  });
+
+  test('fresh and migrated databases have identical status column definition', () => {
+    const fresh = openMemory();
+    ensureSchema(fresh);
+    const migrated = buildV3SchemaDb();
+    ensureSchema(migrated);
+
+    const statusCol = (db) => db.prepare('PRAGMA table_info(memory_atom)').all().find((c) => c.name === 'status');
+    const f = statusCol(fresh);
+    const m = statusCol(migrated);
+    expect(f).toBeDefined();
+    expect(m).toBeDefined();
+    expect(f.type).toBe(m.type);
+    expect(f.dflt_value).toBe(m.dflt_value);
+    expect(f.notnull).toBe(m.notnull);
+  });
+});
+
+// ── atomWrite preserves existing status on upsert ─────────────────────────────
+// spec: openspec/changes/atom-status/specs/memory-atom/spec.md
+
+describe('atomWrite preserves existing status on upsert', () => {
+  test('new atom has status = "active" by default', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'brand-new', content: 'x', description: 'd' });
+    const row = db.prepare("SELECT status FROM memory_atom WHERE topic='brand-new'").get();
+    expect(row.status).toBe('active');
+  });
+
+  test('re-writing an active atom preserves status = "active"', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'rewritten', content: 'v1', description: 'd' });
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'rewritten', content: 'v2', description: 'd updated' });
+    const row = db.prepare("SELECT status FROM memory_atom WHERE topic='rewritten'").get();
+    expect(row.status).toBe('active');
+  });
+
+  test('re-writing a deprecated atom preserves status = "deprecated" (DEFAULT-only, ON CONFLICT excludes status)', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'deprecated-one', content: 'v1', description: 'd' });
+    db.prepare("UPDATE memory_atom SET status='deprecated' WHERE topic='deprecated-one'").run();
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'deprecated-one', content: 'v2', description: 'd updated' });
+    const row = db.prepare("SELECT status FROM memory_atom WHERE topic='deprecated-one'").get();
+    expect(row.status).toBe('deprecated');
+  });
+
+  test('re-writing a resolved atom preserves status = "resolved"', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'resolved-one', content: 'v1', description: 'd' });
+    db.prepare("UPDATE memory_atom SET status='resolved' WHERE topic='resolved-one'").run();
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'resolved-one', content: 'v2', description: 'd updated' });
+    const row = db.prepare("SELECT status FROM memory_atom WHERE topic='resolved-one'").get();
+    expect(row.status).toBe('resolved');
+  });
+});
+
+// ── atomPatch with status ─────────────────────────────────────────────────────
+// spec: openspec/changes/atom-status/specs/memory-atom/spec.md
+
+describe('atomPatch with status', () => {
+  function seedActive(db) {
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'status-target', content: 'body', description: 'desc' });
+  }
+
+  test('atomPatch with status="resolved" updates status and bumps updated_at', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    db.prepare(`
+      INSERT INTO memory_atom (scope, project, topic, description, content, tags, pinned, created_at, updated_at)
+      VALUES ('project', '/p', 'status-target', 'desc', 'body', '[]', 0, 1000, 2000)
+    `).run();
+
+    atomPatch(db, { scope: 'project', project: '/p', topic: 'status-target', patch: { status: 'resolved' } });
+
+    const row = db.prepare("SELECT status, updated_at FROM memory_atom WHERE topic='status-target'").get();
+    expect(row.status).toBe('resolved');
+    expect(row.updated_at).toBeGreaterThan(2000);
+  });
+
+  test('atomPatch with status="deprecated" updates status and bumps updated_at', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    seedActive(db);
+
+    atomPatch(db, { scope: 'project', project: '/p', topic: 'status-target', patch: { status: 'deprecated' } });
+
+    const row = db.prepare("SELECT status FROM memory_atom WHERE topic='status-target'").get();
+    expect(row.status).toBe('deprecated');
+  });
+
+  test('atomPatch with status="active" re-activates a deprecated atom', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    seedActive(db);
+    atomPatch(db, { scope: 'project', project: '/p', topic: 'status-target', patch: { status: 'deprecated' } });
+
+    atomPatch(db, { scope: 'project', project: '/p', topic: 'status-target', patch: { status: 'active' } });
+
+    const row = db.prepare("SELECT status FROM memory_atom WHERE topic='status-target'").get();
+    expect(row.status).toBe('active');
+  });
+
+  test('atomPatch with invalid status throws', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    seedActive(db);
+
+    expect(() =>
+      atomPatch(db, { scope: 'project', project: '/p', topic: 'status-target', patch: { status: 'invalid' } })
+    ).toThrow(/must be one of/);
+  });
+
+  test('atomPatch without status field leaves existing status unchanged', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    db.prepare(`
+      INSERT INTO memory_atom (scope, project, topic, description, content, tags, pinned, created_at, updated_at)
+      VALUES ('project', '/p', 'status-target', 'desc', 'body', '[]', 0, 1000, 2000)
+    `).run();
+    db.prepare("UPDATE memory_atom SET status='resolved' WHERE topic='status-target'").run();
+
+    atomPatch(db, { scope: 'project', project: '/p', topic: 'status-target', patch: { description: 'updated' } });
+
+    const row = db.prepare("SELECT status FROM memory_atom WHERE topic='status-target'").get();
+    expect(row.status).toBe('resolved');
+  });
+
+  test('atomPatch with status alone is accepted (single-field patch)', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    seedActive(db);
+
+    const result = atomPatch(db, { scope: 'project', project: '/p', topic: 'status-target', patch: { status: 'resolved' } });
+    expect(result.patched).toContain('status');
+  });
+
+  test('atomPatch with status does not change content', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    db.prepare(`
+      INSERT INTO memory_atom (scope, project, topic, description, content, tags, pinned, created_at, updated_at)
+      VALUES ('project', '/p', 'status-target', 'desc', 'original body', '[]', 0, 1000, 2000)
+    `).run();
+
+    atomPatch(db, { scope: 'project', project: '/p', topic: 'status-target', patch: { status: 'deprecated' } });
+
+    const row = db.prepare("SELECT content FROM memory_atom WHERE topic='status-target'").get();
+    expect(row.content).toBe('original body');
+  });
+});
+
+// ── atomList with status ──────────────────────────────────────────────────────
+// spec: openspec/changes/atom-status/specs/memory-atom/spec.md
+
+describe('atomList with status filtering', () => {
+  function seedMixed(db) {
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'active-one', content: 'x', description: 'active', pinned: false });
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'resolved-one', content: 'x', description: 'resolved' });
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'deprecated-one', content: 'x', description: 'deprecated' });
+    db.prepare("UPDATE memory_atom SET status='resolved' WHERE topic='resolved-one'").run();
+    db.prepare("UPDATE memory_atom SET status='deprecated' WHERE topic='deprecated-one'").run();
+  }
+
+  test('status field is returned in list rows', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'status-atom', content: 'x', description: 'd' });
+    const results = atomList(db, { scope: 'project', project: '/p' });
+    const row = results.find((r) => r.topic === 'status-atom');
+    expect(row).toBeDefined();
+    expect(row.status).toBe('active');
+  });
+
+  test('default filter returns active and resolved, excludes deprecated', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    seedMixed(db);
+
+    const results = atomList(db, { scope: 'project', project: '/p' });
+    const topics = results.map((r) => r.topic);
+    expect(topics).toContain('active-one');
+    expect(topics).toContain('resolved-one');
+    expect(topics).not.toContain('deprecated-one');
+  });
+
+  test('includeDeprecated=true returns all three statuses', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    seedMixed(db);
+
+    const results = atomList(db, { scope: 'project', project: '/p', includeDeprecated: true });
+    const topics = results.map((r) => r.topic);
+    expect(topics).toContain('active-one');
+    expect(topics).toContain('resolved-one');
+    expect(topics).toContain('deprecated-one');
+  });
+
+  test('status="deprecated" exact-match returns only deprecated atoms', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    seedMixed(db);
+
+    const results = atomList(db, { scope: 'project', project: '/p', status: 'deprecated' });
+    const topics = results.map((r) => r.topic);
+    expect(topics).toContain('deprecated-one');
+    expect(topics).not.toContain('active-one');
+    expect(topics).not.toContain('resolved-one');
+  });
+
+  test('status="active" exact-match returns only active atoms', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    seedMixed(db);
+
+    const results = atomList(db, { scope: 'project', project: '/p', status: 'active' });
+    const topics = results.map((r) => r.topic);
+    expect(topics).toContain('active-one');
+    expect(topics).not.toContain('resolved-one');
+    expect(topics).not.toContain('deprecated-one');
+  });
+
+  test('status exact-match takes precedence over includeDeprecated when both are supplied', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    seedMixed(db);
+
+    // status='active' + includeDeprecated=true → only active atoms returned (status wins)
+    const results = atomList(db, { scope: 'project', project: '/p', status: 'active', includeDeprecated: true });
+    const topics = results.map((r) => r.topic);
+    expect(topics).toContain('active-one');
+    expect(topics).not.toContain('resolved-one');
+    expect(topics).not.toContain('deprecated-one');
+  });
+
+  test('scope=all with includeDeprecated=true returns deprecated atoms across all workspaces', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'global', project: '', topic: 'deprecated-global', content: 'x', description: 'd' });
+    db.prepare("UPDATE memory_atom SET status='deprecated' WHERE topic='deprecated-global'").run();
+
+    const results = atomList(db, { scope: 'all', project: '', includeDeprecated: true });
+    const topics = results.map((r) => r.topic);
+    expect(topics).toContain('deprecated-global');
+  });
+});
+
+// ── atomSearch with status ────────────────────────────────────────────────────
+// spec: openspec/changes/atom-status/specs/memory-atom/spec.md
+
+describe('atomSearch with status filtering', () => {
+  function seedSearchable(db) {
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'find-active', content: 'searchable content alpha', description: 'active atom' });
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'find-resolved', content: 'searchable content beta', description: 'resolved atom' });
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'find-deprecated', content: 'searchable content gamma', description: 'deprecated atom' });
+    db.prepare("UPDATE memory_atom SET status='resolved' WHERE topic='find-resolved'").run();
+    db.prepare("UPDATE memory_atom SET status='deprecated' WHERE topic='find-deprecated'").run();
+  }
+
+  test('status field is returned in search results', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'srch-status', content: 'unique content xyz', description: 'd' });
+    const results = atomSearch(db, { scope: 'project', project: '/p', query: 'xyz' });
+    expect(results.length).toBeGreaterThan(0);
+    expect(results[0]).toHaveProperty('status');
+    expect(results[0].status).toBe('active');
+  });
+
+  test('default search filter excludes deprecated atoms', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    seedSearchable(db);
+
+    const results = atomSearch(db, { scope: 'project', project: '/p', query: 'searchable' });
+    const topics = results.map((r) => r.topic);
+    expect(topics).toContain('find-active');
+    expect(topics).toContain('find-resolved');
+    expect(topics).not.toContain('find-deprecated');
+  });
+
+  test('includeDeprecated=true includes deprecated atoms in search', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    seedSearchable(db);
+
+    const results = atomSearch(db, { scope: 'project', project: '/p', query: 'searchable', includeDeprecated: true });
+    const topics = results.map((r) => r.topic);
+    expect(topics).toContain('find-active');
+    expect(topics).toContain('find-resolved');
+    expect(topics).toContain('find-deprecated');
+  });
+
+  test('status="deprecated" exact-match returns only deprecated atoms in search', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    seedSearchable(db);
+
+    const results = atomSearch(db, { scope: 'project', project: '/p', query: 'searchable', status: 'deprecated' });
+    const topics = results.map((r) => r.topic);
+    expect(topics).toContain('find-deprecated');
+    expect(topics).not.toContain('find-active');
+    expect(topics).not.toContain('find-resolved');
+  });
+});
+
+// ── atomGet with status ───────────────────────────────────────────────────────
+// spec: openspec/changes/atom-status/specs/memory-atom/spec.md
+
+describe('atomGet with status', () => {
+  test('status field is returned in match row', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'get-status', content: 'body', description: 'd' });
+
+    const result = atomGet(db, { scope: 'project', project: '/p', topic: 'get-status' });
+    expect(result.match).not.toBeNull();
+    expect(result.match).toHaveProperty('status');
+    expect(result.match.status).toBe('active');
+  });
+
+  test('atomGet always returns regardless of status (no predicate filtering)', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'dep-get', content: 'body', description: 'd' });
+    db.prepare("UPDATE memory_atom SET status='deprecated' WHERE topic='dep-get'").run();
+
+    const result = atomGet(db, { scope: 'project', project: '/p', topic: 'dep-get' });
+    expect(result.match).not.toBeNull();
+    expect(result.match.status).toBe('deprecated');
+  });
+
+  test('alsoIn entries include status field and deprecated atoms are included', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/other', topic: 'cross-status', content: 'foreign body', description: 'd' });
+    db.prepare("UPDATE memory_atom SET status='deprecated' WHERE topic='cross-status'").run();
+
+    const result = atomGet(db, { scope: 'project', project: '/p', topic: 'cross-status' });
+    expect(result.alsoIn.length).toBeGreaterThan(0);
+    expect(result.alsoIn[0]).toHaveProperty('status');
+    expect(result.alsoIn[0].status).toBe('deprecated');
   });
 });

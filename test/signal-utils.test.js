@@ -344,3 +344,112 @@ describe('assemblePrimer — pinned atom rendering', () => {
     expect(occurrences).toHaveLength(1);
   });
 });
+
+// ── assemblePrimer — active-only status filter ────────────────────────────────
+// spec: openspec/changes/atom-status/specs/signal-processing/spec.md
+
+describe('assemblePrimer — active-only status filter', () => {
+  const PROJECT = '/home/user/repos/my/project';
+  const NOW = Date.now();
+  const STALENESS = { status: '0 commit(s) since this note' };
+
+  test('resolved project atom is excluded from primer', () => {
+    const atoms = [
+      { topic: 'arch/active', description: 'active', preview: '', pinned: 0, status: 'active', updated_at: NOW },
+      { topic: 'arch/resolved', description: 'resolved', preview: '', pinned: 0, status: 'resolved', updated_at: NOW },
+    ];
+    const result = assemblePrimer({ rows: [], projectAtoms: atoms, globalAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    expect(result).toContain('arch/active');
+    expect(result).not.toContain('arch/resolved');
+  });
+
+  test('deprecated project atom is excluded from primer', () => {
+    const atoms = [
+      { topic: 'arch/active', description: 'active', preview: '', pinned: 0, status: 'active', updated_at: NOW },
+      { topic: 'arch/deprecated', description: 'deprecated', preview: '', pinned: 0, status: 'deprecated', updated_at: NOW },
+    ];
+    const result = assemblePrimer({ rows: [], projectAtoms: atoms, globalAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    expect(result).toContain('arch/active');
+    expect(result).not.toContain('arch/deprecated');
+  });
+
+  test('only active atoms appear in the primer (all three statuses mixed)', () => {
+    const atoms = [
+      { topic: 'a/active',     description: 'active',     preview: '', pinned: 0, status: 'active',     updated_at: NOW },
+      { topic: 'a/resolved',   description: 'resolved',   preview: '', pinned: 0, status: 'resolved',   updated_at: NOW },
+      { topic: 'a/deprecated', description: 'deprecated', preview: '', pinned: 0, status: 'deprecated', updated_at: NOW },
+    ];
+    const result = assemblePrimer({ rows: [], projectAtoms: atoms, globalAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    expect(result).toContain('a/active');
+    expect(result).not.toContain('a/resolved');
+    expect(result).not.toContain('a/deprecated');
+  });
+
+  test('atoms without a status field are treated as active', () => {
+    const atoms = [
+      { topic: 'no-status', description: 'no status field', preview: '', pinned: 0, updated_at: NOW },
+    ];
+    const result = assemblePrimer({ rows: [], projectAtoms: atoms, globalAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    expect(result).toContain('no-status');
+  });
+
+  test('resolved global atom is excluded from primer', () => {
+    const globals = [
+      { topic: 'global/active',   description: 'active',   preview: '', pinned: 0, status: 'active',   updated_at: NOW },
+      { topic: 'global/resolved', description: 'resolved', preview: '', pinned: 0, status: 'resolved', updated_at: NOW },
+    ];
+    const result = assemblePrimer({ rows: [], projectAtoms: [], globalAtoms: globals, agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    expect(result).toContain('global/active');
+    expect(result).not.toContain('global/resolved');
+  });
+
+  test('overflow cap counts only active atoms (resolved excluded from overflow count)', () => {
+    const atoms = [
+      { topic: 'active/0', description: 'a0', preview: '', pinned: 0, status: 'active',   updated_at: NOW },
+      { topic: 'active/1', description: 'a1', preview: '', pinned: 0, status: 'active',   updated_at: NOW },
+      { topic: 'active/2', description: 'a2', preview: '', pinned: 0, status: 'active',   updated_at: NOW },
+      { topic: 'resolved/x', description: 'rx', preview: '', pinned: 0, status: 'resolved', updated_at: NOW },
+    ];
+    const result = assemblePrimer({
+      rows: [], projectAtoms: atoms, globalAtoms: [],
+      agent: 'engineer', project: PROJECT, staleness: STALENESS, cap: 2,
+    });
+    // Only 3 active atoms, cap=2 → 1 overflow
+    expect(result).toContain('(+1 more — call memory_atom_list to see all)');
+    expect(result).not.toContain('resolved/x');
+  });
+
+  test('pinned but resolved atom is excluded from primer (active-only filter precedes pinned partition)', () => {
+    const atoms = [
+      { topic: 'pinned/resolved', description: 'pinned but resolved', preview: '', pinned: 1, status: 'resolved', updated_at: NOW },
+      { topic: 'active/unpinned', description: 'active unpinned', preview: '', pinned: 0, status: 'active', updated_at: NOW },
+    ];
+    const result = assemblePrimer({ rows: [], projectAtoms: atoms, globalAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    expect(result).not.toContain('pinned/resolved');
+    expect(result).not.toContain('[pinned] pinned');
+    expect(result).toContain('active/unpinned');
+  });
+
+  test('active-only filter applied before pinned/non-pinned partition — pinned active atom appears first, resolved absent', () => {
+    const atoms = [
+      { topic: 'pinned/active',    description: 'pinned active',    preview: '', pinned: 1, status: 'active',   updated_at: NOW },
+      { topic: 'regular/active-1', description: 'regular active 1', preview: '', pinned: 0, status: 'active',   updated_at: NOW },
+      { topic: 'regular/active-2', description: 'regular active 2', preview: '', pinned: 0, status: 'active',   updated_at: NOW },
+      { topic: 'resolved/one',     description: 'resolved 1',       preview: '', pinned: 0, status: 'resolved', updated_at: NOW },
+      { topic: 'resolved/two',     description: 'resolved 2',       preview: '', pinned: 0, status: 'resolved', updated_at: NOW },
+    ];
+    const result = assemblePrimer({ rows: [], projectAtoms: atoms, globalAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    // Active atoms present, resolved absent
+    expect(result).toContain('pinned/active');
+    expect(result).toContain('regular/active-1');
+    expect(result).toContain('regular/active-2');
+    expect(result).not.toContain('resolved/one');
+    expect(result).not.toContain('resolved/two');
+    // Pinned active atom appears before non-pinned active atoms
+    const pinnedIdx = result.indexOf('pinned/active');
+    const regularIdx = result.indexOf('regular/active-1');
+    expect(pinnedIdx).toBeLessThan(regularIdx);
+    // [pinned] prefix on the pinned active atom
+    expect(result).toContain('[pinned] pinned/active');
+  });
+});

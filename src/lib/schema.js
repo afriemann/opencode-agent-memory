@@ -16,6 +16,11 @@
 // Schema version 3 changes:
 //   - memory_atom: new column pinned INTEGER NOT NULL DEFAULT 0.
 //   - PRAGMA user_version = 3 marks migration complete.
+//
+// Schema version 4 changes:
+//   - memory_atom: new column status TEXT NOT NULL DEFAULT 'active'
+//     CHECK(status IN ('active', 'resolved', 'deprecated')).
+//   - PRAGMA user_version = 4 marks migration complete.
 
 // ── Topic normalisation ───────────────────────────────────────────────────────
 
@@ -179,6 +184,7 @@ export function ensureSchema(db) {
       content      TEXT    NOT NULL DEFAULT '',
       tags         TEXT    NOT NULL DEFAULT '[]',
       pinned       INTEGER NOT NULL DEFAULT 0,
+      status       TEXT    NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'resolved', 'deprecated')),
       session_id   TEXT,
       session_name TEXT,
       created_at   INTEGER NOT NULL,
@@ -268,6 +274,29 @@ export function ensureSchema(db) {
     } else {
       // pinned already present — just bump the version marker
       db.exec('PRAGMA user_version = 3');
+    }
+  }
+
+  // ── Phase 4: migration to schema version 4 ───────────────────────────────
+  //   Gate: PRAGMA user_version < 4 AND status column absent (shape probe)
+  //   SQLite supports CHECK on ALTER TABLE ADD COLUMN (validates existing rows;
+  //   the DEFAULT 'active' ensures all existing rows pass the constraint).
+  const versionAfterV3 = db.prepare('PRAGMA user_version').get()?.user_version ?? 0;
+  if (versionAfterV3 < 4) {
+    const atomCols4 = db.prepare("PRAGMA table_info(memory_atom)").all().map((c) => c.name);
+    if (!atomCols4.includes('status')) {
+      db.exec('BEGIN');
+      try {
+        db.exec(`ALTER TABLE memory_atom ADD COLUMN status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'resolved', 'deprecated'))`);
+        db.exec('PRAGMA user_version = 4');
+        db.exec('COMMIT');
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
+      }
+    } else {
+      // status already present — just bump the version marker
+      db.exec('PRAGMA user_version = 4');
     }
   }
 }
@@ -386,23 +415,24 @@ export function atomAppend(db, { scope, project, topic, content }) {
 /**
  * Partial, content-preserving metadata update for an existing atom.
  *
- * Patches one or more of description, tags, created_at, pinned in-place.
+ * Patches one or more of description, tags, created_at, pinned, status in-place.
  * - Absent fields are left unchanged.
  * - tags:[] clears tags; omitted tags keeps existing tags.
- * - updated_at is bumped when description, tags, or pinned is present.
+ * - updated_at is bumped when description, tags, pinned, or status is present.
  * - created_at-only patch leaves updated_at unchanged.
+ * - status must be one of 'active', 'resolved', 'deprecated'.
  *
  * @param {import('node:sqlite').DatabaseSync} db
  * @param {{ scope:string, project:string, topic:string,
- *            patch: { description?:string, tags?:string[], created_at?:number, pinned?:boolean } }} opts
+ *            patch: { description?:string, tags?:string[], created_at?:number, pinned?:boolean, status?:string } }} opts
  * @returns {{ patched: string[] }}
  */
 export function atomPatch(db, { scope, project, topic, patch }) {
   const normTopic = normaliseTopic(topic);
-  const PATCHABLE = ['description', 'tags', 'created_at', 'pinned'];
+  const PATCHABLE = ['description', 'tags', 'created_at', 'pinned', 'status'];
   const present = PATCHABLE.filter((f) => f in patch);
   if (present.length === 0) {
-    throw new Error('at least one of description, tags, created_at, pinned is required');
+    throw new Error('at least one of description, tags, created_at, pinned, status is required');
   }
 
   db.exec('BEGIN IMMEDIATE');
@@ -420,6 +450,14 @@ export function atomPatch(db, { scope, project, topic, patch }) {
       if (!trimmed) {
         db.exec('ROLLBACK');
         throw new Error('Atom description must be a non-empty string');
+      }
+    }
+
+    if ('status' in patch) {
+      const VALID_STATUSES = ['active', 'resolved', 'deprecated'];
+      if (!VALID_STATUSES.includes(patch.status)) {
+        db.exec('ROLLBACK');
+        throw new Error(`Atom status must be one of: ${VALID_STATUSES.join(', ')}`);
       }
     }
 
@@ -442,8 +480,12 @@ export function atomPatch(db, { scope, project, topic, patch }) {
       setClauses.push('pinned = ?');
       values.push(patch.pinned ? 1 : 0);
     }
+    if ('status' in patch) {
+      setClauses.push('status = ?');
+      values.push(patch.status);
+    }
 
-    const bumpUpdatedAt = ('description' in patch) || ('tags' in patch) || ('pinned' in patch);
+    const bumpUpdatedAt = ('description' in patch) || ('tags' in patch) || ('pinned' in patch) || ('status' in patch);
     if (bumpUpdatedAt) {
       setClauses.push('updated_at = ?');
       values.push(Date.now());
@@ -477,7 +519,7 @@ export function atomGet(db, { scope, project, topic }) {
   // Priority resolution: workspace first, global fallback
   let match = db
     .prepare(
-      `SELECT scope, project, topic, description, content, tags, created_at, updated_at
+      `SELECT scope, project, topic, description, content, tags, status, created_at, updated_at
        FROM memory_atom
        WHERE scope = ? AND project = ? AND topic = ?`
     )
@@ -486,7 +528,7 @@ export function atomGet(db, { scope, project, topic }) {
   if (!match && scope !== 'global') {
     match = db
       .prepare(
-        `SELECT scope, project, topic, description, content, tags, created_at, updated_at
+        `SELECT scope, project, topic, description, content, tags, status, created_at, updated_at
          FROM memory_atom
          WHERE scope = 'global' AND project = '' AND topic = ?`
       )
@@ -496,7 +538,7 @@ export function atomGet(db, { scope, project, topic }) {
   // Other-workspace atoms with the same topic (not the matched one)
   let alsoIn = db
     .prepare(
-      `SELECT scope, project, topic, description, substr(content, 1, 80) AS preview, created_at, updated_at
+      `SELECT scope, project, topic, description, substr(content, 1, 80) AS preview, status, created_at, updated_at
        FROM memory_atom
        WHERE topic = ?
          AND NOT (scope = ? AND project = ?)
@@ -522,30 +564,44 @@ export function atomGet(db, { scope, project, topic }) {
  * scope='global' restricts to global only.
  * Falls back to LIKE scan if FTS5 MATCH throws.
  *
+ * Status filter precedence (D4): status exact-match wins → includeDeprecated (all) →
+ * default IN ('active','resolved').
+ *
  * @param {import('node:sqlite').DatabaseSync} db
- * @param {{ scope:string, project:string, query:string, limit?:number }} opts
+ * @param {{ scope:string, project:string, query:string, limit?:number,
+ *            status?:string, includeDeprecated?:boolean }} opts
  * @returns {object[]}
  */
-export function atomSearch(db, { scope, project, query, limit = 20 }) {
+export function atomSearch(db, { scope, project, query, limit = 20, status, includeDeprecated }) {
   const cap = Math.max(1, Math.min(200, Number(limit) || 20));
+
+  const statusArgs = status ? [status] : [];
+  const statusClauseFts = status
+    ? `AND a.status = ?`
+    : includeDeprecated ? '' : `AND a.status IN ('active', 'resolved')`;
+  const statusClausePlain = status
+    ? `AND status = ?`
+    : includeDeprecated ? '' : `AND status IN ('active', 'resolved')`;
 
   const buildFtsQuery = (whereClause) => `
     SELECT a.scope, a.project, a.topic, a.description,
-           substr(a.content, 1, 80) AS preview, a.created_at, a.updated_at
+           substr(a.content, 1, 80) AS preview, a.status, a.created_at, a.updated_at
     FROM memory_atom a
     JOIN memory_atom_fts fts ON fts.rowid = a.id
     WHERE fts.memory_atom_fts MATCH ?
       ${whereClause}
+      ${statusClauseFts}
     ORDER BY rank
     LIMIT ?
   `;
 
   const buildLikeQuery = (whereClause) => `
     SELECT scope, project, topic, description,
-           substr(content, 1, 80) AS preview, created_at, updated_at
+           substr(content, 1, 80) AS preview, status, created_at, updated_at
     FROM memory_atom
     WHERE (topic LIKE ? OR description LIKE ? OR content LIKE ?)
       ${whereClause}
+      ${statusClausePlain}
     ORDER BY updated_at DESC
     LIMIT ?
   `;
@@ -553,12 +609,12 @@ export function atomSearch(db, { scope, project, query, limit = 20 }) {
   try {
     if (scope === 'workspace' || scope === 'project') {
       return db.prepare(buildFtsQuery(`AND ((a.scope = ? AND a.project = ?) OR (a.scope = 'global' AND a.project = ''))`))
-        .all(query, scope, project, cap);
+        .all(query, scope, project, ...statusArgs, cap);
     } else if (scope === 'global') {
       return db.prepare(buildFtsQuery(`AND a.scope = 'global' AND a.project = ''`))
-        .all(query, cap);
+        .all(query, ...statusArgs, cap);
     } else {
-      return db.prepare(buildFtsQuery('')).all(query, cap);
+      return db.prepare(buildFtsQuery('')).all(query, ...statusArgs, cap);
     }
   } catch {
     // FTS5 unavailable or query error — fall back to LIKE scan
@@ -566,13 +622,13 @@ export function atomSearch(db, { scope, project, query, limit = 20 }) {
     if (scope === 'workspace' || scope === 'project') {
       return db.prepare(buildLikeQuery(
         `AND ((scope = ? AND project = ?) OR (scope = 'global' AND project = ''))`
-      ).replace(/a\./g, '')).all(likePattern, likePattern, likePattern, scope, project, cap);
+      )).all(likePattern, likePattern, likePattern, scope, project, ...statusArgs, cap);
     } else if (scope === 'global') {
-      return db.prepare(buildLikeQuery(`AND scope = 'global' AND project = ''`).replace(/a\./g, ''))
-        .all(likePattern, likePattern, likePattern, cap);
+      return db.prepare(buildLikeQuery(`AND scope = 'global' AND project = ''`))
+        .all(likePattern, likePattern, likePattern, ...statusArgs, cap);
     } else {
-      return db.prepare(buildLikeQuery('').replace(/a\./g, ''))
-        .all(likePattern, likePattern, likePattern, cap);
+      return db.prepare(buildLikeQuery(''))
+        .all(likePattern, likePattern, likePattern, ...statusArgs, cap);
     }
   }
 }
@@ -581,33 +637,44 @@ export function atomSearch(db, { scope, project, query, limit = 20 }) {
  * List atoms by topic prefix.
  * Default: current workspace + global. scope='all' returns all workspaces.
  *
+ * Status filter precedence (D4): status exact-match wins → includeDeprecated (all) →
+ * default IN ('active','resolved').
+ *
  * @param {import('node:sqlite').DatabaseSync} db
- * @param {{ scope:string, project:string, prefix?:string }} opts
+ * @param {{ scope:string, project:string, prefix?:string,
+ *            status?:string, includeDeprecated?:boolean }} opts
  * @returns {object[]}
  */
-export function atomList(db, { scope, project, prefix }) {
+export function atomList(db, { scope, project, prefix, status, includeDeprecated }) {
   const normPrefix = prefix ? normaliseTopic(prefix) : '';
   const likePattern = normPrefix ? `${normPrefix}%` : '%';
+
+  const statusArgs = status ? [status] : [];
+  const statusClause = status
+    ? `AND status = ?`
+    : includeDeprecated ? '' : `AND status IN ('active', 'resolved')`;
 
   if (scope === 'all') {
     return db.prepare(`
       SELECT scope, project, topic, description,
-             substr(content, 1, 80) AS preview, pinned, created_at, updated_at
+             substr(content, 1, 80) AS preview, pinned, status, created_at, updated_at
       FROM memory_atom
       WHERE topic LIKE ?
+        ${statusClause}
       ORDER BY pinned DESC, scope, project, topic
-    `).all(likePattern);
+    `).all(likePattern, ...statusArgs);
   }
 
   // Default: current workspace + global
   return db.prepare(`
     SELECT scope, project, topic, description,
-           substr(content, 1, 80) AS preview, pinned, created_at, updated_at
+           substr(content, 1, 80) AS preview, pinned, status, created_at, updated_at
     FROM memory_atom
     WHERE topic LIKE ?
       AND ((scope = ? AND project = ?) OR (scope = 'global' AND project = ''))
+      ${statusClause}
     ORDER BY pinned DESC, scope, project, topic
-  `).all(likePattern, scope, project);
+  `).all(likePattern, scope, project, ...statusArgs);
 }
 
 /**

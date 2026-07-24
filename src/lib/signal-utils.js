@@ -81,10 +81,12 @@ function renderAtomLine(atom, now, { pinned = false } = {}) {
 export function assemblePrimer({ rows, projectAtoms, globalAtoms, agent, project, staleness, cap = 40 }) {
   const displayProject = lastTwoSegments(project);
   const hasRows = Array.isArray(rows) && rows.length > 0;
-  const hasProjectAtoms = Array.isArray(projectAtoms) && projectAtoms.length > 0;
-  const hasGlobalAtoms = Array.isArray(globalAtoms) && globalAtoms.length > 0;
 
-  if (!hasRows && !hasProjectAtoms && !hasGlobalAtoms) return null;
+  // Active-only filter applied once here; all section rendering uses these filtered arrays.
+  const activeProjectAtoms = (Array.isArray(projectAtoms) ? projectAtoms : []).filter((a) => !a.status || a.status === 'active');
+  const activeGlobalAtoms = (Array.isArray(globalAtoms) ? globalAtoms : []).filter((a) => !a.status || a.status === 'active');
+
+  if (!hasRows && activeProjectAtoms.length === 0 && activeGlobalAtoms.length === 0) return null;
 
   const now = Date.now();
   const stalenessLine = renderStaleness(staleness);
@@ -122,11 +124,11 @@ export function assemblePrimer({ rows, projectAtoms, globalAtoms, agent, project
   // ── Project atom directory ──────────────────────────────────────────────────
   lines.push('### Project atoms — search: memory_atom_search · fetch: memory_atom_get');
   lines.push('');
-  if (hasProjectAtoms) {
+  if (activeProjectAtoms.length > 0) {
     lines.push('Fetch atoms on demand when relevant — do not pre-fetch at session start.');
     lines.push('');
-    const pinnedProject = projectAtoms.filter((a) => a.pinned).sort((a, b) => a.topic.localeCompare(b.topic));
-    const regularProject = projectAtoms.filter((a) => !a.pinned);
+    const pinnedProject = activeProjectAtoms.filter((a) => a.pinned).sort((a, b) => a.topic.localeCompare(b.topic));
+    const regularProject = activeProjectAtoms.filter((a) => !a.pinned);
     const visibleProject = regularProject.slice(0, cap);
     for (const atom of pinnedProject) {
       lines.push(renderAtomLine(atom, now, { pinned: true }));
@@ -145,11 +147,11 @@ export function assemblePrimer({ rows, projectAtoms, globalAtoms, agent, project
   // ── Global atom directory ───────────────────────────────────────────────────
   lines.push('### Global atoms');
   lines.push('');
-  if (hasGlobalAtoms) {
+  if (activeGlobalAtoms.length > 0) {
     lines.push('Fetch atoms on demand when relevant — do not pre-fetch at session start.');
     lines.push('');
-    const pinnedGlobal = globalAtoms.filter((a) => a.pinned).sort((a, b) => a.topic.localeCompare(b.topic));
-    const regularGlobal = globalAtoms.filter((a) => !a.pinned);
+    const pinnedGlobal = activeGlobalAtoms.filter((a) => a.pinned).sort((a, b) => a.topic.localeCompare(b.topic));
+    const regularGlobal = activeGlobalAtoms.filter((a) => !a.pinned);
     const visibleGlobal = regularGlobal.slice(0, cap);
     for (const atom of pinnedGlobal) {
       lines.push(renderAtomLine(atom, now, { pinned: true }));

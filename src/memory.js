@@ -42,9 +42,10 @@
 //   atom-get <scope> <project> <topic>
 //
 //   atom-search <scope> <project> <json>
-//     json: { query, limit? }
+//     json: { query, limit?, status?, includeDeprecated? }
 //
-//   atom-list <scope> <project> [<prefix>]
+//   atom-list <scope> <project> [<prefix>] [<optionsJson>]
+//     optionsJson (optional): { status?, includeDeprecated? }
 //
 //   atom-delete <scope> <project> <topic>
 //
@@ -511,7 +512,7 @@ function cmdAtomSearch(scope, project, jsonArg) {
     process.exit(1);
   }
 
-  const { query, limit } = data;
+  const { query, limit, status, includeDeprecated } = data;
   if (!query) {
     process.stderr.write('[agent-memory/atom-search] query is required\n');
     process.exit(1);
@@ -520,14 +521,27 @@ function cmdAtomSearch(scope, project, jsonArg) {
   // When scope='all', pass 'all' so atomSearch drops scope predicate
   const searchScope = scope === 'all' ? 'all' : scope;
   const db = openAndInit();
-  const results = atomSearch(db, { scope: searchScope, project, query, limit });
+  const results = atomSearch(db, { scope: searchScope, project, query, limit, status, includeDeprecated });
   db.close();
   process.stdout.write(JSON.stringify(results) + '\n');
 }
 
-function cmdAtomList(scope, project, prefix) {
+function cmdAtomList(scope, project, prefix, optionsJson) {
+  let status;
+  let includeDeprecated;
+  if (optionsJson) {
+    let opts;
+    try {
+      opts = JSON.parse(optionsJson);
+    } catch {
+      process.stderr.write('[agent-memory/atom-list] invalid options JSON\n');
+      process.exit(1);
+    }
+    status = opts.status;
+    includeDeprecated = opts.includeDeprecated;
+  }
   const db = openAndInit();
-  const results = atomList(db, { scope, project, prefix });
+  const results = atomList(db, { scope, project, prefix, status, includeDeprecated });
   db.close();
   process.stdout.write(JSON.stringify(results) + '\n');
 }
@@ -541,7 +555,7 @@ function cmdAtomPatch(scope, project, jsonArg) {
     process.exit(1);
   }
 
-  const { topic, description, tags, created_at: createdAt, pinned } = data;
+  const { topic, description, tags, created_at: createdAt, pinned, status } = data;
   if (!topic) {
     process.stderr.write('[agent-memory/atom-patch] topic is required\n');
     process.exit(1);
@@ -552,6 +566,7 @@ function cmdAtomPatch(scope, project, jsonArg) {
   if ('tags' in data) patch.tags = tags;
   if ('created_at' in data) patch.created_at = createdAt;
   if ('pinned' in data) patch.pinned = pinned;
+  if ('status' in data) patch.status = status;
 
   const db = openAndInit();
   try {
@@ -690,12 +705,12 @@ switch (cmd) {
   }
 
   case 'atom-list': {
-    const [scope, project, prefix] = rest;
+    const [scope, project, prefix, optionsJson] = rest;
     if (!scope || project == null) {
-      process.stderr.write('Usage: memory.js atom-list <scope> <project> [<prefix>]\n');
+      process.stderr.write('Usage: memory.js atom-list <scope> <project> [<prefix>] [<optionsJson>]\n');
       process.exit(1);
     }
-    cmdAtomList(scope, project, prefix);
+    cmdAtomList(scope, project, prefix, optionsJson);
     break;
   }
 

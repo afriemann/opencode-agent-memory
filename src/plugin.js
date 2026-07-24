@@ -77,6 +77,13 @@ You have persistent memory via the \`memory_atom_*\` and \`memory_state_*\` tool
 
 **Update atom metadata** (\`memory_atom_patch\`) when you need to correct description, tags, created_at, or pin state without rewriting content — e.g. re-dating a migrated atom or pinning it. Use \`memory_atom_write\` when content itself changes.
 
+**Atom lifecycle** (\`memory_atom_patch\` with \`status\`): use status to manage visibility without deleting:
+- \`active\` (default) — appears in primer, list, and search
+- \`resolved\` — hidden from primer; appears in list and search by default (work completed but record kept)
+- \`deprecated\` — hidden from all surfaces by default; retrieve explicitly with \`includeDeprecated: true\`
+
+Prefer \`status="deprecated"\` or \`status="resolved"\` over \`memory_atom_delete\` — it preserves history. \`memory_atom_list\` and \`memory_atom_search\` exclude deprecated atoms by default.
+
 **Hot-state** (\`memory_state_*\`) is managed automatically — it distils on session idle. Call \`memory_state_distil\` to force an immediate save when finishing a meaningful chunk of work.`;
 
 const MAX_IN_FLIGHT = 5000;
@@ -580,7 +587,8 @@ const AgentMemory = async ({ client, $ }) => {
       'The `description` field is required and describes what the atom is for. ' +
       'Returns confirmation of whether the atom was created or an existing one was overwritten. ' +
       'Optional `pinned: true` marks the atom so it always appears at the top of the session primer regardless of the cap. ' +
-      'Pin state is set on the first insert and is NOT overwritten by subsequent content updates — use memory_atom_patch to change the pin state of an existing atom.',
+      'Pin state is set on the first insert and is NOT overwritten by subsequent content updates — use memory_atom_patch to change the pin state of an existing atom. ' +
+      'Status is always `active` for new atoms and is preserved on re-write — use memory_atom_patch to change an atom\'s status.',
     args: {
       topic: tool.schema.string().describe('Hierarchical key, e.g. "arch/db-layer"'),
       content: tool.schema.string().describe('Full atom content'),
@@ -675,11 +683,12 @@ const AgentMemory = async ({ client, $ }) => {
     description:
       'Fetch a memory atom by topic. ' +
       'Returns the full content of the best match (current workspace → global priority). ' +
-      'Also shows atoms at the same topic in other workspaces.\n\n' +
+      'Also shows atoms at the same topic in other workspaces, including deprecated ones.\n\n' +
       'To fetch full content of an atom from a non-current workspace, supply its directory path ' +
       'as `workspace` — the value shown inside `[workspace: <path>]` in an `alsoIn` entry. ' +
       'With `workspace` set, that path becomes the resolution directory and the atom there is ' +
-      'returned as the primary match. `scope="global"` overrides `workspace` when both are set.',
+      'returned as the primary match. `scope="global"` overrides `workspace` when both are set.\n\n' +
+      'The output always includes `status:` so you can determine whether the atom needs lifecycle management.',
     args: {
       topic: tool.schema.string().describe('Topic key to look up'),
       scope: tool.schema.string().optional().describe('"workspace" (default), "global"'),
@@ -698,6 +707,7 @@ const AgentMemory = async ({ client, $ }) => {
         if (result.match) {
           lines.push(`## ${result.match.topic}`);
           lines.push(`**Description:** ${result.match.description}`);
+          lines.push(`**Status:** ${result.match.status || 'active'}`);
           const createdRel = result.match.created_at ? formatRelativeTime(result.match.created_at) : '';
           const updatedRel = result.match.updated_at ? formatRelativeTime(result.match.updated_at) : '';
           if (createdRel || updatedRel) {
@@ -717,7 +727,8 @@ const AgentMemory = async ({ client, $ }) => {
             const location = (a.scope === 'global' || !a.project)
               ? '[global]'
               : `[workspace: ${a.project}]`;
-            lines.push(`• ${location} ${a.topic} — ${a.description} | ${a.preview || ''} [created: ${createdRel || 'unknown'}, updated: ${updatedRel || 'unknown'}]`);
+            const statusLabel = (a.status && a.status !== 'active') ? ` [${a.status}]` : '';
+            lines.push(`• ${location}${statusLabel} ${a.topic} — ${a.description} | ${a.preview || ''} [created: ${createdRel || 'unknown'}, updated: ${updatedRel || 'unknown'}]`);
           }
         }
         return { title: 'memory_atom_get', output: lines.join('\n') };
@@ -737,16 +748,33 @@ const AgentMemory = async ({ client, $ }) => {
     description:
       'Full-text search across memory atoms. ' +
       'Searches all workspaces by default. ' +
-      'Use scope="workspace" to restrict to current workspace + global, or scope="global" for global only.',
+      'Use scope="workspace" to restrict to current workspace + global, or scope="global" for global only. ' +
+      'By default, returns active and resolved atoms (deprecated excluded). ' +
+      'Pass `status` for an exact-match filter on one status value. ' +
+      'Pass `includeDeprecated: true` to include all atoms regardless of status.',
     args: {
       query: tool.schema.string().describe('Search query'),
       limit: tool.schema.number().optional().describe('Max results (default 20)'),
       scope: tool.schema.string().optional().describe('"all" (default), "workspace", "global"'),
+      status: tool.schema.string().optional().describe(
+        'Exact-match status filter. One of: "active", "resolved", "deprecated". ' +
+        'Overrides the default active+resolved filter.'
+      ),
+      includeDeprecated: tool.schema.boolean().optional().describe(
+        'When true, returns all atoms regardless of status, including deprecated. ' +
+        'Overrides the default active+resolved filter.'
+      ),
     },
-    async execute({ query, limit, scope }, context) {
+    async execute({ query, limit, scope, status, includeDeprecated }, context) {
       const { scope: resolvedScope, project } = resolveScope(scope ?? 'all', context.directory);
+      if (status !== undefined) {
+        const VALID_STATUSES = ['active', 'resolved', 'deprecated'];
+        if (!VALID_STATUSES.includes(status)) {
+          return { title: 'memory_atom_search', output: `Error: status must be one of: ${VALID_STATUSES.join(', ')}` };
+        }
+      }
       try {
-        const out = await spawnMemory($, ['atom-search', resolvedScope, project], { query, limit });
+        const out = await spawnMemory($, ['atom-search', resolvedScope, project], { query, limit, status, includeDeprecated });
         const results = JSON.parse(out.trim());
         if (!results || results.length === 0) {
           return { title: 'memory_atom_search', output: 'No results found.' };
@@ -754,7 +782,8 @@ const AgentMemory = async ({ client, $ }) => {
         const lines = results.map((r) => {
           const createdRel = r.created_at ? formatRelativeTime(r.created_at) : 'unknown';
           const updatedRel = r.updated_at ? formatRelativeTime(r.updated_at) : 'unknown';
-          return `• [${r.scope}/${r.project || 'global'}] ${r.topic} — ${r.description} | ${r.preview || ''} [created: ${createdRel}, updated: ${updatedRel}]`;
+          const statusPrefix = (r.status && r.status !== 'active') ? `[${r.status}] ` : '';
+          return `• ${statusPrefix}[${r.scope}/${r.project || 'global'}] ${r.topic} — ${r.description} | ${r.preview || ''} [created: ${createdRel}, updated: ${updatedRel}]`;
         });
         return { title: 'memory_atom_search', output: lines.join('\n') };
       } catch (err) {
@@ -774,15 +803,44 @@ const AgentMemory = async ({ client, $ }) => {
       'List memory atoms by topic prefix. ' +
       'Defaults to current workspace + global. ' +
       'Use scope="all" to include all workspaces. ' +
-      'Pinned atoms are listed first with a `[pinned]` prefix.',
+      'Pinned atoms are listed first with a `[pinned]` prefix. ' +
+      'By default, returns active and resolved atoms (deprecated excluded). ' +
+      'Pass `status` for an exact-match filter on one status value. ' +
+      'Pass `includeDeprecated: true` to include all atoms regardless of status. ' +
+      'Non-active atoms are shown with a `[resolved]` or `[deprecated]` prefix in the output.',
     args: {
       prefix: tool.schema.string().optional().describe('Topic prefix filter (e.g. "arch/")'),
       scope: tool.schema.string().optional().describe('"workspace" (default), "global", "all"'),
+      status: tool.schema.string().optional().describe(
+        'Exact-match status filter. One of: "active", "resolved", "deprecated". ' +
+        'Overrides the default active+resolved filter.'
+      ),
+      includeDeprecated: tool.schema.boolean().optional().describe(
+        'When true, returns all atoms regardless of status, including deprecated. ' +
+        'Overrides the default active+resolved filter.'
+      ),
     },
-    async execute({ prefix, scope }, context) {
+    async execute({ prefix, scope, status, includeDeprecated }, context) {
       const { scope: resolvedScope, project } = resolveScope(scope, context.directory);
+      if (status !== undefined) {
+        const VALID_STATUSES = ['active', 'resolved', 'deprecated'];
+        if (!VALID_STATUSES.includes(status)) {
+          return { title: 'memory_atom_list', output: `Error: status must be one of: ${VALID_STATUSES.join(', ')}` };
+        }
+      }
       try {
-        const out = await spawnMemory($, ['atom-list', resolvedScope, project, ...(prefix ? [prefix] : [])]);
+        const optionsJson = (status !== undefined || includeDeprecated !== undefined)
+          ? JSON.stringify({ ...(status !== undefined ? { status } : {}), ...(includeDeprecated !== undefined ? { includeDeprecated } : {}) })
+          : undefined;
+        // When optionsJson is present, always emit the prefix slot to preserve the
+        // positional contract: atom-list <scope> <project> [<prefix>] [<optionsJson>].
+        // Without this guard, an absent prefix would place optionsJson in the prefix
+        // slot and leave optionsJson undefined in the CLI handler.
+        const out = await spawnMemory($, [
+          'atom-list', resolvedScope, project,
+          ...(prefix || optionsJson ? [prefix ?? ''] : []),
+          ...(optionsJson ? [optionsJson] : []),
+        ]);
         const results = JSON.parse(out.trim());
         if (!results || results.length === 0) {
           return { title: 'memory_atom_list', output: 'No atoms found.' };
@@ -791,7 +849,8 @@ const AgentMemory = async ({ client, $ }) => {
           const createdRel = r.created_at ? formatRelativeTime(r.created_at) : 'unknown';
           const updatedRel = r.updated_at ? formatRelativeTime(r.updated_at) : 'unknown';
           const pinnedPrefix = r.pinned ? '[pinned] ' : '';
-          return `• ${pinnedPrefix}[${r.scope}/${r.project || 'global'}] ${r.topic} — ${r.description} | ${r.preview || ''} [created: ${createdRel}, updated: ${updatedRel}]`;
+          const statusPrefix = (r.status && r.status !== 'active') ? `[${r.status}] ` : '';
+          return `• ${pinnedPrefix}${statusPrefix}[${r.scope}/${r.project || 'global'}] ${r.topic} — ${r.description} | ${r.preview || ''} [created: ${createdRel}, updated: ${updatedRel}]`;
         });
         return { title: 'memory_atom_list', output: lines.join('\n') };
       } catch (err) {
@@ -815,6 +874,9 @@ const AgentMemory = async ({ client, $ }) => {
       '`patch.created_at` accepts an ISO 8601 date string or an epoch-ms number. ' +
       'A created_at-only patch does NOT update the atom\'s updated_at timestamp. ' +
       '`patch.pinned` pins or unpins the atom; pinned atoms always appear at the top of the session primer. ' +
+      '`patch.status` changes the atom\'s lifecycle visibility: "active" (default, all surfaces), ' +
+      '"resolved" (hidden from primer; visible in list/search by default), or ' +
+      '"deprecated" (hidden from all surfaces by default; retrieve with includeDeprecated: true). ' +
       'Use memory_atom_write when you need to change the atom\'s content.',
     args: {
       topic: tool.schema.string().describe('Topic key of the atom to patch'),
@@ -831,6 +893,11 @@ const AgentMemory = async ({ client, $ }) => {
         pinned: tool.schema.boolean().optional().describe(
           'Pin or unpin the atom. Pinned atoms appear at the top of the session primer, before the regular capped list.'
         ),
+        status: tool.schema.string().optional().describe(
+          'Atom lifecycle status. One of: "active" (default, all surfaces), ' +
+          '"resolved" (hidden from primer; visible in list/search by default), ' +
+          '"deprecated" (hidden from all surfaces by default).'
+        ),
       }).describe('Fields to patch. At least one field must be present.'),
     },
     async execute({ topic, patch = {}, scope, workspace }, context) {
@@ -840,15 +907,26 @@ const AgentMemory = async ({ client, $ }) => {
         return { title: 'memory_atom_patch', output: 'Error: scope="all" is not valid for patch operations. Use "workspace" or "global".' };
       }
 
-      const { description, tags, created_at, pinned } = patch;
+      const { description, tags, created_at, pinned, status } = patch;
 
       // tool.schema (Zod) .optional() produces T | undefined — null is rejected at
       // schema validation before execute is called, so `!== undefined` is sufficient
       // to distinguish "caller supplied tags: []" (clear) from "caller omitted tags" (keep).
-      const PATCHABLE = ['description', 'tags', 'created_at', 'pinned'];
+      const PATCHABLE = ['description', 'tags', 'created_at', 'pinned', 'status'];
       const present = PATCHABLE.filter((f) => patch[f] !== undefined);
       if (present.length === 0) {
-        return { title: 'memory_atom_patch', output: 'Error: at least one of description, tags, created_at, pinned is required in `patch`.' };
+        return { title: 'memory_atom_patch', output: 'Error: at least one of description, tags, created_at, pinned, status is required in `patch`.' };
+      }
+
+      // Validate status enum at the tool layer (before passing to CLI)
+      if (status !== undefined) {
+        const VALID_STATUSES = ['active', 'resolved', 'deprecated'];
+        if (!VALID_STATUSES.includes(status)) {
+          return {
+            title: 'memory_atom_patch',
+            output: `Error: status must be one of: ${VALID_STATUSES.join(', ')}`,
+          };
+        }
       }
 
       // Normalise created_at to epoch ms (mirrors memory_atom_write)
@@ -877,6 +955,7 @@ const AgentMemory = async ({ client, $ }) => {
       if (tags !== undefined) patchPayload.tags = tags;
       if (normCreatedAt !== undefined) patchPayload.created_at = normCreatedAt;
       if (pinned !== undefined) patchPayload.pinned = pinned;
+      if (status !== undefined) patchPayload.status = status;
 
       try {
         const out = await spawnMemory($, ['atom-patch', resolvedScope, project], patchPayload);
