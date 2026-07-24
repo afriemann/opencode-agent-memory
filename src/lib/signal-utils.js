@@ -83,7 +83,12 @@ export function assemblePrimer({ rows, projectAtoms, globalAtoms, agent, project
   const hasRows = Array.isArray(rows) && rows.length > 0;
 
   // Active-only filter applied once here; all section rendering uses these filtered arrays.
-  const activeProjectAtoms = (Array.isArray(projectAtoms) ? projectAtoms : []).filter((a) => !a.status || a.status === 'active');
+  // Project section: exclude global atoms (scope='global') so they only appear in the Global section.
+  // Global atoms are included in the atomList(scope='project') query by design (workspace+global),
+  // but the primer must keep them separated to avoid duplication and mislabelling.
+  const activeProjectAtoms = (Array.isArray(projectAtoms) ? projectAtoms : [])
+    .filter((a) => a.scope !== 'global')
+    .filter((a) => !a.status || a.status === 'active');
   const activeGlobalAtoms = (Array.isArray(globalAtoms) ? globalAtoms : []).filter((a) => !a.status || a.status === 'active');
 
   if (!hasRows && activeProjectAtoms.length === 0 && activeGlobalAtoms.length === 0) return null;

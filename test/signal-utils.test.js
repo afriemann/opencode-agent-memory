@@ -453,3 +453,43 @@ describe('assemblePrimer — active-only status filter', () => {
     expect(result).toContain('[pinned] pinned/active');
   });
 });
+
+// ── assemblePrimer — global atom deduplication ────────────────────────────────
+// Global atoms included in the atomList(scope='project') query must not appear
+// in the "Project atoms" section; they belong only in the "Global atoms" section.
+
+describe('assemblePrimer — global atoms not duplicated in project section', () => {
+  const PROJECT = '/home/user/repos/my/project';
+  const NOW = Date.now();
+  const STALENESS = { status: '0 commit(s) since this note' };
+
+  test('global atom in projectAtoms is NOT rendered in the project section', () => {
+    const projectAtoms = [
+      { scope: 'project', topic: 'arch/db', description: 'DB design', preview: '', pinned: 0, updated_at: NOW },
+      { scope: 'global',  topic: 'global/fact', description: 'global fact', preview: '', pinned: 0, updated_at: NOW },
+    ];
+    const globalAtoms = [
+      { scope: 'global', topic: 'global/fact', description: 'global fact', preview: '', pinned: 0, updated_at: NOW },
+    ];
+    const result = assemblePrimer({ rows: [], projectAtoms, globalAtoms, agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    // global/fact should appear exactly once (in the Global atoms section)
+    const occurrences = result.split('\n').filter((l) => l.includes('global/fact'));
+    expect(occurrences).toHaveLength(1);
+    // arch/db should appear in the project section
+    expect(result).toContain('arch/db');
+  });
+
+  test('project section shows "No project atoms yet." when projectAtoms contains only global atoms', () => {
+    const projectAtoms = [
+      { scope: 'global', topic: 'global/only', description: 'global only', preview: '', pinned: 0, updated_at: NOW },
+    ];
+    const globalAtoms = [
+      { scope: 'global', topic: 'global/only', description: 'global only', preview: '', pinned: 0, updated_at: NOW },
+    ];
+    const result = assemblePrimer({ rows: [], projectAtoms, globalAtoms, agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    expect(result).not.toBeNull();
+    expect(result).toContain('No project atoms yet.');
+    // global atom renders in the global section
+    expect(result).toContain('global/only');
+  });
+});
