@@ -10,6 +10,7 @@ import {
   atomWrite,
   atomAppend,
   atomGet,
+  atomPatch,
   atomSearch,
   atomList,
   atomDelete,
@@ -756,5 +757,141 @@ describe('pruneHotState', () => {
       .get();
     expect(otherRow).toBeDefined();
     expect(otherRow.session_id).toBe('other-ses');
+  });
+});
+
+// ── atomPatch ─────────────────────────────────────────────────────────────────
+// spec: openspec/specs/memory-atom/spec.md
+
+describe('atomPatch', () => {
+  function seedAtom(db, overrides = {}) {
+    // Insert directly to control updated_at precisely
+    const defaults = {
+      scope: 'project', project: '/p', topic: 'work/notes',
+      description: 'original desc', content: 'original content',
+      tags: '["old-tag"]', created_at: 1000, updated_at: 2000,
+    };
+    const d = { ...defaults, ...overrides };
+    db.prepare(`
+      INSERT INTO memory_atom (scope, project, topic, description, content, tags, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(d.scope, d.project, d.topic, d.description, d.content, d.tags, d.created_at, d.updated_at);
+  }
+
+  test('atomPatch with description and tags updates both and bumps updated_at', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    seedAtom(db);
+
+    atomPatch(db, {
+      scope: 'project', project: '/p', topic: 'work/notes',
+      patch: { description: 'new desc', tags: ['new-tag'] },
+    });
+
+    const row = db.prepare("SELECT * FROM memory_atom WHERE topic='work/notes'").get();
+    expect(row.description).toBe('new desc');
+    expect(row.tags).toBe('["new-tag"]');
+    expect(row.content).toBe('original content');
+    expect(row.updated_at).toBeGreaterThan(2000);
+  });
+
+  test('atomPatch with created_at only does not bump updated_at', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    seedAtom(db);
+
+    atomPatch(db, {
+      scope: 'project', project: '/p', topic: 'work/notes',
+      patch: { created_at: 500 },
+    });
+
+    const row = db.prepare("SELECT * FROM memory_atom WHERE topic='work/notes'").get();
+    expect(row.created_at).toBe(500);
+    expect(row.updated_at).toBe(2000);
+    expect(row.content).toBe('original content');
+  });
+
+  test('atomPatch with tags:[] clears existing tags', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    seedAtom(db);
+
+    atomPatch(db, {
+      scope: 'project', project: '/p', topic: 'work/notes',
+      patch: { tags: [] },
+    });
+
+    const row = db.prepare("SELECT tags FROM memory_atom WHERE topic='work/notes'").get();
+    expect(row.tags).toBe('[]');
+  });
+
+  test('atomPatch with absent tags field leaves existing tags unchanged', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    seedAtom(db);
+
+    atomPatch(db, {
+      scope: 'project', project: '/p', topic: 'work/notes',
+      patch: { description: 'updated desc' },
+    });
+
+    const row = db.prepare("SELECT tags FROM memory_atom WHERE topic='work/notes'").get();
+    expect(row.tags).toBe('["old-tag"]');
+  });
+
+  test('atomPatch rejects an empty patch', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    seedAtom(db);
+
+    expect(() =>
+      atomPatch(db, { scope: 'project', project: '/p', topic: 'work/notes', patch: {} })
+    ).toThrow(/at least one/i);
+  });
+
+  test('atomPatch rejects an empty description', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    seedAtom(db);
+
+    expect(() =>
+      atomPatch(db, { scope: 'project', project: '/p', topic: 'work/notes', patch: { description: '' } })
+    ).toThrow(/non-empty/i);
+  });
+
+  test('atomPatch errors when atom does not exist', () => {
+    const db = openMemory();
+    ensureSchema(db);
+
+    expect(() =>
+      atomPatch(db, { scope: 'project', project: '/p', topic: 'arch/missing', patch: { description: 'x' } })
+    ).toThrow(/does not exist/i);
+  });
+
+  test('atomPatch preserves content unchanged', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    seedAtom(db);
+
+    atomPatch(db, {
+      scope: 'project', project: '/p', topic: 'work/notes',
+      patch: { description: 'changed', tags: ['t'] },
+    });
+
+    const row = db.prepare("SELECT content FROM memory_atom WHERE topic='work/notes'").get();
+    expect(row.content).toBe('original content');
+  });
+
+  test('atomPatch returns patched field names', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    seedAtom(db);
+
+    const result = atomPatch(db, {
+      scope: 'project', project: '/p', topic: 'work/notes',
+      patch: { description: 'new', tags: ['t'] },
+    });
+
+    expect(result.patched).toEqual(expect.arrayContaining(['description', 'tags']));
   });
 });

@@ -5,7 +5,7 @@
 //   2. Continuous signal accumulator (in-memory buffer, no LLM)
 //   3. Idle-distil worker (throttle + watermark via CLI)
 //   4. Injection module (session.created + fallback on message.updated)
-//   5. Plugin tools (nine tool registrations)
+//   5. Plugin tools (ten tool registrations)
 //   6. Git reconciliation helper (rev-parse / rev-list)
 //
 // The plugin NEVER opens the SQLite DB directly. All DB access is
@@ -74,6 +74,8 @@ You have persistent memory via the \`memory_atom_*\` and \`memory_state_*\` tool
 **Read before re-investigating**: before exploring a familiar domain, call \`memory_atom_search\` or \`memory_atom_list\` — previous findings may already be recorded. Use \`memory_atom_get\` to retrieve the full content of a specific atom.
 
 **Scope**: use \`workspace\` (default) for project-specific facts; use \`global\` for facts true across all projects (host config, tool versions, cross-repo conventions).
+
+**Update atom metadata** (\`memory_atom_patch\`) when you need to correct description, tags, or created_at without rewriting content — e.g. re-dating a migrated atom. Use \`memory_atom_write\` when content itself changes.
 
 **Hot-state** (\`memory_state_*\`) is managed automatically — it distils on session idle. Call \`memory_state_distil\` to force an immediate save when finishing a meaningful chunk of work.`;
 
@@ -666,13 +668,22 @@ const AgentMemory = async ({ client, $ }) => {
     description:
       'Fetch a memory atom by topic. ' +
       'Returns the full content of the best match (current workspace → global priority). ' +
-      'Also shows atoms at the same topic in other workspaces.',
+      'Also shows atoms at the same topic in other workspaces.\n\n' +
+      'To fetch full content of an atom from a non-current workspace, supply its directory path ' +
+      'as `workspace` — the value shown inside `[workspace: <path>]` in an `alsoIn` entry. ' +
+      'With `workspace` set, that path becomes the resolution directory and the atom there is ' +
+      'returned as the primary match. `scope="global"` overrides `workspace` when both are set.',
     args: {
       topic: tool.schema.string().describe('Topic key to look up'),
       scope: tool.schema.string().optional().describe('"workspace" (default), "global"'),
+      workspace: tool.schema.string().optional().describe(
+        'Directory path of a foreign workspace (from an alsoIn listing). ' +
+        'When set, resolves the atom against this path instead of the current session directory.'
+      ),
     },
-    async execute({ topic, scope }, context) {
-      const { scope: resolvedScope, project } = resolveScope(scope, context.directory);
+    async execute({ topic, scope, workspace }, context) {
+      const effectiveDirectory = workspace ?? context.directory;
+      const { scope: resolvedScope, project } = resolveScope(scope, effectiveDirectory);
       try {
         const out = await spawnMemory($, ['atom-get', resolvedScope, project, topic]);
         const result = JSON.parse(out.trim());
@@ -696,7 +707,10 @@ const AgentMemory = async ({ client, $ }) => {
           for (const a of result.alsoIn) {
             const createdRel = a.created_at ? formatRelativeTime(a.created_at) : '';
             const updatedRel = a.updated_at ? formatRelativeTime(a.updated_at) : '';
-            lines.push(`• ${a.scope}/${a.project || '(global)'}: ${a.topic} — ${a.description} | ${a.preview || ''} [created: ${createdRel || 'unknown'}, updated: ${updatedRel || 'unknown'}]`);
+            const location = (a.scope === 'global' || !a.project)
+              ? '[global]'
+              : `[workspace: ${a.project}]`;
+            lines.push(`• ${location} ${a.topic} — ${a.description} | ${a.preview || ''} [created: ${createdRel || 'unknown'}, updated: ${updatedRel || 'unknown'}]`);
           }
         }
         return { title: 'memory_atom_get', output: lines.join('\n') };
@@ -775,6 +789,88 @@ const AgentMemory = async ({ client, $ }) => {
         return {
           title: 'memory_atom_list',
           output: `Error listing atoms: ${err && err.message ? err.message : String(err)}`,
+        };
+      }
+    },
+  });
+
+  /**
+   * memory_atom_patch — partial metadata update without touching content.
+   */
+  const memory_atom_patch = tool({
+    description:
+      'Patch atom metadata (description, tags, created_at) without rewriting its content. ' +
+      'At least one of description, tags, or created_at must be supplied. ' +
+      'Absent fields are left unchanged. ' +
+      'To CLEAR tags, you MUST supply `tags: []` explicitly — omitting `tags` leaves existing tags unchanged. ' +
+      'created_at accepts an ISO 8601 date string or an epoch-ms number. ' +
+      'A created_at-only patch does NOT update the atom\'s updated_at timestamp. ' +
+      'Use memory_atom_write when you need to change the atom\'s content.',
+    args: {
+      topic: tool.schema.string().describe('Topic key of the atom to patch'),
+      description: tool.schema.string().optional().describe('New description (must be non-empty if supplied)'),
+      tags: tool.schema.array(tool.schema.string()).optional().describe('Replacement tags array; [] clears all tags'),
+      created_at: tool.schema.union([tool.schema.string(), tool.schema.number()]).optional().describe(
+        'Replacement creation timestamp. Accepts ISO 8601 string or epoch-ms number.'
+      ),
+      scope: tool.schema.string().optional().describe('"workspace" (default), "global"'),
+      workspace: tool.schema.string().optional().describe(
+        'Directory path of a foreign workspace. When set, resolves the atom against this path instead of the current session directory.'
+      ),
+    },
+    async execute({ topic, description, tags, created_at, scope, workspace }, context) {
+      if (scope === 'all') {
+        return { title: 'memory_atom_patch', output: 'Error: scope="all" is not valid for patch operations. Use "workspace" or "global".' };
+      }
+
+      // tool.schema (Zod) .optional() produces T | undefined — null is rejected at
+      // schema validation before execute is called, so `!== undefined` is sufficient
+      // to distinguish "caller supplied tags: []" (clear) from "caller omitted tags" (keep).
+      const PATCHABLE = ['description', 'tags', 'created_at'];
+      const args = { description, tags, created_at };
+      const present = PATCHABLE.filter((f) => args[f] !== undefined);
+      if (present.length === 0) {
+        return { title: 'memory_atom_patch', output: 'Error: at least one of description, tags, created_at is required.' };
+      }
+
+      // Normalise created_at to epoch ms (mirrors memory_atom_write)
+      let normCreatedAt;
+      if (created_at !== undefined) {
+        if (typeof created_at === 'number') {
+          normCreatedAt = created_at;
+        } else if (typeof created_at === 'string') {
+          const parsed = new Date(created_at).getTime();
+          if (!Number.isFinite(parsed)) {
+            return {
+              title: 'memory_atom_patch',
+              output: `Error: created_at "${created_at}" is not a valid ISO 8601 date string.`,
+            };
+          }
+          normCreatedAt = parsed;
+        }
+      }
+
+      const effectiveDirectory = workspace ?? context.directory;
+      const { scope: resolvedScope, project } = resolveScope(scope, effectiveDirectory);
+
+      // Build the patch JSON with only present fields
+      const patchPayload = { topic };
+      if (description !== undefined) patchPayload.description = description;
+      if (tags !== undefined) patchPayload.tags = tags;
+      if (normCreatedAt !== undefined) patchPayload.created_at = normCreatedAt;
+
+      try {
+        const out = await spawnMemory($, ['atom-patch', resolvedScope, project], patchPayload);
+        const result = JSON.parse(out.trim());
+        const changedFields = result.patched ? result.patched.join(', ') : present.join(', ');
+        return {
+          title: 'memory_atom_patch',
+          output: `Patched atom '${result.topic || topic}' (${changedFields}).`,
+        };
+      } catch (err) {
+        return {
+          title: 'memory_atom_patch',
+          output: `Error patching atom: ${err && err.message ? err.message : String(err)}`,
         };
       }
     },
@@ -960,6 +1056,7 @@ const AgentMemory = async ({ client, $ }) => {
       memory_atom_write,
       memory_atom_append,
       memory_atom_get,
+      memory_atom_patch,
       memory_atom_search,
       memory_atom_list,
       memory_atom_delete,
