@@ -800,37 +800,42 @@ const AgentMemory = async ({ client, $ }) => {
   const memory_atom_patch = tool({
     description:
       'Patch atom metadata (description, tags, created_at) without rewriting its content. ' +
-      'At least one of description, tags, or created_at must be supplied. ' +
-      'Absent fields are left unchanged. ' +
-      'To CLEAR tags, you MUST supply `tags: []` explicitly — omitting `tags` leaves existing tags unchanged. ' +
-      'created_at accepts an ISO 8601 date string or an epoch-ms number. ' +
+      'Supply a `patch` object containing the fields to change; absent fields are left unchanged. ' +
+      'At least one field inside `patch` must be present. ' +
+      'To CLEAR tags, supply `tags: []` explicitly inside `patch` — omitting `tags` leaves existing tags unchanged. ' +
+      '`patch.created_at` accepts an ISO 8601 date string or an epoch-ms number. ' +
       'A created_at-only patch does NOT update the atom\'s updated_at timestamp. ' +
       'Use memory_atom_write when you need to change the atom\'s content.',
     args: {
       topic: tool.schema.string().describe('Topic key of the atom to patch'),
-      description: tool.schema.string().optional().describe('New description (must be non-empty if supplied)'),
-      tags: tool.schema.array(tool.schema.string()).optional().describe('Replacement tags array; [] clears all tags'),
-      created_at: tool.schema.union([tool.schema.string(), tool.schema.number()]).optional().describe(
-        'Replacement creation timestamp. Accepts ISO 8601 string or epoch-ms number.'
-      ),
       scope: tool.schema.string().optional().describe('"workspace" (default), "global"'),
       workspace: tool.schema.string().optional().describe(
         'Directory path of a foreign workspace. When set, resolves the atom against this path instead of the current session directory.'
       ),
+      patch: tool.schema.object({
+        description: tool.schema.string().optional().describe('New description (must be non-empty if supplied)'),
+        tags: tool.schema.array(tool.schema.string()).optional().describe('Replacement tags array; [] clears all tags'),
+        created_at: tool.schema.union([tool.schema.string(), tool.schema.number()]).optional().describe(
+          'Replacement creation timestamp. Accepts ISO 8601 string or epoch-ms number.'
+        ),
+      }).describe('Fields to patch. At least one field must be present.'),
     },
-    async execute({ topic, description, tags, created_at, scope, workspace }, context) {
+    async execute({ topic, patch = {}, scope, workspace }, context) {
+      // patch = {} is a defensive default; schema requires patch but execute() can be
+      // called directly in tests that bypass schema validation — the empty-patch guard below handles the fallback.
       if (scope === 'all') {
         return { title: 'memory_atom_patch', output: 'Error: scope="all" is not valid for patch operations. Use "workspace" or "global".' };
       }
+
+      const { description, tags, created_at } = patch;
 
       // tool.schema (Zod) .optional() produces T | undefined — null is rejected at
       // schema validation before execute is called, so `!== undefined` is sufficient
       // to distinguish "caller supplied tags: []" (clear) from "caller omitted tags" (keep).
       const PATCHABLE = ['description', 'tags', 'created_at'];
-      const args = { description, tags, created_at };
-      const present = PATCHABLE.filter((f) => args[f] !== undefined);
+      const present = PATCHABLE.filter((f) => patch[f] !== undefined);
       if (present.length === 0) {
-        return { title: 'memory_atom_patch', output: 'Error: at least one of description, tags, created_at is required.' };
+        return { title: 'memory_atom_patch', output: 'Error: at least one of description, tags, created_at is required in `patch`.' };
       }
 
       // Normalise created_at to epoch ms (mirrors memory_atom_write)

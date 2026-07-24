@@ -2167,6 +2167,7 @@ describe('memory_atom_get workspace arg changes resolution directory', () => {
 // spec: openspec/specs/memory-atom-tools/spec.md
 
 describe('memory_atom_patch tool', () => {
+  // spec: openspec/specs/memory-atom-tools/spec.md
   function makeCtx(directory = '/my/workspace') {
     return {
       sessionID: 'ses-patch',
@@ -2186,19 +2187,19 @@ describe('memory_atom_patch tool', () => {
     expect(typeof plugin.tool.memory_atom_patch.execute).toBe('function');
   });
 
-  test('memory_atom_patch rejects scope=all', async () => {
+  test("Tool rejects scope='all'", async () => {
     const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
     const result = await plugin.tool.memory_atom_patch.execute(
-      { topic: 'work/notes', description: 'x', scope: 'all' },
+      { topic: 'work/notes', scope: 'all', patch: { description: 'x' } },
       makeCtx()
     );
     expect(result.output).toMatch(/scope.*all|all.*not valid/i);
   });
 
-  test('memory_atom_patch rejects empty patch (no patchable fields)', async () => {
+  test('Tool rejects empty patch call', async () => {
     const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
     const result = await plugin.tool.memory_atom_patch.execute(
-      { topic: 'work/notes' },
+      { topic: 'work/notes', patch: {} },
       makeCtx()
     );
     expect(result.output).toMatch(/at least one/i);
@@ -2207,19 +2208,19 @@ describe('memory_atom_patch tool', () => {
   test('memory_atom_patch rejects invalid created_at string', async () => {
     const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
     const result = await plugin.tool.memory_atom_patch.execute(
-      { topic: 'work/notes', created_at: 'not-a-date' },
+      { topic: 'work/notes', patch: { created_at: 'not-a-date' } },
       makeCtx()
     );
     expect(result.output).toMatch(/not a valid ISO 8601/i);
   });
 
-  test('memory_atom_patch returns confirmation naming changed fields on success', async () => {
+  test('Tool patches description and tags, returns confirmation naming changed fields', async () => {
     const fakePatchResponse = JSON.stringify({ ok: true, topic: 'work/notes', patched: ['description', 'tags'] });
     const $ = makeMockShell({ 'atom-patch': fakePatchResponse });
     const plugin = await AgentMemory({ client: makeMockClient(), $ });
 
     const result = await plugin.tool.memory_atom_patch.execute(
-      { topic: 'work/notes', description: 'new desc', tags: ['t'] },
+      { topic: 'work/notes', patch: { description: 'new desc', tags: ['t'] } },
       makeCtx()
     );
 
@@ -2228,7 +2229,7 @@ describe('memory_atom_patch tool', () => {
     expect(result.output).toContain('tags');
   });
 
-  test('memory_atom_patch surfaces error from CLI without throwing', async () => {
+  test('Tool surfaces error when atom does not exist', async () => {
     const $ = makeMockShell({}, {
       'atom-patch': { message: 'Atom does not exist', stderr: '[agent-memory/atom-patch] Atom does not exist' },
     });
@@ -2238,7 +2239,7 @@ describe('memory_atom_patch tool', () => {
     let result;
     try {
       result = await plugin.tool.memory_atom_patch.execute(
-        { topic: 'arch/missing', description: 'x' },
+        { topic: 'arch/missing', patch: { description: 'x' } },
         makeCtx()
       );
     } catch {
@@ -2251,10 +2252,9 @@ describe('memory_atom_patch tool', () => {
 });
 
 // W1 — Additional memory_atom_patch plugin-layer tests for spec conformance
-// Covers scenarios from openspec/specs/memory-atom-tools/spec.md that were
-// not yet exercised at the plugin layer.
 
 describe('memory_atom_patch plugin-layer spec coverage', () => {
+  // spec: openspec/specs/memory-atom-tools/spec.md
   function makeCtx(directory = '/my/workspace') {
     return {
       sessionID: 'ses-patch-extra',
@@ -2276,7 +2276,7 @@ describe('memory_atom_patch plugin-layer spec coverage', () => {
     const plugin = await AgentMemory({ client: makeMockClient(), $ });
 
     await plugin.tool.memory_atom_patch.execute(
-      { topic: 'work/notes', created_at: '2025-01-01T00:00:00.000Z' },
+      { topic: 'work/notes', patch: { created_at: '2025-01-01T00:00:00.000Z' } },
       makeCtx()
     );
 
@@ -2286,7 +2286,7 @@ describe('memory_atom_patch plugin-layer spec coverage', () => {
     expect($.calls.some((c) => c.includes('2025-01-01T'))).toBe(false);
   });
 
-  test('Tool patches created_at only and leaves updated_at unchanged — payload has no description or tags', async () => {
+  test('Tool patches created_at only and leaves updated_at unchanged', async () => {
     // Verifies the plugin does not inject description/tags into the CLI payload
     // when only created_at is supplied (ensuring updated_at-not-bumped invariant
     // holds end-to-end from the plugin perspective).
@@ -2295,7 +2295,7 @@ describe('memory_atom_patch plugin-layer spec coverage', () => {
     const plugin = await AgentMemory({ client: makeMockClient(), $ });
 
     await plugin.tool.memory_atom_patch.execute(
-      { topic: 'work/notes', created_at: 1700000000000 },
+      { topic: 'work/notes', patch: { created_at: 1700000000000 } },
       makeCtx()
     );
 
@@ -2312,7 +2312,7 @@ describe('memory_atom_patch plugin-layer spec coverage', () => {
     }
   });
 
-  test('Tool rejects empty description before spawning CLI', async () => {
+  test('Tool rejects empty description', async () => {
     // empty description is caught in the schema layer; this test confirms the
     // plugin surfaces the CLI error as a non-throwing result.
     const $ = makeMockShell({}, {
@@ -2324,7 +2324,7 @@ describe('memory_atom_patch plugin-layer spec coverage', () => {
     let result;
     try {
       result = await plugin.tool.memory_atom_patch.execute(
-        { topic: 'work/notes', description: '' },
+        { topic: 'work/notes', patch: { description: '' } },
         makeCtx()
       );
     } catch {
