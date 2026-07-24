@@ -60,6 +60,22 @@ function getDistillerPrompt() {
 // Title used for ephemeral distil sub-sessions.
 const EPHEMERAL_TITLE = 'agent-memory distil';
 
+// Usage protocol injected into every tracked session's system prompt.
+const MEMORY_PROTOCOL = `## Memory tools — usage protocol
+
+You have persistent memory via the \`memory_atom_*\` and \`memory_state_*\` tools.
+
+**Write an atom** (\`memory_atom_write\`) when you discover:
+- A non-obvious architectural decision or design constraint for this project
+- A fact that would take real effort to re-discover: API quirks, undocumented behaviour, environment specifics
+- A reality correction — something that contradicts what documentation or prior assumptions suggest
+
+**Read before re-investigating**: before exploring a familiar domain, call \`memory_atom_search\` or \`memory_atom_list\` — previous findings may already be recorded. Use \`memory_atom_get\` to retrieve the full content of a specific atom.
+
+**Scope**: use \`workspace\` (default) for project-specific facts; use \`global\` for facts true across all projects (host config, tool versions, cross-repo conventions).
+
+**Hot-state** (\`memory_state_*\`) is managed automatically — it distils on session idle. Call \`memory_state_distil\` to force an immediate save when finishing a meaningful chunk of work.`;
+
 const MAX_IN_FLIGHT = 5000;
 
 // ── D1 message-classification keywords ──────────────────────────────────────
@@ -922,9 +938,13 @@ const AgentMemory = async ({ client, $ }) => {
         ({ sessionID } = input ?? {});
         if (!sessionID) return;
         if (ephemerals.has(sessionID)) return;
+        // Inject usage protocol for every tracked session (cold start included).
+        if (primerLoaded.has(sessionID)) {
+          output.system.push(MEMORY_PROTOCOL);
+        }
+        // Inject primer data only when warm (prior sessions or atoms exist).
         const primer = primers.get(sessionID);
-        if (!primer) return;
-        output.system.push(primer);
+        if (primer) output.system.push(primer);
       } catch (err) {
         log(`system.transform: error for session ${sessionID ?? '(unknown)'}`, err);
       }

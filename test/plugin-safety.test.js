@@ -207,13 +207,14 @@ describe('injection idempotency', () => {
 
     // Primer IS available via system.transform (exactly once — not doubled on duplicate events)
     const system1 = await invokeSystemTransform(plugin, 'ses_001');
-    expect(system1).toHaveLength(1);
-    expect(typeof system1[0]).toBe('string');
-    expect(system1[0].length).toBeGreaterThan(0);
+    expect(system1).toHaveLength(2); // protocol + primer
+    expect(system1[0]).toContain('Memory tools');
+    expect(typeof system1[1]).toBe('string');
+    expect(system1[1].length).toBeGreaterThan(0);
 
-    // A fresh output.system is always exactly 1 push — not accumulated
+    // A fresh output.system always has exactly 2 pushes — not accumulated
     const system2 = await invokeSystemTransform(plugin, 'ses_001');
-    expect(system2).toHaveLength(1);
+    expect(system2).toHaveLength(2);
   });
 
   test('does not load primer for cold start (no prior memory)', async () => {
@@ -230,9 +231,10 @@ describe('injection idempotency', () => {
     const noReplyCalls = client._promptCalls.filter((c) => c.body?.noReply);
     expect(noReplyCalls).toHaveLength(0);
 
-    // system.transform returns empty for cold-start session
+    // system.transform injects only the protocol on cold start (no primer data)
     const system = await invokeSystemTransform(plugin, 'ses_cold');
-    expect(system).toHaveLength(0);
+    expect(system).toHaveLength(1);
+    expect(system[0]).toContain('Memory tools');
   });
 });
 
@@ -276,11 +278,11 @@ describe('(agent, project) keying', () => {
     const noReplyCalls = client._promptCalls.filter((c) => c.body?.noReply);
     expect(noReplyCalls).toHaveLength(0);
 
-    // Both sessions have primers available via system.transform
+    // Both sessions have protocol + primer via system.transform
     const systemA = await invokeSystemTransform(plugin, 'ses_proj_a');
     const systemB = await invokeSystemTransform(plugin, 'ses_proj_b');
-    expect(systemA).toHaveLength(1);
-    expect(systemB).toHaveLength(1);
+    expect(systemA).toHaveLength(2);
+    expect(systemB).toHaveLength(2);
   });
 });
 
@@ -368,8 +370,9 @@ describe('fallback inject on message.updated', () => {
 
     // Primer IS available via system.transform after the fallback load
     const system = await invokeSystemTransform(plugin, 'ses_resumed');
-    expect(system).toHaveLength(1);
-    expect(typeof system[0]).toBe('string');
+    expect(system).toHaveLength(2); // protocol + primer
+    expect(system[0]).toContain('Memory tools');
+    expect(typeof system[1]).toBe('string');
   });
 
   test('does not load primer twice when message.updated fires after session.created primed the session', async () => {
@@ -393,9 +396,9 @@ describe('fallback inject on message.updated', () => {
     const noReplyCalls = client._promptCalls.filter((c) => c.body?.noReply);
     expect(noReplyCalls).toHaveLength(0);
 
-    // Primer available exactly once (not accumulated from duplicate loads)
+    // Primer available exactly once (not accumulated from duplicate loads) — protocol + primer
     const system = await invokeSystemTransform(plugin, 'ses_already_primed');
-    expect(system).toHaveLength(1);
+    expect(system).toHaveLength(2);
   });
 });
 
@@ -731,12 +734,12 @@ describe('experimental.chat.system.transform hook', () => {
     });
 
     const system = await invokeSystemTransform(plugin, 'ses_transform_warm');
-    expect(system).toHaveLength(1);
-    expect(system[0]).toContain('background context');
-    expect(system[0]).toContain('background context');
+    expect(system).toHaveLength(2); // protocol + primer
+    expect(system[0]).toContain('Memory tools');
+    expect(system[1]).toContain('background context');
   });
 
-  test('does not append when session has no cached primer (cold start)', async () => {
+  test('injects only protocol for cold start (no prior memory)', async () => {
     const $ = makeMockShell({ read: COLD_READ });
     const client = makeMockClient();
     const plugin = await AgentMemory({ client, $ });
@@ -747,7 +750,8 @@ describe('experimental.chat.system.transform hook', () => {
     });
 
     const system = await invokeSystemTransform(plugin, 'ses_transform_cold');
-    expect(system).toHaveLength(0);
+    expect(system).toHaveLength(1); // protocol only, no primer data
+    expect(system[0]).toContain('Memory tools');
   });
 
   test('does not append when sessionID is absent from hook input', async () => {
@@ -821,9 +825,10 @@ describe('primerLoaded ⊇ keys(primers) invariant', () => {
     // No additional read for the already-attempted session
     expect(readCallsAfter).toBe(readCallsBefore);
 
-    // And system.transform still returns empty (no primer for this cold-start session)
+    // And system.transform injects only the protocol (no primer data) for cold-start
     const system = await invokeSystemTransform(plugin, 'ses_cold_inv');
-    expect(system).toHaveLength(0);
+    expect(system).toHaveLength(1);
+    expect(system[0]).toContain('Memory tools');
   });
 });
 
@@ -1028,11 +1033,11 @@ describe('memory_state_inspect tool execute', () => {
     expect(typeof parsed.active_primer).toBe('string');
     expect(parsed.active_primer.length).toBeGreaterThan(0);
     expect(parsed.active_primer).toContain('background context');
-    expect(parsed.active_primer).toContain('background context');
 
-    // Must be identical to what system.transform would inject
+    // active_primer is the primer data (system[1]); system[0] is the usage protocol
     const system = await invokeSystemTransform(plugin, 'ses_with_primer');
-    expect(system[0]).toBe(parsed.active_primer);
+    expect(system).toHaveLength(2);
+    expect(system[1]).toBe(parsed.active_primer);
   });
 
   test('returns error result instead of throwing when spawn fails', async () => {
@@ -1605,11 +1610,11 @@ describe('multi-agent tracking', () => {
       info: { agent: 'code-reviewer', directory: '/proj', title: null },
     });
 
-    // Both sessions have primers available (WARM_READ returns a prior)
+    // Both sessions have protocol + primer via system.transform
     const sysEng = await invokeSystemTransform(plugin, 'ses_eng');
     const sysCr  = await invokeSystemTransform(plugin, 'ses_cr');
-    expect(sysEng).toHaveLength(1);
-    expect(sysCr).toHaveLength(1);
+    expect(sysEng).toHaveLength(2);
+    expect(sysCr).toHaveLength(2);
 
     process.env.MEMORY_TARGET_AGENTS = savedEnv;
   });
@@ -1724,7 +1729,9 @@ describe('session.created — sessionNames capture (task 8.21)', () => {
 
     const sys = [];
     await plugin['experimental.chat.system.transform']({ sessionID: 'ses-cold-no-atoms' }, { system: sys });
-    expect(sys).toHaveLength(0);
+    // Cold start gets the usage protocol but no primer data
+    expect(sys).toHaveLength(1);
+    expect(sys[0]).toContain('Memory tools');
   });
 });
 
