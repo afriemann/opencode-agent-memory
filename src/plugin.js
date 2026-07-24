@@ -156,9 +156,12 @@ const AgentMemory = async ({ client, $ }) => {
   let queue = Promise.resolve(); // Serialized promise chain
 
   /**
-   * Log an error-level message to the opencode session log via client.app.log.
+   * Log a message to the opencode session log via client.app.log.
+   * @param {string} msg
+   * @param {Error|unknown} [err] — when provided, appends stack/message and stderr; forces level='error'
+   * @param {'info'|'error'} [level]
    */
-  const log = (msg, err) => {
+  const log = (msg, err, level = err ? 'error' : 'info') => {
     const errDetail = err
       ? `: ${err instanceof Error ? err.stack ?? err.message : err}`
       : '';
@@ -167,7 +170,7 @@ const AgentMemory = async ({ client, $ }) => {
       : '';
     const message = `[agent-memory] ${msg}${errDetail}${stderrDetail}`;
     try {
-      const result = client.app.log({ body: { service: 'agent-memory', level: 'error', message } });
+      const result = client.app.log({ body: { service: 'agent-memory', level, message } });
       result?.catch?.(() => process.stderr.write(message + '\n'));
     } catch {
       process.stderr.write(message + '\n');
