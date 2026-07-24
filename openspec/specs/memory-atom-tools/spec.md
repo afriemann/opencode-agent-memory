@@ -4,7 +4,7 @@
 TBD - created by archiving change memory-atoms-and-session-hot-state. Update Purpose after archive.
 ## Requirements
 ### Requirement: memory_atom_write tool upserts an atom with required description
-The `memory_atom_write` registered tool SHALL invoke the `atom-write` CLI subcommand, passing a required `description` field and optional `scope` (default `'workspace'`). The tool SHALL accept an optional `created_at` argument (ISO 8601 string or epoch ms integer); when supplied it SHALL be converted to epoch ms and forwarded to the CLI as `createdAt`. The tool SHALL return the create-or-overwrite confirmation line from the CLI. It SHALL return an informative error result on CLI failure and SHALL NOT propagate exceptions into the opencode host.
+The `memory_atom_write` registered tool SHALL invoke the `atom-write` CLI subcommand, passing a required `description` field and optional `scope` (default `'workspace'`). The tool SHALL accept an optional `created_at` argument (ISO 8601 string or epoch ms integer); when supplied it SHALL be converted to epoch ms and forwarded to the CLI as `createdAt`. The tool SHALL accept an optional `pinned` boolean argument (default `false`); when supplied it SHALL be forwarded to the CLI as `pinned`. The `pinned` value is applied only on INSERT (first creation); on a re-write of an existing atom the existing `pinned` state is preserved — use `memory_atom_patch` to change pin state. The tool description SHALL state this INSERT-only caveat explicitly. The tool SHALL return the create-or-overwrite confirmation line from the CLI. It SHALL return an informative error result on CLI failure and SHALL NOT propagate exceptions into the opencode host.
 
 #### Scenario: Tool creates a new atom and reports Created
 - **GIVEN** no atom exists at the given topic in the current workspace
@@ -30,6 +30,16 @@ The `memory_atom_write` registered tool SHALL invoke the `atom-write` CLI subcom
 - **GIVEN** the agent calls memory_atom_write with created_at=1000 (number)
 - **WHEN** the CLI payload is assembled
 - **THEN** the payload contains `createdAt=1000`
+
+#### Scenario: Tool creates a pinned atom when pinned=true is supplied
+- **GIVEN** no atom exists at the given topic
+- **WHEN** the agent calls memory_atom_write with pinned=true
+- **THEN** the atom is created with pinned=1 and the tool returns 'Created atom at <topic>'
+
+#### Scenario: Tool preserves existing pin on re-write when pinned is omitted
+- **GIVEN** an atom exists at the given topic with pinned=1
+- **WHEN** the agent calls memory_atom_write with new content and no pinned argument
+- **THEN** the atom is updated and the existing pinned=1 is preserved
 
 ### Requirement: memory_atom_append tool appends to an existing atom
 The `memory_atom_append` registered tool SHALL invoke the `atom-append` CLI subcommand. It SHALL return the full updated content on success. If the topic does not exist the CLI exits non-zero and the tool SHALL surface the error message ("Atom '<topic>' does not exist — use memory_atom_write to create it first") as a ToolResult. It SHALL NOT propagate exceptions into the host.
@@ -91,7 +101,7 @@ The `memory_atom_search` registered tool SHALL invoke the `atom-search` CLI subc
 - **THEN** each result line includes both a creation timestamp and an update timestamp as human-readable relative strings
 
 ### Requirement: memory_atom_list tool lists atoms by topic prefix with default workspace+global scope
-The `memory_atom_list` registered tool SHALL invoke the `atom-list` CLI subcommand. With no scope it returns current-workspace and global atoms. `scope='all'` includes atoms from all workspaces. Each result line SHALL include both `created_at` and `updated_at` rendered as human-readable relative strings. It SHALL NOT propagate exceptions into the host.
+The `memory_atom_list` registered tool SHALL invoke the `atom-list` CLI subcommand. With no scope it returns current-workspace and global atoms. `scope='all'` includes atoms from all workspaces. Each result line SHALL include both `created_at` and `updated_at` rendered as human-readable relative strings. Pinned atoms SHALL be marked with a `[pinned]` indicator in their entry. It SHALL NOT propagate exceptions into the host.
 
 #### Scenario: Tool lists current-workspace and global atoms by default
 - **GIVEN** atoms exist in the current workspace, globally, and in a second workspace
@@ -107,6 +117,11 @@ The `memory_atom_list` registered tool SHALL invoke the `atom-list` CLI subcomma
 - **GIVEN** atoms with known timestamps exist
 - **WHEN** the agent calls memory_atom_list
 - **THEN** each result line includes both a creation timestamp and an update timestamp as human-readable relative strings
+
+#### Scenario: Tool output marks pinned atoms with [pinned]
+- **GIVEN** one pinned atom and one unpinned atom exist
+- **WHEN** the agent calls memory_atom_list
+- **THEN** the pinned atom's line includes '[pinned]' and the unpinned atom's line does not
 
 ### Requirement: memory_atom_delete tool removes an atom by topic
 The `memory_atom_delete` registered tool SHALL invoke the `atom-delete` CLI subcommand and return a confirmation on success. It SHALL surface a non-zero CLI exit as an error result and SHALL NOT propagate exceptions into the host.
@@ -151,31 +166,46 @@ The `memory_atom_write` and `memory_atom_append` tools SHALL capture `session_id
 - **THEN** the stored atom has session_name=null and no error is raised
 
 ### Requirement: memory_atom_patch tool performs content-preserving metadata updates
-The `memory_atom_patch` registered tool SHALL invoke the `atom-patch` CLI subcommand to update one or more of `description`, `tags`, and `created_at` for an existing atom without modifying its content. The patchable fields SHALL be supplied as a required `patch` sub-object; the lookup keys `topic`, `scope`, and `workspace` remain top-level arguments. At least one field inside `patch` MUST be present; an empty `patch` object (no fields supplied) SHALL be rejected with a clear error result. Setting `patch.tags: []` SHALL clear existing tags; omitting `patch.tags` SHALL leave existing tags unchanged. `patch.created_at` SHALL accept either an ISO 8601 date string or an epoch-ms number and be normalised to an epoch-ms integer in the plugin before the CLI is invoked. A `created_at`-only patch SHALL NOT modify the atom's `updated_at` timestamp; a patch that includes `description` or `tags` SHALL bump `updated_at`. An empty `patch.description` after trimming SHALL be rejected with an error result. `scope="all"` SHALL be rejected. The optional `workspace` argument (a directory path) SHALL substitute the effective directory for scope resolution, mirroring `memory_atom_get`. On success the tool SHALL return a confirmation message naming the topic and the changed fields. It SHALL NOT propagate exceptions into the host.
+The `memory_atom_patch` registered tool SHALL invoke the `atom-patch` CLI subcommand to update one or more of `description`, `tags`, `created_at`, and `pinned` for an existing atom without modifying its content. At least one of the four patchable fields MUST be supplied; an empty call SHALL be rejected with a clear error result. Setting `tags: []` SHALL clear existing tags; omitting `tags` SHALL leave existing tags unchanged. Omitting `pinned` SHALL leave the existing pin state unchanged; supplying `pinned: false` SHALL unpin the atom. The `created_at` argument SHALL accept either an ISO 8601 date string or an epoch-ms number and be normalised to an epoch-ms integer in the plugin before the CLI is invoked. A `created_at`-only patch SHALL NOT modify the atom's `updated_at` timestamp; a patch that includes `description`, `tags`, or `pinned` SHALL bump `updated_at`. An empty `description` after trimming SHALL be rejected with an error result. `scope="all"` SHALL be rejected. The optional `workspace` argument (a directory path) SHALL substitute the effective directory for scope resolution, mirroring `memory_atom_get`. On success the tool SHALL return a confirmation message naming the topic and the changed fields. It SHALL NOT propagate exceptions into the host.
 
 #### Scenario: Tool patches description and tags, returns confirmation naming changed fields
 - **GIVEN** an atom exists at topic 'work/notes' with description='old' and tags=['old-tag']
-- **WHEN** the agent calls memory_atom_patch with patch={ description='new', tags=['new-tag'] }
+- **WHEN** the agent calls memory_atom_patch with description='new', tags=['new-tag']
 - **THEN** the tool returns a success message containing 'work/notes' and listing 'description' and 'tags' among the patched fields
 
 #### Scenario: Tool patches created_at only and leaves updated_at unchanged
 - **GIVEN** an atom exists at topic 'work/notes' with a known updated_at
-- **WHEN** the agent calls memory_atom_patch with patch={ created_at=<timestamp> } only
+- **WHEN** the agent calls memory_atom_patch with only created_at supplied
 - **THEN** the atom's created_at is updated and updated_at is not changed
 
 #### Scenario: Tool accepts ISO 8601 string for created_at and normalises to epoch ms
 - **GIVEN** an atom exists at topic 'work/notes'
-- **WHEN** the agent calls memory_atom_patch with patch={ created_at="2025-01-01T00:00:00.000Z" }
+- **WHEN** the agent calls memory_atom_patch with created_at="2025-01-01T00:00:00.000Z"
 - **THEN** the atom's created_at is stored as the equivalent epoch-ms integer (1735689600000)
+
+#### Scenario: Tool pins an atom and bumps updated_at
+- **GIVEN** an atom exists at topic 'work/notes' with pinned=0 and known updated_at
+- **WHEN** the agent calls memory_atom_patch with pinned=true
+- **THEN** the atom's pinned is 1, updated_at is bumped, and the tool returns a success message listing 'pinned' among the patched fields
+
+#### Scenario: Tool unpins an atom and bumps updated_at
+- **GIVEN** an atom exists at topic 'work/notes' with pinned=1 and known updated_at
+- **WHEN** the agent calls memory_atom_patch with pinned=false
+- **THEN** the atom's pinned is 0 and updated_at is bumped
+
+#### Scenario: Tool leaves pin unchanged when pinned is omitted
+- **GIVEN** a pinned atom exists at topic 'work/notes' (pinned=1)
+- **WHEN** the agent calls memory_atom_patch with only description='updated'
+- **THEN** the atom's pinned remains 1
 
 #### Scenario: Tool rejects empty patch call
 - **GIVEN** an atom exists at topic 'work/notes'
-- **WHEN** the agent calls memory_atom_patch with an empty patch object (no fields inside patch)
+- **WHEN** the agent calls memory_atom_patch with no patchable fields
 - **THEN** the tool returns an error result indicating at least one field is required and does not throw
 
 #### Scenario: Tool rejects empty description
 - **GIVEN** an atom exists at topic 'work/notes'
-- **WHEN** the agent calls memory_atom_patch with patch={ description='' }
+- **WHEN** the agent calls memory_atom_patch with description=''
 - **THEN** the tool returns an error result about non-empty description and does not throw
 
 #### Scenario: Tool rejects scope='all'
@@ -185,6 +215,6 @@ The `memory_atom_patch` registered tool SHALL invoke the `atom-patch` CLI subcom
 
 #### Scenario: Tool surfaces error when atom does not exist
 - **GIVEN** no atom exists at topic 'arch/missing'
-- **WHEN** the agent calls memory_atom_patch with patch={ description='x' } for that topic
+- **WHEN** the agent calls memory_atom_patch for that topic
 - **THEN** the tool returns an error result containing the missing-atom message and does not throw
 
