@@ -197,18 +197,12 @@ function cmdRead(sessionId, agent, project) {
 function cmdInspect(agent, project) {
   const db = openAndInit();
 
-  // DB-level schema version (PRAGMA user_version) — reflects all migrations including
-  // memory_atom column additions (v3: pinned, v4: status). Distinct from the
-  // schema_version column in hot_state rows, which is always 2 (hot_state was
-  // last structurally changed in migration v2 and that column is never incremented).
-  const dbSchemaVersion = db.prepare('PRAGMA user_version').get()?.user_version ?? 0;
-
   // All hot_state rows for (scope='project', agent, project)
   const allRows = db
     .prepare(`
       SELECT id, scope, agent, project, session_id, session_name,
              last_worked_summary, next_action, open_questions,
-             anchored_git_sha, schema_version, updated_at
+             anchored_git_sha, updated_at
       FROM hot_state
       WHERE scope = 'project' AND agent = ? AND project = ?
       ORDER BY updated_at DESC, id DESC
@@ -237,7 +231,7 @@ function cmdInspect(agent, project) {
 
   // prior = most recent row (first after ORDER BY updated_at DESC)
   const prior = rows.length > 0 ? rows[0] : null;
-  process.stdout.write(JSON.stringify({ db_schema_version: dbSchemaVersion, prior, rows, signals }) + '\n');
+  process.stdout.write(JSON.stringify({ prior, rows, signals }) + '\n');
 }
 
 function cmdCorrect(agent, project, sessionId, patchJsonArg) {

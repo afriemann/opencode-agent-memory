@@ -434,6 +434,9 @@ const AgentMemory = async ({ client, $ }) => {
             .map((p) => p.text)
             .join('\n');
           distilled = parseDistilReply(text);
+          if (distilled) {
+            log(`distil: json_schema failed, text fallback succeeded for ${sessionId}`);
+          }
         } catch (err) {
           log(`distil: text fallback call failed for ${sessionId}`, err);
         }
@@ -459,6 +462,8 @@ const AgentMemory = async ({ client, $ }) => {
         log(`distil: distil-write failed for ${sessionId}`, err);
         return;
       }
+
+      log(`distil: complete for ${sessionId} — ${reducedSignals.length} signal(s) consumed, summary: "${(distilled.last_worked_summary ?? '').slice(0, 100)}"`);
     } finally {
       try {
         await client.session.delete({ path: { id: ephId } });
@@ -476,10 +481,7 @@ const AgentMemory = async ({ client, $ }) => {
     description:
       'Read the current agent memory hot state for this session: recent session threads, ' +
       'current signals, and the loaded primer. Does not list durable atoms — use ' +
-      'memory_atom_list for the atom directory or memory_atom_get to fetch a specific atom by topic. ' +
-      'The output includes `db_schema_version` (the actual PRAGMA user_version of the SQLite DB, ' +
-      'reflecting all migrations) and `schema_version` inside each hot_state row (always 2 — ' +
-      'that column marks when hot_state was last structurally changed, not the overall DB version).',
+      'memory_atom_list for the atom directory or memory_atom_get to fetch a specific atom by topic.',
     args: {},
     async execute(_args, context) {
       const agent = await resolveSessionAgent(context.sessionID);
