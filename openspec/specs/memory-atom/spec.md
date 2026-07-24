@@ -4,26 +4,27 @@
 TBD - created by archiving change memory-atoms-and-session-hot-state. Update Purpose after archive.
 ## Requirements
 ### Requirement: memory_atom table stores named durable knowledge atoms
-The system SHALL maintain a `memory_atom` table with columns `id` (INTEGER PRIMARY KEY AUTOINCREMENT), `scope`, `project`, `topic`, `description`, `content`, `tags` (JSON), `session_id`, `session_name`, `created_at`, `updated_at`, and `pinned` (INTEGER NOT NULL DEFAULT 0), and a UNIQUE constraint on `(scope, project, topic)`. A new `memory_atom_fts` FTS5 virtual table (external-content) and three sync triggers (`memory_atom_ai`, `memory_atom_ad`, `memory_atom_au`) SHALL be created alongside the base table in `ensureSchema`. The baseline `CREATE TABLE IF NOT EXISTS` definition SHALL include `pinned INTEGER NOT NULL DEFAULT 0` so a fresh database is schema-identical to one that has undergone the v3 migration. The `ensureSchema` function SHALL apply a v3 migration (guarded by `PRAGMA user_version < 3` and a `PRAGMA table_info` column-existence probe) that runs `ALTER TABLE memory_atom ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0` on existing databases and then stamps `PRAGMA user_version = 3`. The `pinned` column SHALL NOT be included in the FTS5 index or its sync triggers.
+The system SHALL maintain a `memory_atom` table with columns `id` (INTEGER PRIMARY KEY AUTOINCREMENT), `scope`, `project`, `topic`, `description`, `content`, `tags` (JSON), `session_id`, `session_name`, `created_at`, `updated_at`, `pinned` (INTEGER NOT NULL DEFAULT 0), and `status` (TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'resolved', 'deprecated'))), and a UNIQUE constraint on `(scope, project, topic)`. A new `memory_atom_fts` FTS5 virtual table (external-content) and three sync triggers (`memory_atom_ai`, `memory_atom_ad`, `memory_atom_au`) SHALL be created alongside the base table in `ensureSchema`. The baseline `CREATE TABLE IF NOT EXISTS` definition SHALL include the `status` column with its `DEFAULT` and `CHECK` so a fresh database is schema-identical to one that has undergone the v4 migration. The `ensureSchema` function SHALL apply a v4 migration (guarded by `PRAGMA user_version < 4` and a `PRAGMA table_info` column-existence probe) that runs `ALTER TABLE memory_atom ADD COLUMN status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','resolved','deprecated'))` on existing databases and then stamps `PRAGMA user_version = 4`. The identical `CHECK` constraint SHALL appear on both provisioning paths (fresh `CREATE TABLE` and v4 `ALTER TABLE ADD COLUMN`) to preserve the schema-convergence invariant. The `status` column SHALL NOT be included in the FTS5 index or its sync triggers.
 
-#### Scenario: Fresh database creates memory_atom table with pinned column
-- **WHEN** `ensureSchema` is called on a fresh database
-- **THEN** the `memory_atom` table exists with all required columns including `pinned INTEGER NOT NULL DEFAULT 0`, the UNIQUE(scope, project, topic) constraint, and `memory_atom_fts` exists as a virtual FTS5 table
+#### Scenario: Fresh database creates memory_atom table with status column
+- **GIVEN** `ensureSchema` is called on a fresh database
+- **WHEN** `PRAGMA table_info(memory_atom)` is inspected
+- **THEN** the `memory_atom` table exists with a `status TEXT NOT NULL DEFAULT 'active'` column carrying the enum CHECK, alongside all previously defined columns including `pinned`
 
-#### Scenario: Migration adds pinned column to an existing v2 database
-- **GIVEN** a database at schema version 2 without a `pinned` column
+#### Scenario: v4 migration adds status column to an existing v3 database
+- **GIVEN** a database at schema version 3 without a `status` column
 - **WHEN** `ensureSchema` is called
-- **THEN** the `memory_atom` table gains a `pinned INTEGER NOT NULL DEFAULT 0` column, all existing atoms have `pinned = 0`, and `PRAGMA user_version` returns 3
+- **THEN** the `memory_atom` table gains a `status TEXT NOT NULL DEFAULT 'active' CHECK(...)` column, all existing atoms have `status = 'active'`, and `PRAGMA user_version` returns 4
 
-#### Scenario: v3 migration is idempotent when pinned column already exists
-- **GIVEN** a database where the `pinned` column already exists (shape probe hits)
+#### Scenario: v4 migration is idempotent when status column already exists
+- **GIVEN** a database where the `status` column already exists (shape probe hits)
 - **WHEN** `ensureSchema` is called
-- **THEN** `ALTER TABLE` is NOT run again (no duplicate-column error) and `PRAGMA user_version` is stamped to 3
+- **THEN** `ALTER TABLE` is NOT run again (no duplicate-column error) and `PRAGMA user_version` is stamped to 4
 
-#### Scenario: Fresh and migrated databases are schema-identical
-- **GIVEN** one fresh database and one v2 database after migration
+#### Scenario: Fresh and migrated databases are schema-identical for the status column
+- **GIVEN** one fresh database and one v3 database after v4 migration
 - **WHEN** `PRAGMA table_info(memory_atom)` is inspected on both
-- **THEN** both contain the `pinned` column with the same type and default
+- **THEN** both contain the `status` column with the same type, default, and CHECK constraint
 
 ### Requirement: normaliseTopic normalises a topic string
 The system SHALL provide a shared `normaliseTopic(topic)` helper that lowercases the string, collapses spaces and underscores to hyphens, and strips leading and trailing slashes. The resulting string SHALL be the canonical stored form for topic keys.
@@ -127,93 +128,78 @@ The system SHALL atomically read the existing atom's content and write back the 
 - **THEN** the stored content is 'initial content\n---\nnew finding' and the full updated content is printed on stdout
 
 ### Requirement: atom-get returns best-match full content and a foreign-workspace listing
-The system SHALL resolve the single best full-content match for a topic using priority order (current-workspace atom preferred, global atom as fallback). It SHALL separately query other workspaces for atoms at the same topic and return a listing (topic, description, 80-char content preview, project, updated_at). The response SHALL have shape `{ match: <full row | null>, alsoIn: <preview rows> }`. When no current-workspace or global atom exists, `match` SHALL be null and only the `alsoIn` listing is populated. The `match` row and each `alsoIn` row SHALL include both `created_at` and `updated_at` (epoch ms integers). When an optional workspace directory path is provided, the system SHALL resolve the atom against that directory instead of the process's current working directory, allowing a foreign-workspace atom to be promoted to the primary match. The `alsoIn` listing SHALL be formatted as one line per entry: `• [workspace: <project-path>] <topic> — <description> | <preview> [created: …, updated: …]` for workspace-scoped foreign atoms, and `• [global] <topic> — <description> | <preview> [created: …, updated: …]` for global-scoped foreign atoms.
+The system SHALL resolve the single best full-content match for a topic using priority order (current-workspace atom preferred, global atom as fallback). It SHALL separately query other workspaces for atoms at the same topic and return a listing (topic, description, 80-char content preview, project, updated_at, status). The response SHALL have shape `{ match: <full row | null>, alsoIn: <preview rows> }`. When no current-workspace or global atom exists, `match` SHALL be null and only the `alsoIn` listing is populated. The `match` row and each `alsoIn` row SHALL include both `created_at` and `updated_at` (epoch ms integers) and `status`. The `alsoIn` listing SHALL include atoms of all status values (including `deprecated`) and SHALL label each entry with the atom's status when it is not `active`. `atom-get` SHALL apply no status predicate — it always returns the best-match atom regardless of its `status`. When an optional workspace directory path is provided, the system SHALL resolve the atom against that directory instead of the process's current working directory. The `alsoIn` listing SHALL be formatted as one line per entry: `• [workspace: <project-path>] <topic> — <description> | <preview> [created: …, updated: …]` for workspace-scoped foreign atoms, and `• [global] <topic> — <description> | <preview> [created: …, updated: …]` for global-scoped foreign atoms.
 
-#### Scenario: atom-get returns current-workspace atom when it exists alongside a global one
-- **GIVEN** an atom exists at topic 'arch/db' in the current workspace AND globally
-- **WHEN** atom-get is called for the current workspace
-- **THEN** the current-workspace atom is returned as match and the global atom appears in alsoIn with a 80-char preview
+#### Scenario: atom-get returns atom regardless of its status
+- **GIVEN** an atom exists at topic 'arch/db' with `status='deprecated'`
+- **WHEN** `atom-get` is called for that topic
+- **THEN** the atom is returned as the match with its full content and `status='deprecated'` in the row
 
-#### Scenario: atom-get falls back to global when no current-workspace match exists
-- **GIVEN** no current-workspace atom exists at 'arch/db' but a global one does
-- **WHEN** atom-get is called
-- **THEN** the global atom is returned as match and alsoIn is empty
+#### Scenario: atom-get match row includes status field
+- **GIVEN** an atom exists at topic 'arch/db' with `status='resolved'`
+- **WHEN** `atom-get` is called
+- **THEN** the match row includes `status` equal to `'resolved'`
 
-#### Scenario: atom-get returns null match and foreign listing when only other-workspace atoms exist
-- **GIVEN** no current-workspace or global atom at 'arch/db', but an atom in workspace B exists
-- **WHEN** atom-get is called
-- **THEN** match is null and workspace-B atom appears in alsoIn with a 80-char content preview; no foreign content is loaded as match
-
-#### Scenario: atom-get match row includes created_at and updated_at
-- **GIVEN** an atom exists at topic 'arch/db' in the current workspace with a known created_at value
-- **WHEN** atom-get is called
-- **THEN** the match row includes both `created_at` and `updated_at` as epoch ms integers
-
-#### Scenario: atom-get with workspace arg promotes the foreign atom to primary match
-- **GIVEN** an atom exists at topic 'arch/db' in workspace B but not in the current workspace
-- **WHEN** atom-get is called with the path of workspace B as the workspace argument
-- **THEN** the atom from workspace B is returned as the primary match with its full content
-
-#### Scenario: atom-get alsoIn entries for workspace atoms use bracketed path format
-- **GIVEN** an atom at topic 'arch/db' exists in workspace B and a global atom also exists
-- **WHEN** atom-get is called for the current workspace
-- **THEN** the workspace-B entry in alsoIn is rendered as `• [workspace: <path-to-B>] arch/db — …` and the global entry (if in alsoIn) is rendered as `• [global] arch/db — …`
+#### Scenario: atom-get alsoIn includes and labels deprecated atoms
+- **GIVEN** the current-workspace atom at 'arch/db' is active and the global atom at 'arch/db' is deprecated
+- **WHEN** `atom-get` is called
+- **THEN** the global atom appears in `alsoIn` and its entry indicates `status='deprecated'`
 
 ### Requirement: atom-search searches all workspaces by default and supports scope narrowing
-The system SHALL execute a full-text MATCH query across all atoms when no scope is specified, ordering results by BM25 score and including scope and project context in each result. The optional `scope` parameter SHALL narrow the search to the current workspace (`'workspace'`) or global-only atoms (`'global'`). When FTS5 is unavailable, the system SHALL fall back to a LIKE scan over topic, description, and content. Each result row SHALL include both `created_at` and `updated_at` (epoch ms integers).
+The system SHALL execute a full-text MATCH query across all atoms when no scope is specified, ordering results by BM25 score and including scope and project context in each result. The optional `scope` parameter SHALL narrow the search to the current workspace (`'workspace'`) or global-only atoms (`'global'`). When FTS5 is unavailable, the system SHALL fall back to a LIKE scan over topic, description, and content. Each result row SHALL include both `created_at` and `updated_at` (epoch ms integers) and `status`. By default, `atom-search` SHALL exclude `deprecated` atoms. The search JSON blob SHALL accept optional `status` (exact-match string, one of `active`, `resolved`, or `deprecated`) and `includeDeprecated` (boolean); when `status` is present it SHALL override `includeDeprecated` and the default filter; when only `includeDeprecated` is truthy it SHALL lift all status filtering.
 
-#### Scenario: atom-search without scope includes all workspaces
-- **GIVEN** matching atoms exist in the current workspace and in a second workspace
-- **WHEN** atom-search is called with no scope argument
-- **THEN** results from both workspaces are returned, each including project context
+#### Scenario: atom-search default excludes deprecated atoms
+- **GIVEN** atoms matching the query exist with `status='active'`, `status='resolved'`, and `status='deprecated'`
+- **WHEN** `atom-search` is called with no status options
+- **THEN** the active and resolved matching atoms are returned and the deprecated one is excluded
 
-#### Scenario: atom-search with scope='workspace' restricts to current workspace
-- **GIVEN** a matching atom exists in both the current workspace and a second workspace
-- **WHEN** atom-search is called with scope='workspace'
-- **THEN** only the current-workspace result is returned
+#### Scenario: atom-search with includeDeprecated returns all matching statuses
+- **GIVEN** matching atoms exist with all three status values
+- **WHEN** `atom-search` is called with `{"includeDeprecated":true}` in the search blob
+- **THEN** all three matching atoms are returned
 
-#### Scenario: atom-search falls back to LIKE scan when FTS5 is absent
-- **GIVEN** FTS5 is not available and an atom with matching content exists
-- **WHEN** atom-search is called
-- **THEN** results are returned via a LIKE scan over topic, description, and content
+#### Scenario: atom-search with status filter returns only that status
+- **GIVEN** matching atoms exist with all three status values
+- **WHEN** `atom-search` is called with `{"status":"resolved"}` in the search blob
+- **THEN** only the resolved matching atom is returned
 
-#### Scenario: atom-search results include created_at and updated_at
-- **GIVEN** atoms with known timestamps exist in the database
-- **WHEN** atom-search is called
-- **THEN** each result row includes both `created_at` and `updated_at` as epoch ms integers
+#### Scenario: atom-search result rows include status
+- **GIVEN** a matching resolved atom exists
+- **WHEN** `atom-search` is called with `{"status":"resolved"}`
+- **THEN** each result row includes a `status` field equal to `'resolved'`
 
 ### Requirement: atom-list returns current-workspace and global atoms by default
-The system SHALL list atoms matching an optional topic prefix, returning current-workspace and global atoms by default. When `scope='all'` is passed, it SHALL include atoms from all workspaces. Each result SHALL include topic, description, 80-char content preview, scope, project, `created_at`, `updated_at`, and `pinned`. The `atom-list` CLI output SHALL prefix each pinned atom entry with `[pinned]`.
+The system SHALL list atoms matching an optional topic prefix, returning current-workspace and global atoms by default. When `scope='all'` is passed, it SHALL include atoms from all workspaces. By default, `atom-list` SHALL exclude `deprecated` atoms (returning only `active` and `resolved`). When an optional filters JSON blob (`{ status?, includeDeprecated? }`) is supplied as the fourth positional argument: if `status` is present it SHALL be used as an exact-match filter (overriding the default and `includeDeprecated`); if `includeDeprecated` is truthy (and `status` is absent) it SHALL lift all status filtering (all three values returned). Each result SHALL include topic, description, 80-char content preview, scope, project, `created_at`, `updated_at`, `pinned`, and `status`. The `atom-list` CLI output SHALL prefix each pinned atom entry with `[pinned]` and each non-active atom entry with `[resolved]` or `[deprecated]` as appropriate.
 
-#### Scenario: atom-list without scope returns current-workspace and global atoms only
-- **GIVEN** atoms exist in the current workspace, globally, and in a second workspace
-- **WHEN** atom-list is called with no scope
-- **THEN** current-workspace and global atoms are returned; the second workspace's atoms are excluded
+#### Scenario: atom-list default excludes deprecated atoms
+- **GIVEN** atoms exist with `status='active'`, `status='resolved'`, and `status='deprecated'`
+- **WHEN** `atom-list` is called with no filters argument
+- **THEN** the active and resolved atoms are returned and the deprecated atom is excluded
 
-#### Scenario: atom-list with scope='all' includes all workspaces
-- **GIVEN** atoms exist in multiple workspaces
-- **WHEN** atom-list is called with scope='all'
-- **THEN** atoms from all workspaces are returned, each showing its project context
+#### Scenario: atom-list with includeDeprecated returns all statuses
+- **GIVEN** atoms exist with all three status values
+- **WHEN** `atom-list` is called with filters `{"includeDeprecated":true}`
+- **THEN** all three atoms are returned
 
-#### Scenario: atom-list with prefix filters by normalised topic prefix
-- **GIVEN** atoms at topics 'auth/jwt', 'auth/oauth', and 'work/notes' exist
-- **WHEN** atom-list is called with prefix='auth/'
-- **THEN** only 'auth/jwt' and 'auth/oauth' are returned
+#### Scenario: atom-list with status filter returns only that status
+- **GIVEN** atoms exist with `status='active'`, `status='resolved'`, and `status='deprecated'`
+- **WHEN** `atom-list` is called with filters `{"status":"deprecated"}`
+- **THEN** only the deprecated atom is returned
 
-#### Scenario: atom-list results include created_at and updated_at
-- **GIVEN** atoms with known timestamps exist in the database
-- **WHEN** atom-list is called
-- **THEN** each result row includes both `created_at` and `updated_at` as epoch ms integers
+#### Scenario: atom-list status filter takes precedence over includeDeprecated
+- **GIVEN** atoms exist with all three status values
+- **WHEN** `atom-list` is called with filters `{"status":"active","includeDeprecated":true}`
+- **THEN** only the active atom is returned
 
-#### Scenario: atom-list output marks pinned atoms with [pinned]
-- **GIVEN** two atoms exist: one pinned and one unpinned
-- **WHEN** atom-list is called
-- **THEN** the pinned atom's entry is prefixed with `[pinned]` and the unpinned atom's entry has no such prefix
+#### Scenario: atom-list output labels non-active atoms with their status
+- **GIVEN** atoms exist with `status='resolved'` and `status='deprecated'` (via includeDeprecated)
+- **WHEN** `atom-list` is called with `{"includeDeprecated":true}`
+- **THEN** the resolved atom entry is prefixed with `[resolved]` and the deprecated atom entry is prefixed with `[deprecated]`
 
-#### Scenario: atom-list result rows include the pinned field
-- **GIVEN** a pinned atom exists in the database
-- **WHEN** atom-list is called and its JSON rows are inspected
-- **THEN** each row includes a `pinned` field with value 1 for pinned atoms and 0 for unpinned atoms
+#### Scenario: atom-list result rows include the status field
+- **GIVEN** a deprecated atom exists in the database and is requested via `{"includeDeprecated":true}`
+- **WHEN** `atom-list` is called and its JSON rows are inspected
+- **THEN** each row includes a `status` field with the correct value
 
 ### Requirement: atom-delete removes the atom and updates the FTS index
 The system SHALL delete the atom identified by (scope, project, topic) and return a one-line confirmation on stdout. The AFTER DELETE trigger SHALL update the FTS index so the deleted atom is no longer findable via MATCH.
@@ -260,52 +246,27 @@ The system SHALL accept an optional `createdAt` field (epoch ms integer) in the 
 - **THEN** the `created_at` column value is approximately `Date.now()` at the time of the call
 
 ### Requirement: atom-patch performs a content-preserving partial metadata update
-The system SHALL implement an `atom-patch` CLI subcommand that updates one or more of `description`, `tags`, `created_at`, and `pinned` for an existing atom without touching its content. The patch argument SHALL be a JSON blob supplied as the third positional argument (consistent with `atom-write`). At least one of `description`, `tags`, `created_at`, or `pinned` MUST be present in the patch; an empty call SHALL be rejected with a non-zero exit and a clear error message. The operation SHALL use `BEGIN IMMEDIATE` to acquire the write lock before reading the current row, preventing check-then-write races. The system SHALL then build and run a single dynamic `UPDATE` statement from only the fields present in the patch. For each present field: `description` is trimmed and stored (empty string after trim SHALL be rejected); `tags` array is stored as JSON (`[]` is stored as `'[]'`, clearing any existing tags); `created_at` is stored as an epoch-ms integer as supplied; `pinned` is coerced to `0` (falsy) or `1` (truthy) and stored. The `updated_at` timestamp SHALL be bumped to the current time if and only if `description`, `tags`, or `pinned` is present in the patch; a `created_at`-only patch SHALL NOT modify `updated_at`. On success, the system SHALL print a JSON object `{ ok: true, topic: <topic>, patched: [<field>, …] }` on stdout and exit 0. If the target atom does not exist, the process SHALL exit non-zero and emit an error message on stderr. FTS re-indexing SHALL occur automatically via the existing `memory_atom_au` AFTER-UPDATE trigger.
+The system SHALL implement an `atom-patch` CLI subcommand that updates one or more of `description`, `tags`, `created_at`, `pinned`, and `status` for an existing atom without touching its content. The patch argument SHALL be a JSON blob supplied as the third positional argument. At least one of `description`, `tags`, `created_at`, `pinned`, or `status` MUST be present in the patch; an empty call SHALL be rejected with a non-zero exit and a clear error message. The operation SHALL use `BEGIN IMMEDIATE` to acquire the write lock before reading the current row, preventing check-then-write races. The system SHALL then build and run a single dynamic `UPDATE` statement from only the fields present in the patch. For each present field: `description` is trimmed and stored (empty string after trim SHALL be rejected); `tags` array is stored as JSON (`[]` is stored as `'[]'`, clearing any existing tags); `created_at` is stored as an epoch-ms integer as supplied; `pinned` is coerced to `0` (falsy) or `1` (truthy) and stored; `status` SHALL be one of `'active'`, `'resolved'`, or `'deprecated'` and SHALL be rejected with a clear error if any other value is supplied. The `updated_at` timestamp SHALL be bumped to the current time if and only if `description`, `tags`, `pinned`, or `status` is present in the patch; a `created_at`-only patch SHALL NOT modify `updated_at`. On success, the system SHALL print a JSON object `{ ok: true, topic: <topic>, patched: [<field>, …] }` on stdout and exit 0. If the target atom does not exist, the process SHALL exit non-zero and emit an error message on stderr. FTS re-indexing SHALL occur automatically via the existing `memory_atom_au` AFTER-UPDATE trigger.
 
-#### Scenario: atom-patch with description and tags updates both and bumps updated_at
-- **GIVEN** an atom exists at topic 'work/notes' with description='old' and known updated_at
-- **WHEN** atom-patch is called with `{"description":"new","tags":["a"]}`
-- **THEN** the atom's description is 'new', tags is '["a"]', updated_at is newer than before, content is unchanged, and stdout contains `{ ok: true, topic: 'work/notes', patched: ['description', 'tags'] }`
+#### Scenario: atom-patch with status updates status and bumps updated_at
+- **GIVEN** an atom exists at topic 'work/notes' with `status='active'` and known `updated_at`
+- **WHEN** `atom-patch` is called with `{"status":"resolved"}`
+- **THEN** the atom's `status` is `'resolved'`, `updated_at` is newer than before, content is unchanged, and stdout contains `{ ok: true, topic: 'work/notes', patched: ['status'] }`
 
-#### Scenario: atom-patch with created_at only does not bump updated_at
-- **GIVEN** an atom exists at topic 'work/notes' with known updated_at T
-- **WHEN** atom-patch is called with `{"created_at": <epoch>}` (no description, no tags, no pinned)
-- **THEN** the atom's created_at is updated, updated_at remains equal to T, and content is unchanged
-
-#### Scenario: atom-patch with pinned=true pins the atom and bumps updated_at
-- **GIVEN** an atom exists at topic 'work/notes' with pinned=0 and known updated_at
-- **WHEN** atom-patch is called with `{"pinned": true}`
-- **THEN** the atom's pinned field is 1, updated_at is newer than before, and content is unchanged
-
-#### Scenario: atom-patch with pinned=false unpins the atom and bumps updated_at
-- **GIVEN** an atom exists at topic 'work/notes' with pinned=1 and known updated_at
-- **WHEN** atom-patch is called with `{"pinned": false}`
-- **THEN** the atom's pinned field is 0 and updated_at is newer than before
-
-#### Scenario: atom-patch with tags:[] clears existing tags
-- **GIVEN** an atom exists at topic 'work/notes' with tags='["old-tag"]'
-- **WHEN** atom-patch is called with `{"tags":[]}`
-- **THEN** the atom's tags field is stored as '[]'
-
-#### Scenario: atom-patch with absent tags field leaves existing tags unchanged
-- **GIVEN** an atom exists at topic 'work/notes' with tags='["keep-me"]'
-- **WHEN** atom-patch is called with `{"description":"updated"}` (no tags field)
-- **THEN** the atom's tags remain '["keep-me"]'
-
-#### Scenario: atom-patch with absent pinned field leaves existing pinned unchanged
-- **GIVEN** a pinned atom exists at topic 'work/notes' (pinned=1)
-- **WHEN** atom-patch is called with `{"description":"updated"}` (no pinned field)
-- **THEN** the atom's pinned value remains 1
-
-#### Scenario: atom-patch rejects an empty patch
+#### Scenario: atom-patch rejects an invalid status value
 - **GIVEN** an atom exists at topic 'work/notes'
-- **WHEN** atom-patch is called with `{}` (no recognised fields)
-- **THEN** the process exits non-zero and stderr contains a message indicating at least one field is required
+- **WHEN** `atom-patch` is called with `{"status":"invalid"}`
+- **THEN** the process exits non-zero and stderr contains a message indicating the value must be one of `active`, `resolved`, `deprecated`
 
-#### Scenario: atom-patch rejects an empty description
-- **GIVEN** an atom exists at topic 'work/notes'
-- **WHEN** atom-patch is called with `{"description":""}`
-- **THEN** the process exits non-zero and stderr contains an error about non-empty description
+#### Scenario: atom-patch with absent status field leaves existing status unchanged
+- **GIVEN** an atom exists at topic 'work/notes' with `status='resolved'`
+- **WHEN** `atom-patch` is called with `{"description":"updated"}` (no `status` field)
+- **THEN** the atom's `status` remains `'resolved'`
+
+#### Scenario: atom-patch with status only does not change content
+- **GIVEN** an atom exists at topic 'work/notes' with known content
+- **WHEN** `atom-patch` is called with `{"status":"deprecated"}`
+- **THEN** the atom's content is unchanged and `status` is `'deprecated'`
 
 ### Requirement: atom-write preserves existing pinned state on upsert
 The system SHALL include `pinned` in the INSERT column list of the `atom-write` upsert with the caller-supplied value (default `0`). `pinned` SHALL NOT appear in the `ON CONFLICT … DO UPDATE SET` clause; when the topic already exists, the existing `pinned` value SHALL be preserved regardless of what `pinned` value the caller passes. Changing pin state after creation SHALL require an explicit `atom-patch` call.
@@ -324,4 +285,22 @@ The system SHALL include `pinned` in the INSERT column list of the `atom-write` 
 - **GIVEN** an atom exists at topic 'arch/db' with `pinned = 1`
 - **WHEN** atom-write is called for the same topic with new content and no `pinned` field
 - **THEN** the atom's `pinned` value remains 1
+
+### Requirement: atom-write preserves existing status on upsert
+The system SHALL NOT include `status` in either the INSERT column list or the `ON CONFLICT DO UPDATE SET` clause of the `atom-write` upsert. New atoms receive `status = 'active'` from the column `DEFAULT`; on a content re-write of an existing atom the existing `status` is preserved without any explicit handling.
+
+#### Scenario: New atom receives active status by default
+- **GIVEN** no atom exists at the given topic
+- **WHEN** `atom-write` is called
+- **THEN** the created atom has `status = 'active'`
+
+#### Scenario: Re-writing a resolved atom preserves resolved status
+- **GIVEN** an atom exists at topic 'arch/db' with `status = 'resolved'`
+- **WHEN** `atom-write` is called for the same topic with new content
+- **THEN** the atom's content is updated and `status` remains `'resolved'`
+
+#### Scenario: Re-writing a deprecated atom preserves deprecated status
+- **GIVEN** an atom exists at topic 'arch/db' with `status = 'deprecated'`
+- **WHEN** `atom-write` is called for the same topic with new content
+- **THEN** the atom's content is updated and `status` remains `'deprecated'`
 
