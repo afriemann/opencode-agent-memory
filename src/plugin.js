@@ -28,6 +28,7 @@ import {
   assemblePrimer,
   reduceSignals,
   lastTwoSegments,
+  formatRelativeTime,
 } from './lib/signal-utils.js';
 import { loadConfigFile, resolveConfig } from './lib/config.js';
 
@@ -582,16 +583,40 @@ const AgentMemory = async ({ client, $ }) => {
       description: tool.schema.string().describe('What this atom is for (required)'),
       tags: tool.schema.array(tool.schema.string()).optional().describe('Optional tags'),
       scope: tool.schema.string().optional().describe('"workspace" (default), "global"'),
+      created_at: tool.schema.union([tool.schema.string(), tool.schema.number()]).optional().describe(
+        'Optional creation timestamp to preserve when migrating atoms. ' +
+        'Accepts an ISO 8601 date string or an epoch-ms integer. ' +
+        'When omitted, the current time is used.'
+      ),
     },
-    async execute({ topic, content, description, tags, scope }, context) {
+    async execute({ topic, content, description, tags, scope, created_at }, context) {
       if (scope === 'all') {
         return { title: 'memory_atom_write', output: 'Error: scope="all" is not valid for write operations. Use "workspace" or "global".' };
       }
       const { scope: resolvedScope, project } = resolveScope(scope, context.directory);
+
+      // Convert caller-supplied creation timestamp to epoch ms.
+      let createdAt;
+      if (created_at !== undefined) {
+        if (typeof created_at === 'number') {
+          createdAt = created_at;
+        } else if (typeof created_at === 'string') {
+          const parsed = new Date(created_at).getTime();
+          if (!Number.isFinite(parsed)) {
+            return {
+              title: 'memory_atom_write',
+              output: `Error: created_at "${created_at}" is not a valid ISO 8601 date string.`,
+            };
+          }
+          createdAt = parsed;
+        }
+      }
+
       try {
         const out = await spawnMemory($, ['atom-write', resolvedScope, project],
           { topic, content, description, tags, sessionId: context.sessionID,
-            sessionName: sessionNames.get(context.sessionID) ?? null });
+            sessionName: sessionNames.get(context.sessionID) ?? null,
+            ...(createdAt !== undefined ? { createdAt } : {}) });
         const result = JSON.parse(out.trim());
         return { title: 'memory_atom_write', output: result.message };
       } catch (err) {
@@ -655,6 +680,11 @@ const AgentMemory = async ({ client, $ }) => {
         if (result.match) {
           lines.push(`## ${result.match.topic}`);
           lines.push(`**Description:** ${result.match.description}`);
+          const createdRel = result.match.created_at ? formatRelativeTime(result.match.created_at) : '';
+          const updatedRel = result.match.updated_at ? formatRelativeTime(result.match.updated_at) : '';
+          if (createdRel || updatedRel) {
+            lines.push(`**Created:** ${createdRel || 'unknown'} | **Updated:** ${updatedRel || 'unknown'}`);
+          }
           lines.push('');
           lines.push(result.match.content);
         } else {
@@ -664,7 +694,9 @@ const AgentMemory = async ({ client, $ }) => {
           lines.push('');
           lines.push('**Also in other workspaces:**');
           for (const a of result.alsoIn) {
-            lines.push(`• ${a.scope}/${a.project || '(global)'}: ${a.topic} — ${a.description} | ${a.preview || ''}`);
+            const createdRel = a.created_at ? formatRelativeTime(a.created_at) : '';
+            const updatedRel = a.updated_at ? formatRelativeTime(a.updated_at) : '';
+            lines.push(`• ${a.scope}/${a.project || '(global)'}: ${a.topic} — ${a.description} | ${a.preview || ''} [created: ${createdRel || 'unknown'}, updated: ${updatedRel || 'unknown'}]`);
           }
         }
         return { title: 'memory_atom_get', output: lines.join('\n') };
@@ -698,9 +730,11 @@ const AgentMemory = async ({ client, $ }) => {
         if (!results || results.length === 0) {
           return { title: 'memory_atom_search', output: 'No results found.' };
         }
-        const lines = results.map((r) =>
-          `• [${r.scope}/${r.project || 'global'}] ${r.topic} — ${r.description} | ${r.preview || ''}`
-        );
+        const lines = results.map((r) => {
+          const createdRel = r.created_at ? formatRelativeTime(r.created_at) : 'unknown';
+          const updatedRel = r.updated_at ? formatRelativeTime(r.updated_at) : 'unknown';
+          return `• [${r.scope}/${r.project || 'global'}] ${r.topic} — ${r.description} | ${r.preview || ''} [created: ${createdRel}, updated: ${updatedRel}]`;
+        });
         return { title: 'memory_atom_search', output: lines.join('\n') };
       } catch (err) {
         return {
@@ -731,9 +765,11 @@ const AgentMemory = async ({ client, $ }) => {
         if (!results || results.length === 0) {
           return { title: 'memory_atom_list', output: 'No atoms found.' };
         }
-        const lines = results.map((r) =>
-          `• [${r.scope}/${r.project || 'global'}] ${r.topic} — ${r.description} | ${r.preview || ''}`
-        );
+        const lines = results.map((r) => {
+          const createdRel = r.created_at ? formatRelativeTime(r.created_at) : 'unknown';
+          const updatedRel = r.updated_at ? formatRelativeTime(r.updated_at) : 'unknown';
+          return `• [${r.scope}/${r.project || 'global'}] ${r.topic} — ${r.description} | ${r.preview || ''} [created: ${createdRel}, updated: ${updatedRel}]`;
+        });
         return { title: 'memory_atom_list', output: lines.join('\n') };
       } catch (err) {
         return {

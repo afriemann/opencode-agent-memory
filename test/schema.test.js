@@ -183,6 +183,41 @@ describe('atomWrite', () => {
     const row = db.prepare("SELECT topic FROM memory_atom WHERE topic='arch/db-layer'").get();
     expect(row).toBeDefined();
   });
+
+  // spec: openspec/changes/atom-timestamps/specs/memory-atom/spec.md
+  test('atom-write with explicit createdAt stores that timestamp', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    const fixedCreatedAt = 1_700_000_000_000;
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'ts-test', content: 'body', description: 'd', createdAt: fixedCreatedAt });
+    const row = db.prepare("SELECT created_at FROM memory_atom WHERE topic='ts-test'").get();
+    expect(row.created_at).toBe(fixedCreatedAt);
+  });
+
+  // spec: openspec/changes/atom-timestamps/specs/memory-atom/spec.md
+  test('atom-write without createdAt uses current time', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    const before = Date.now();
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'ts-default', content: 'body', description: 'd' });
+    const after = Date.now();
+    const row = db.prepare("SELECT created_at FROM memory_atom WHERE topic='ts-default'").get();
+    expect(row.created_at).toBeGreaterThanOrEqual(before);
+    expect(row.created_at).toBeLessThanOrEqual(after);
+  });
+
+  test('atom-write upsert preserves original created_at on subsequent writes', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    const originalCreatedAt = 1_000;
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'ts-upsert', content: 'v1', description: 'd', createdAt: originalCreatedAt });
+    // Write again with a different createdAt — upsert must not overwrite created_at
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'ts-upsert', content: 'v2', description: 'd updated', createdAt: 9_999 });
+    const row = db.prepare("SELECT created_at, updated_at, content FROM memory_atom WHERE topic='ts-upsert'").get();
+    expect(row.created_at).toBe(originalCreatedAt);
+    expect(row.content).toBe('v2');
+    expect(row.updated_at).toBeGreaterThan(originalCreatedAt);
+  });
 });
 
 // ── 8.4 atomAppend ───────────────────────────────────────────────────────────
@@ -255,6 +290,19 @@ describe('atomGet', () => {
     expect(result.alsoIn.length).toBeGreaterThan(0);
     expect(result.alsoIn[0].topic).toBe('foreign');
   });
+
+  // spec: openspec/changes/atom-timestamps/specs/memory-atom/spec.md
+  test('atom-get match row includes created_at and updated_at', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'ts-atom', content: 'content', description: 'd' });
+    const result = atomGet(db, { scope: 'project', project: '/p', topic: 'ts-atom' });
+    expect(result.match).not.toBeNull();
+    expect(typeof result.match.created_at).toBe('number');
+    expect(result.match.created_at).toBeGreaterThan(0);
+    expect(typeof result.match.updated_at).toBe('number');
+    expect(result.match.updated_at).toBeGreaterThan(0);
+  });
 });
 
 // ── 8.6 atomSearch ───────────────────────────────────────────────────────────
@@ -310,6 +358,20 @@ describe('atomSearch', () => {
       expect(results.length).toBeGreaterThan(0);
     }).not.toThrow();
   });
+
+  // spec: openspec/changes/atom-timestamps/specs/memory-atom/spec.md
+  test('atom-search results include created_at and updated_at', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'ts-search', content: 'timestamp search content', description: 'ts desc' });
+    const results = atomSearch(db, { scope: 'all', project: '/p', query: 'timestamp search', limit: 10 });
+    expect(results.length).toBeGreaterThan(0);
+    const r = results[0];
+    expect(typeof r.created_at).toBe('number');
+    expect(r.created_at).toBeGreaterThan(0);
+    expect(typeof r.updated_at).toBe('number');
+    expect(r.updated_at).toBeGreaterThan(0);
+  });
 });
 
 // ── 8.7 atomList ─────────────────────────────────────────────────────────────
@@ -359,6 +421,21 @@ describe('atomList', () => {
     // Prefix with uppercase + space should still match
     const results = atomList(db, { scope: 'project', project: '/p', prefix: 'Arch' });
     expect(results.map((r) => r.topic)).toContain('arch/db-layer');
+  });
+
+  // spec: openspec/changes/atom-timestamps/specs/memory-atom/spec.md
+  test('atom-list results include created_at and updated_at', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'ts-list', content: 'x', description: 'd' });
+    const results = atomList(db, { scope: 'project', project: '/p' });
+    expect(results.length).toBeGreaterThan(0);
+    const r = results.find((item) => item.topic === 'ts-list');
+    expect(r).toBeDefined();
+    expect(typeof r.created_at).toBe('number');
+    expect(r.created_at).toBeGreaterThan(0);
+    expect(typeof r.updated_at).toBe('number');
+    expect(r.updated_at).toBeGreaterThan(0);
   });
 });
 

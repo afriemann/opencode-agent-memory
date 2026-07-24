@@ -117,7 +117,7 @@ The system SHALL atomically read the existing atom's content and write back the 
 - **THEN** the stored content is 'initial content\n---\nnew finding' and the full updated content is printed on stdout
 
 ### Requirement: atom-get returns best-match full content and a foreign-workspace listing
-The system SHALL resolve the single best full-content match for a topic using priority order (current-workspace atom preferred, global atom as fallback). It SHALL separately query other workspaces for atoms at the same topic and return a listing (topic, description, 80-char content preview, project, updated_at). The response SHALL have shape `{ match: <full row | null>, alsoIn: <preview rows> }`. When no current-workspace or global atom exists, `match` SHALL be null and only the `alsoIn` listing is populated.
+The system SHALL resolve the single best full-content match for a topic using priority order (current-workspace atom preferred, global atom as fallback). It SHALL separately query other workspaces for atoms at the same topic and return a listing (topic, description, 80-char content preview, project, updated_at). The response SHALL have shape `{ match: <full row | null>, alsoIn: <preview rows> }`. When no current-workspace or global atom exists, `match` SHALL be null and only the `alsoIn` listing is populated. The `match` row and each `alsoIn` row SHALL include both `created_at` and `updated_at` (epoch ms integers).
 
 #### Scenario: atom-get returns current-workspace atom when it exists alongside a global one
 - **GIVEN** an atom exists at topic 'arch/db' in the current workspace AND globally
@@ -134,8 +134,13 @@ The system SHALL resolve the single best full-content match for a topic using pr
 - **WHEN** atom-get is called
 - **THEN** match is null and workspace-B atom appears in alsoIn with a 80-char content preview; no foreign content is loaded as match
 
+#### Scenario: atom-get match row includes created_at and updated_at
+- **GIVEN** an atom exists at topic 'arch/db' in the current workspace with a known created_at value
+- **WHEN** atom-get is called
+- **THEN** the match row includes both `created_at` and `updated_at` as epoch ms integers
+
 ### Requirement: atom-search searches all workspaces by default and supports scope narrowing
-The system SHALL execute a full-text MATCH query across all atoms when no scope is specified, ordering results by BM25 score and including scope and project context in each result. The optional `scope` parameter SHALL narrow the search to the current workspace (`'workspace'`) or global-only atoms (`'global'`). When FTS5 is unavailable, the system SHALL fall back to a LIKE scan over topic, description, and content.
+The system SHALL execute a full-text MATCH query across all atoms when no scope is specified, ordering results by BM25 score and including scope and project context in each result. The optional `scope` parameter SHALL narrow the search to the current workspace (`'workspace'`) or global-only atoms (`'global'`). When FTS5 is unavailable, the system SHALL fall back to a LIKE scan over topic, description, and content. Each result row SHALL include both `created_at` and `updated_at` (epoch ms integers).
 
 #### Scenario: atom-search without scope includes all workspaces
 - **GIVEN** matching atoms exist in the current workspace and in a second workspace
@@ -152,8 +157,13 @@ The system SHALL execute a full-text MATCH query across all atoms when no scope 
 - **WHEN** atom-search is called
 - **THEN** results are returned via a LIKE scan over topic, description, and content
 
+#### Scenario: atom-search results include created_at and updated_at
+- **GIVEN** atoms with known timestamps exist in the database
+- **WHEN** atom-search is called
+- **THEN** each result row includes both `created_at` and `updated_at` as epoch ms integers
+
 ### Requirement: atom-list returns current-workspace and global atoms by default
-The system SHALL list atoms matching an optional topic prefix, returning current-workspace and global atoms by default. When `scope='all'` is passed, it SHALL include atoms from all workspaces. Each result SHALL include topic, description, 80-char content preview, scope, project, and updated_at.
+The system SHALL list atoms matching an optional topic prefix, returning current-workspace and global atoms by default. When `scope='all'` is passed, it SHALL include atoms from all workspaces. Each result SHALL include topic, description, 80-char content preview, scope, project, `created_at`, and `updated_at`.
 
 #### Scenario: atom-list without scope returns current-workspace and global atoms only
 - **GIVEN** atoms exist in the current workspace, globally, and in a second workspace
@@ -169,6 +179,11 @@ The system SHALL list atoms matching an optional topic prefix, returning current
 - **GIVEN** atoms at topics 'auth/jwt', 'auth/oauth', and 'work/notes' exist
 - **WHEN** atom-list is called with prefix='auth/'
 - **THEN** only 'auth/jwt' and 'auth/oauth' are returned
+
+#### Scenario: atom-list results include created_at and updated_at
+- **GIVEN** atoms with known timestamps exist in the database
+- **WHEN** atom-list is called
+- **THEN** each result row includes both `created_at` and `updated_at` as epoch ms integers
 
 ### Requirement: atom-delete removes the atom and updates the FTS index
 The system SHALL delete the atom identified by (scope, project, topic) and return a one-line confirmation on stdout. The AFTER DELETE trigger SHALL update the FTS index so the deleted atom is no longer findable via MATCH.
@@ -200,4 +215,17 @@ The system SHALL, as part of the user_version < 2 migration transaction, upsert 
 - **GIVEN** a database with user_version < 2 and a populated hot_state table
 - **WHEN** the migration transaction fails mid-way (simulated)
 - **THEN** the hot_state table is unchanged, user_version remains below 2, and the next startup attempts migration again
+
+### Requirement: atom-write accepts an optional caller-supplied creation timestamp
+The system SHALL accept an optional `createdAt` field (epoch ms integer) in the JSON payload of an `atom-write` call. When `createdAt` is supplied, it SHALL be used as the `created_at` column value instead of `Date.now()`. The `updated_at` column SHALL always be set to `Date.now()` regardless of `createdAt`. When `createdAt` is absent or `undefined`, the system SHALL behave as before and use `Date.now()` for `created_at`.
+
+#### Scenario: atom-write with explicit createdAt stores that timestamp
+- **GIVEN** an agent calls atom-write with `createdAt=1000`
+- **WHEN** the atom is stored
+- **THEN** the `created_at` column value is `1000`
+
+#### Scenario: atom-write without createdAt uses current time
+- **GIVEN** an agent calls atom-write without a `createdAt` field
+- **WHEN** the atom is stored
+- **THEN** the `created_at` column value is approximately `Date.now()` at the time of the call
 

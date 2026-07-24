@@ -442,7 +442,7 @@ function cmdAtomWrite(scope, project, jsonArg) {
     process.exit(1);
   }
 
-  const { topic, content, description, tags, sessionId, sessionName } = data;
+  const { topic, content, description, tags, sessionId, sessionName, createdAt } = data;
   if (!topic) {
     process.stderr.write('[agent-memory/atom-write] topic is required\n');
     process.exit(1);
@@ -453,7 +453,7 @@ function cmdAtomWrite(scope, project, jsonArg) {
     const normTopic = normaliseTopic(topic);
     const result = atomWrite(db, {
       scope, project, topic: normTopic, content: content ?? '',
-      description, tags, sessionId, sessionName
+      description, tags, sessionId, sessionName, createdAt
     });
     db.close();
     const msg = result.action === 'created'

@@ -276,10 +276,11 @@ export function pruneHotState(db, agent, project) {
  * @param {import('node:sqlite').DatabaseSync} db
  * @param {{ scope:string, project:string, topic:string, content:string,
  *            description:string, tags?:string[]|string,
- *            sessionId?:string, sessionName?:string }} opts
+ *            sessionId?:string, sessionName?:string,
+ *            createdAt?:number }} opts
  * @returns {{ action: 'created'|'overwritten' }}
  */
-export function atomWrite(db, { scope, project, topic, content, description, tags, sessionId, sessionName }) {
+export function atomWrite(db, { scope, project, topic, content, description, tags, sessionId, sessionName, createdAt }) {
   const normTopic = normaliseTopic(topic);
   if (!description || typeof description !== 'string' || !description.trim()) {
     throw new Error('Atom description is required and must be a non-empty string');
@@ -288,6 +289,9 @@ export function atomWrite(db, { scope, project, topic, content, description, tag
     ? JSON.stringify(tags)
     : (typeof tags === 'string' ? tags : '[]');
   const now = Date.now();
+  // Use caller-supplied creation timestamp when provided; ignored on update (ON CONFLICT
+  // does not include created_at), so it only affects the initial INSERT row.
+  const insertCreatedAt = typeof createdAt === 'number' ? createdAt : now;
 
   // Check existence before upsert to report created vs overwritten
   const existing = db
@@ -308,7 +312,7 @@ export function atomWrite(db, { scope, project, topic, content, description, tag
   `).run(
     scope, project, normTopic, description.trim(), content, tagsJson,
     sessionId ?? null, sessionName ?? null,
-    now,  // created_at: ignored on update (ON CONFLICT does not include it)
+    insertCreatedAt,
     now
   );
 
@@ -363,7 +367,7 @@ export function atomGet(db, { scope, project, topic }) {
   // Priority resolution: workspace first, global fallback
   let match = db
     .prepare(
-      `SELECT scope, project, topic, description, content, tags, updated_at
+      `SELECT scope, project, topic, description, content, tags, created_at, updated_at
        FROM memory_atom
        WHERE scope = ? AND project = ? AND topic = ?`
     )
@@ -372,7 +376,7 @@ export function atomGet(db, { scope, project, topic }) {
   if (!match && scope !== 'global') {
     match = db
       .prepare(
-        `SELECT scope, project, topic, description, content, tags, updated_at
+        `SELECT scope, project, topic, description, content, tags, created_at, updated_at
          FROM memory_atom
          WHERE scope = 'global' AND project = '' AND topic = ?`
       )
@@ -382,7 +386,7 @@ export function atomGet(db, { scope, project, topic }) {
   // Other-workspace atoms with the same topic (not the matched one)
   let alsoIn = db
     .prepare(
-      `SELECT scope, project, topic, description, substr(content, 1, 80) AS preview, updated_at
+      `SELECT scope, project, topic, description, substr(content, 1, 80) AS preview, created_at, updated_at
        FROM memory_atom
        WHERE topic = ?
          AND NOT (scope = ? AND project = ?)
@@ -417,7 +421,7 @@ export function atomSearch(db, { scope, project, query, limit = 20 }) {
 
   const buildFtsQuery = (whereClause) => `
     SELECT a.scope, a.project, a.topic, a.description,
-           substr(a.content, 1, 80) AS preview, a.updated_at
+           substr(a.content, 1, 80) AS preview, a.created_at, a.updated_at
     FROM memory_atom a
     JOIN memory_atom_fts fts ON fts.rowid = a.id
     WHERE fts.memory_atom_fts MATCH ?
@@ -428,7 +432,7 @@ export function atomSearch(db, { scope, project, query, limit = 20 }) {
 
   const buildLikeQuery = (whereClause) => `
     SELECT scope, project, topic, description,
-           substr(content, 1, 80) AS preview, updated_at
+           substr(content, 1, 80) AS preview, created_at, updated_at
     FROM memory_atom
     WHERE (topic LIKE ? OR description LIKE ? OR content LIKE ?)
       ${whereClause}
@@ -478,7 +482,7 @@ export function atomList(db, { scope, project, prefix }) {
   if (scope === 'all') {
     return db.prepare(`
       SELECT scope, project, topic, description,
-             substr(content, 1, 80) AS preview, updated_at
+             substr(content, 1, 80) AS preview, created_at, updated_at
       FROM memory_atom
       WHERE topic LIKE ?
       ORDER BY scope, project, topic
@@ -488,7 +492,7 @@ export function atomList(db, { scope, project, prefix }) {
   // Default: current workspace + global
   return db.prepare(`
     SELECT scope, project, topic, description,
-           substr(content, 1, 80) AS preview, updated_at
+           substr(content, 1, 80) AS preview, created_at, updated_at
     FROM memory_atom
     WHERE topic LIKE ?
       AND ((scope = ? AND project = ?) OR (scope = 'global' AND project = ''))

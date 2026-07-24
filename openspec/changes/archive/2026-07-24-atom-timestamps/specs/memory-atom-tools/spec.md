@@ -1,8 +1,5 @@
-# memory-atom-tools Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change memory-atoms-and-session-hot-state. Update Purpose after archive.
-## Requirements
 ### Requirement: memory_atom_write tool upserts an atom with required description
 The `memory_atom_write` registered tool SHALL invoke the `atom-write` CLI subcommand, passing a required `description` field and optional `scope` (default `'workspace'`). The tool SHALL accept an optional `created_at` argument (ISO 8601 string or epoch ms integer); when supplied it SHALL be converted to epoch ms and forwarded to the CLI as `createdAt`. The tool SHALL return the create-or-overwrite confirmation line from the CLI. It SHALL return an informative error result on CLI failure and SHALL NOT propagate exceptions into the opencode host.
 
@@ -30,19 +27,6 @@ The `memory_atom_write` registered tool SHALL invoke the `atom-write` CLI subcom
 - **GIVEN** the agent calls memory_atom_write with created_at=1000 (number)
 - **WHEN** the CLI payload is assembled
 - **THEN** the payload contains `createdAt=1000`
-
-### Requirement: memory_atom_append tool appends to an existing atom
-The `memory_atom_append` registered tool SHALL invoke the `atom-append` CLI subcommand. It SHALL return the full updated content on success. If the topic does not exist the CLI exits non-zero and the tool SHALL surface the error message ("Atom '<topic>' does not exist — use memory_atom_write to create it first") as a ToolResult. It SHALL NOT propagate exceptions into the host.
-
-#### Scenario: Tool appends content and returns updated full content
-- **GIVEN** an atom exists at the given topic
-- **WHEN** the agent calls memory_atom_append with additional content
-- **THEN** the tool returns the full content of the atom after the append
-
-#### Scenario: Tool surfaces error when topic is missing
-- **GIVEN** no atom exists at the given topic
-- **WHEN** the agent calls memory_atom_append
-- **THEN** the tool returns an error result containing the missing-topic message and does not throw
 
 ### Requirement: memory_atom_get tool returns best-match content and foreign-workspace listing
 The `memory_atom_get` registered tool SHALL invoke the `atom-get` CLI subcommand and return the `{ match, alsoIn }` payload. The match section contains the full content of the best-match atom (workspace priority over global) with both creation and update timestamps rendered as human-readable relative strings. The alsoIn section lists same-topic atoms from other workspaces (topic, description, 80-char preview) each with its `updated_at` rendered as a relative string. It SHALL NOT propagate exceptions into the host.
@@ -97,46 +81,3 @@ The `memory_atom_list` registered tool SHALL invoke the `atom-list` CLI subcomma
 - **GIVEN** atoms with known timestamps exist
 - **WHEN** the agent calls memory_atom_list
 - **THEN** each result line includes both a creation timestamp and an update timestamp as human-readable relative strings
-
-### Requirement: memory_atom_delete tool removes an atom by topic
-The `memory_atom_delete` registered tool SHALL invoke the `atom-delete` CLI subcommand and return a confirmation on success. It SHALL surface a non-zero CLI exit as an error result and SHALL NOT propagate exceptions into the host.
-
-#### Scenario: Tool removes an existing atom and returns confirmation
-- **GIVEN** an atom exists at the given (scope, topic)
-- **WHEN** the agent calls memory_atom_delete
-- **THEN** the atom is removed and the tool returns a one-line confirmation
-
-#### Scenario: Tool returns error result when topic does not exist
-- **GIVEN** no atom exists at the given (scope, topic)
-- **WHEN** the agent calls memory_atom_delete
-- **THEN** the tool returns an informative error result and does not throw
-
-### Requirement: resolveScope translates the agent-facing scope to the CLI scope/project pair
-The plugin SHALL provide a `resolveScope(scope, directory)` helper that maps the agent-facing `scope` parameter to the CLI/DB values before every spawn: `'workspace'` or `undefined` maps to `{scope:'project', project:directory}`; `'global'` maps to `{scope:'global', project:''}`; `'all'` maps to `{scope:'all', project:''}` (read operations only). Writes SHALL only accept `'workspace'` or `'global'` and SHALL error if `'all'` is supplied.
-
-#### Scenario: resolveScope maps 'workspace' to project scope with directory
-- **GIVEN** the current project directory is '/home/user/my-project'
-- **WHEN** resolveScope is called with scope='workspace' and directory='/home/user/my-project'
-- **THEN** the result is { scope: 'project', project: '/home/user/my-project' }
-
-#### Scenario: resolveScope maps 'global' to empty project
-- **WHEN** resolveScope is called with scope='global'
-- **THEN** the result is { scope: 'global', project: '' }
-
-#### Scenario: resolveScope maps 'all' to empty project for read operations
-- **WHEN** resolveScope is called with scope='all' for a read operation
-- **THEN** the result is { scope: 'all', project: '' }
-
-### Requirement: atom write tools capture session context at the plugin layer, not as agent arguments
-The `memory_atom_write` and `memory_atom_append` tools SHALL capture `session_id` from `ToolContext.sessionID` and look up `session_name` from the in-process `sessionNames` Map (populated at `session.created` from `event.properties.info.title`) before spawning the CLI. These values SHALL be passed as part of the JSON payload to the CLI but SHALL NOT appear in the public tool argument schema visible to the agent.
-
-#### Scenario: Session context is transparently included in atom write
-- **GIVEN** a session with sessionID='s1' and session_name='my session' is active
-- **WHEN** the agent calls memory_atom_write with topic and content
-- **THEN** the stored atom has session_id='s1' and session_name='my session' without the agent specifying them
-
-#### Scenario: Session name is null when session.created info.title was absent
-- **GIVEN** a session was created without a title in event.properties.info
-- **WHEN** the agent calls memory_atom_write
-- **THEN** the stored atom has session_name=null and no error is raised
-

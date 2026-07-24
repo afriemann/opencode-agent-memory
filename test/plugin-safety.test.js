@@ -1828,4 +1828,229 @@ describe('resolveScope (task 8.22)', () => {
     const listCall = captured.find((c) => c.includes('atom-list'));
     expect(listCall).toContain('all');
   });
+
+  // spec: openspec/changes/atom-timestamps/specs/memory-atom-tools/spec.md
+  test('Tool passes created_at through to CLI when supplied as ISO string', async () => {
+    const captured = [];
+    const $ = function(strings, ...values) {
+      const cmd = strings.reduce((a, s, i) => a + s + (values[i] !== undefined ? String(values[i]) : ''), '');
+      captured.push(cmd);
+      const obj = { quiet: () => obj, text: async () => JSON.stringify({ ok: true, action: 'created', message: 'Created atom at ts-iso' }) };
+      return obj;
+    };
+
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const ctx = {
+      sessionID: 'ses-ts-iso',
+      directory: '/my/workspace',
+      messageID: 'msg-ts-iso',
+      agent: 'engineer',
+      worktree: '/my/workspace',
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+    };
+
+    // 2024-01-15T12:00:00.000Z → epoch ms = 1705320000000
+    const isoDate = '2024-01-15T12:00:00.000Z';
+    const expectedEpochMs = new Date(isoDate).getTime();
+
+    await plugin.tool.memory_atom_write.execute({
+      topic: 'ts-iso', content: 'body', description: 'desc', created_at: isoDate,
+    }, ctx);
+
+    const atomWriteCall = captured.find((c) => c.includes('atom-write'));
+    expect(atomWriteCall).toBeDefined();
+    // The JSON payload should contain createdAt as epoch ms (not the ISO string)
+    expect(atomWriteCall).toContain(`"createdAt":${expectedEpochMs}`);
+  });
+
+  // spec: openspec/changes/atom-timestamps/specs/memory-atom-tools/spec.md
+  test('Tool passes created_at through to CLI when supplied as epoch ms integer', async () => {
+    const captured = [];
+    const $ = function(strings, ...values) {
+      const cmd = strings.reduce((a, s, i) => a + s + (values[i] !== undefined ? String(values[i]) : ''), '');
+      captured.push(cmd);
+      const obj = { quiet: () => obj, text: async () => JSON.stringify({ ok: true, action: 'created', message: 'Created atom at ts-num' }) };
+      return obj;
+    };
+
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const ctx = {
+      sessionID: 'ses-ts-num',
+      directory: '/my/workspace',
+      messageID: 'msg-ts-num',
+      agent: 'engineer',
+      worktree: '/my/workspace',
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+    };
+
+    const numericEpochMs = 1_700_000_000_000;
+
+    await plugin.tool.memory_atom_write.execute({
+      topic: 'ts-num', content: 'body', description: 'desc', created_at: numericEpochMs,
+    }, ctx);
+
+    const atomWriteCall = captured.find((c) => c.includes('atom-write'));
+    expect(atomWriteCall).toBeDefined();
+    // Numeric value should be forwarded unchanged
+    expect(atomWriteCall).toContain(`"createdAt":${numericEpochMs}`);
+  });
+});
+
+// ── memory_atom_write / _get / _search / _list timestamp support ──────────────
+// spec: openspec/changes/atom-timestamps/specs/memory-atom-tools/spec.md
+
+describe('memory_atom_write invalid created_at', () => {
+  test('memory_atom_write returns error for invalid ISO date string', async () => {
+    const $ = makeMockShell({
+      read: COLD_READ,
+      'atom-list': '[]',
+    });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const ctx = {
+      sessionID: 'ses-invalid-iso',
+      directory: '/my/workspace',
+      messageID: 'msg-invalid',
+      agent: 'engineer',
+      worktree: '/my/workspace',
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+    };
+
+    const result = await plugin.tool.memory_atom_write.execute({
+      topic: 'bad-ts', content: 'body', description: 'desc', created_at: 'not-a-date',
+    }, ctx);
+
+    expect(result.output).toMatch(/not a valid|invalid/i);
+    // No atom-write CLI call should have been made
+    const atomWriteCalls = $.calls.filter((c) => c.includes('atom-write'));
+    expect(atomWriteCalls).toHaveLength(0);
+  });
+});
+
+describe('memory_atom_get timestamp output', () => {
+  // spec: openspec/changes/atom-timestamps/specs/memory-atom-tools/spec.md
+  test('Tool output includes created and updated timestamps for the match', async () => {
+    const fakeGetResponse = JSON.stringify({
+      match: {
+        topic: 'arch/db',
+        description: 'DB design',
+        content: 'Using SQLite',
+        tags: '[]',
+        scope: 'project',
+        project: '/my/workspace',
+        created_at: 1_700_000_000_000,
+        updated_at: 1_700_086_400_000,
+      },
+      alsoIn: [],
+    });
+
+    const $ = makeMockShell({
+      'atom-get': fakeGetResponse,
+    });
+
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const ctx = {
+      sessionID: 'ses-ts-get',
+      directory: '/my/workspace',
+      messageID: 'msg-ts-get',
+      agent: 'engineer',
+      worktree: '/my/workspace',
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+    };
+
+    const result = await plugin.tool.memory_atom_get.execute({ topic: 'arch/db' }, ctx);
+
+    // Output must contain both Created and Updated rendered as relative time strings
+    expect(result.output).toMatch(/\*\*Created:\*\*/);
+    expect(result.output).toMatch(/\*\*Updated:\*\*/);
+    // Values must be non-empty relative strings (e.g. "Xm ago", "Xh ago", "X days ago", "yesterday", "just now")
+    expect(result.output).toMatch(/\d+m ago|\d+h ago|\d+ days? ago|yesterday|just now/i);
+  });
+});
+
+describe('memory_atom_search timestamp output', () => {
+  // spec: openspec/changes/atom-timestamps/specs/memory-atom-tools/spec.md
+  test('Tool output includes created and updated timestamps per result', async () => {
+    const fakeSearchResponse = JSON.stringify([
+      {
+        scope: 'project',
+        project: '/my/workspace',
+        topic: 'arch/db',
+        description: 'DB design',
+        preview: 'Using SQLite',
+        created_at: 1_700_000_000_000,
+        updated_at: 1_700_086_400_000,
+      },
+    ]);
+
+    const $ = makeMockShell({
+      'atom-search': fakeSearchResponse,
+    });
+
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const ctx = {
+      sessionID: 'ses-ts-search',
+      directory: '/my/workspace',
+      messageID: 'msg-ts-search',
+      agent: 'engineer',
+      worktree: '/my/workspace',
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+    };
+
+    const result = await plugin.tool.memory_atom_search.execute({ query: 'SQLite' }, ctx);
+
+    expect(result.output).toContain('[created: ');
+    expect(result.output).toContain(', updated: ');
+    // Both values must be non-empty relative time strings
+    expect(result.output).toMatch(/\d+m ago|\d+h ago|\d+ days? ago|yesterday|just now/i);
+  });
+});
+
+describe('memory_atom_list timestamp output', () => {
+  // spec: openspec/changes/atom-timestamps/specs/memory-atom-tools/spec.md
+  test('Tool output includes created and updated timestamps per result', async () => {
+    const fakeListResponse = JSON.stringify([
+      {
+        scope: 'project',
+        project: '/my/workspace',
+        topic: 'arch/db',
+        description: 'DB design',
+        preview: 'Using SQLite',
+        created_at: 1_700_000_000_000,
+        updated_at: 1_700_086_400_000,
+      },
+    ]);
+
+    const $ = makeMockShell({
+      'atom-list': fakeListResponse,
+    });
+
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const ctx = {
+      sessionID: 'ses-ts-list',
+      directory: '/my/workspace',
+      messageID: 'msg-ts-list',
+      agent: 'engineer',
+      worktree: '/my/workspace',
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+    };
+
+    const result = await plugin.tool.memory_atom_list.execute({}, ctx);
+
+    expect(result.output).toContain('[created: ');
+    expect(result.output).toContain(', updated: ');
+    // Both values must be non-empty relative time strings
+    expect(result.output).toMatch(/\d+m ago|\d+h ago|\d+ days? ago|yesterday|just now/i);
+  });
 });
