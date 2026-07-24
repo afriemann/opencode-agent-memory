@@ -352,7 +352,81 @@ export function atomAppend(db, { scope, project, topic, content }) {
 }
 
 /**
- * Get an atom by topic, with cross-workspace awareness.
+ * Partial, content-preserving metadata update for an existing atom.
+ *
+ * Patches one or more of description, tags, created_at in-place.
+ * - Absent fields are left unchanged.
+ * - tags:[] clears tags; omitted tags keeps existing tags.
+ * - updated_at is bumped only when description or tags is present.
+ * - created_at-only patch leaves updated_at unchanged.
+ *
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @param {{ scope:string, project:string, topic:string,
+ *            patch: { description?:string, tags?:string[], created_at?:number } }} opts
+ * @returns {{ patched: string[] }}
+ */
+export function atomPatch(db, { scope, project, topic, patch }) {
+  const normTopic = normaliseTopic(topic);
+  const PATCHABLE = ['description', 'tags', 'created_at'];
+  const present = PATCHABLE.filter((f) => f in patch);
+  if (present.length === 0) {
+    throw new Error('at least one of description, tags, created_at is required');
+  }
+
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const row = db
+      .prepare('SELECT id, updated_at FROM memory_atom WHERE scope = ? AND project = ? AND topic = ?')
+      .get(scope, project, normTopic);
+    if (!row) {
+      db.exec('ROLLBACK');
+      throw new Error(`Atom '${normTopic}' does not exist`);
+    }
+
+    if ('description' in patch) {
+      const trimmed = typeof patch.description === 'string' ? patch.description.trim() : '';
+      if (!trimmed) {
+        db.exec('ROLLBACK');
+        throw new Error('Atom description must be a non-empty string');
+      }
+    }
+
+    const setClauses = [];
+    const values = [];
+
+    if ('description' in patch) {
+      setClauses.push('description = ?');
+      values.push(patch.description.trim());
+    }
+    if ('tags' in patch) {
+      setClauses.push('tags = ?');
+      values.push(Array.isArray(patch.tags) ? JSON.stringify(patch.tags) : '[]');
+    }
+    if ('created_at' in patch) {
+      setClauses.push('created_at = ?');
+      values.push(patch.created_at);
+    }
+
+    const bumpUpdatedAt = ('description' in patch) || ('tags' in patch);
+    if (bumpUpdatedAt) {
+      setClauses.push('updated_at = ?');
+      values.push(Date.now());
+    }
+
+    values.push(scope, project, normTopic);
+    db.prepare(
+      `UPDATE memory_atom SET ${setClauses.join(', ')} WHERE scope = ? AND project = ? AND topic = ?`
+    ).run(...values);
+
+    db.exec('COMMIT');
+    return { patched: present };
+  } catch (err) {
+    try { db.exec('ROLLBACK'); } catch { /* already rolled back */ }
+    throw err;
+  }
+}
+
+/**
  *
  * Priority: current workspace (scope, project) → global (scope='global', project='').
  * Also returns a listing of atoms at the same topic in other workspaces.

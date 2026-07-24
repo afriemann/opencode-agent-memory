@@ -59,6 +59,7 @@ import {
   atomWrite,
   atomAppend,
   atomGet,
+  atomPatch,
   atomSearch,
   atomList,
   atomDelete,
@@ -531,6 +532,40 @@ function cmdAtomList(scope, project, prefix) {
   process.stdout.write(JSON.stringify(results) + '\n');
 }
 
+function cmdAtomPatch(scope, project, jsonArg) {
+  let data;
+  try {
+    data = JSON.parse(jsonArg);
+  } catch {
+    process.stderr.write('[agent-memory/atom-patch] invalid JSON argument\n');
+    process.exit(1);
+  }
+
+  const { topic, description, tags, created_at: createdAt } = data;
+  if (!topic) {
+    process.stderr.write('[agent-memory/atom-patch] topic is required\n');
+    process.exit(1);
+  }
+
+  const patch = {};
+  if ('description' in data) patch.description = description;
+  if ('tags' in data) patch.tags = tags;
+  if ('created_at' in data) patch.created_at = createdAt;
+
+  const db = openAndInit();
+  try {
+    const result = atomPatch(db, { scope, project, topic, patch });
+    db.close();
+    process.stdout.write(
+      JSON.stringify({ ok: true, topic: normaliseTopic(topic), patched: result.patched }) + '\n'
+    );
+  } catch (err) {
+    db.close();
+    process.stderr.write(`[agent-memory/atom-patch] ${err.message}\n`);
+    process.exit(1);
+  }
+}
+
 function cmdAtomDelete(scope, project, topic) {
   if (!topic) {
     process.stderr.write('[agent-memory/atom-delete] topic is required\n');
@@ -673,9 +708,19 @@ switch (cmd) {
     break;
   }
 
+  case 'atom-patch': {
+    const [scope, project, jsonArg] = rest;
+    if (!scope || project == null || !jsonArg) {
+      process.stderr.write('Usage: memory.js atom-patch <scope> <project> <json>\n');
+      process.exit(1);
+    }
+    cmdAtomPatch(scope, project, jsonArg);
+    break;
+  }
+
   default:
     process.stderr.write(
-      `Usage: memory.js <init|accrue|read|inspect|distil-write|correct|prune|atom-write|atom-append|atom-get|atom-search|atom-list|atom-delete> [args]\n`
+      `Usage: memory.js <init|accrue|read|inspect|distil-write|correct|prune|atom-write|atom-append|atom-get|atom-search|atom-list|atom-delete|atom-patch> [args]\n`
     );
     process.exit(1);
 }

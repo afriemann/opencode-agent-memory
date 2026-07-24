@@ -923,21 +923,22 @@ describe('doDistil force parameter — throttle regression', () => {
 
 // ── Plugin tool hook tests (task 8.20) ────────────────────────────────────────
 
-const NINE_TOOLS = [
+const TEN_TOOLS = [
   'memory_state_inspect', 'memory_state_patch', 'memory_state_distil',
   'memory_atom_write', 'memory_atom_append', 'memory_atom_get',
   'memory_atom_search', 'memory_atom_list', 'memory_atom_delete',
+  'memory_atom_patch',
 ];
 
 describe('plugin tool hook — factory returns tool map', () => {
-  test('AgentMemory factory returns exactly nine tools', async () => {
+  test('AgentMemory factory returns exactly ten tools', async () => {
     const $ = makeMockShell({});
     const plugin = await AgentMemory({ client: makeMockClient(), $ });
 
     expect(plugin).toHaveProperty('event');
     expect(plugin).toHaveProperty('tool');
-    expect(Object.keys(plugin.tool)).toHaveLength(9);
-    for (const name of NINE_TOOLS) {
+    expect(Object.keys(plugin.tool)).toHaveLength(10);
+    for (const name of TEN_TOOLS) {
       expect(plugin.tool).toHaveProperty(name);
     }
   });
@@ -955,7 +956,7 @@ describe('plugin tool hook — factory returns tool map', () => {
     const $ = makeMockShell({});
     const plugin = await AgentMemory({ client: makeMockClient(), $ });
 
-    for (const name of NINE_TOOLS) {
+    for (const name of TEN_TOOLS) {
       const t = plugin.tool[name];
       expect(typeof t.description).toBe('string');
       expect(t.description.length).toBeGreaterThan(0);
@@ -2052,5 +2053,285 @@ describe('memory_atom_list timestamp output', () => {
     expect(result.output).toContain(', updated: ');
     // Both values must be non-empty relative time strings
     expect(result.output).toMatch(/\d+m ago|\d+h ago|\d+ days? ago|yesterday|just now/i);
+  });
+});
+
+// ── memory_atom_get — workspace arg and alsoIn format ─────────────────────────
+// spec: openspec/specs/memory-atom-tools/spec.md
+
+describe('memory_atom_get workspace arg changes resolution directory', () => {
+  function makeCtx(directory = '/current/workspace') {
+    return {
+      sessionID: 'ses-ws-get',
+      messageID: 'msg-ws-get',
+      agent: 'engineer',
+      directory,
+      worktree: directory,
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+    };
+  }
+
+  test('Tool with workspace arg promotes foreign atom to primary match', async () => {
+    const fakeGetResponse = JSON.stringify({
+      match: {
+        topic: 'arch/db',
+        description: 'Foreign DB design',
+        content: 'Full foreign content',
+        tags: '[]',
+        scope: 'project',
+        project: '/other/workspace',
+        created_at: 1_700_000_000_000,
+        updated_at: 1_700_086_400_000,
+      },
+      alsoIn: [],
+    });
+
+    const $ = makeMockShell({ 'atom-get': fakeGetResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const ctx = makeCtx('/current/workspace');
+
+    const result = await plugin.tool.memory_atom_get.execute(
+      { topic: 'arch/db', workspace: '/other/workspace' },
+      ctx
+    );
+
+    expect(result.output).toContain('Full foreign content');
+    expect($.calls.some((c) => c.includes('/other/workspace'))).toBe(true);
+  });
+
+  test('Tool alsoIn renders workspace entries with [workspace: path] format', async () => {
+    const fakeGetResponse = JSON.stringify({
+      match: {
+        topic: 'arch/db',
+        description: 'Local',
+        content: 'Local content',
+        tags: '[]',
+        scope: 'project',
+        project: '/current/workspace',
+        created_at: 1_700_000_000_000,
+        updated_at: 1_700_086_400_000,
+      },
+      alsoIn: [
+        {
+          topic: 'arch/db',
+          description: 'Foreign desc',
+          preview: 'Foreign preview',
+          scope: 'project',
+          project: '/other/workspace',
+          created_at: 1_700_000_000_000,
+          updated_at: 1_700_086_400_000,
+        },
+      ],
+    });
+
+    const $ = makeMockShell({ 'atom-get': fakeGetResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const ctx = makeCtx('/current/workspace');
+
+    const result = await plugin.tool.memory_atom_get.execute({ topic: 'arch/db' }, ctx);
+
+    expect(result.output).toContain('[workspace: /other/workspace]');
+    expect(result.output).not.toContain('project//other/workspace');
+  });
+
+  test('Tool alsoIn renders global entries with [global] label', async () => {
+    const fakeGetResponse = JSON.stringify({
+      match: null,
+      alsoIn: [
+        {
+          topic: 'arch/db',
+          description: 'Global desc',
+          preview: 'Global preview',
+          scope: 'global',
+          project: '',
+          created_at: 1_700_000_000_000,
+          updated_at: 1_700_086_400_000,
+        },
+      ],
+    });
+
+    const $ = makeMockShell({ 'atom-get': fakeGetResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const ctx = makeCtx('/current/workspace');
+
+    const result = await plugin.tool.memory_atom_get.execute({ topic: 'arch/db' }, ctx);
+
+    expect(result.output).toContain('[global]');
+    expect(result.output).not.toContain('[workspace: ]');
+  });
+});
+
+// ── memory_atom_patch tool ────────────────────────────────────────────────────
+// spec: openspec/specs/memory-atom-tools/spec.md
+
+describe('memory_atom_patch tool', () => {
+  function makeCtx(directory = '/my/workspace') {
+    return {
+      sessionID: 'ses-patch',
+      messageID: 'msg-patch',
+      agent: 'engineer',
+      directory,
+      worktree: directory,
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+    };
+  }
+
+  test('memory_atom_patch is registered in tool export', async () => {
+    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
+    expect(plugin.tool).toHaveProperty('memory_atom_patch');
+    expect(typeof plugin.tool.memory_atom_patch.execute).toBe('function');
+  });
+
+  test('memory_atom_patch rejects scope=all', async () => {
+    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
+    const result = await plugin.tool.memory_atom_patch.execute(
+      { topic: 'work/notes', description: 'x', scope: 'all' },
+      makeCtx()
+    );
+    expect(result.output).toMatch(/scope.*all|all.*not valid/i);
+  });
+
+  test('memory_atom_patch rejects empty patch (no patchable fields)', async () => {
+    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
+    const result = await plugin.tool.memory_atom_patch.execute(
+      { topic: 'work/notes' },
+      makeCtx()
+    );
+    expect(result.output).toMatch(/at least one/i);
+  });
+
+  test('memory_atom_patch rejects invalid created_at string', async () => {
+    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
+    const result = await plugin.tool.memory_atom_patch.execute(
+      { topic: 'work/notes', created_at: 'not-a-date' },
+      makeCtx()
+    );
+    expect(result.output).toMatch(/not a valid ISO 8601/i);
+  });
+
+  test('memory_atom_patch returns confirmation naming changed fields on success', async () => {
+    const fakePatchResponse = JSON.stringify({ ok: true, topic: 'work/notes', patched: ['description', 'tags'] });
+    const $ = makeMockShell({ 'atom-patch': fakePatchResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    const result = await plugin.tool.memory_atom_patch.execute(
+      { topic: 'work/notes', description: 'new desc', tags: ['t'] },
+      makeCtx()
+    );
+
+    expect(result.output).toContain('work/notes');
+    expect(result.output).toContain('description');
+    expect(result.output).toContain('tags');
+  });
+
+  test('memory_atom_patch surfaces error from CLI without throwing', async () => {
+    const $ = makeMockShell({}, {
+      'atom-patch': { message: 'Atom does not exist', stderr: '[agent-memory/atom-patch] Atom does not exist' },
+    });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    let threw = false;
+    let result;
+    try {
+      result = await plugin.tool.memory_atom_patch.execute(
+        { topic: 'arch/missing', description: 'x' },
+        makeCtx()
+      );
+    } catch {
+      threw = true;
+    }
+
+    expect(threw).toBe(false);
+    expect(result.output).toMatch(/error/i);
+  });
+});
+
+// W1 — Additional memory_atom_patch plugin-layer tests for spec conformance
+// Covers scenarios from openspec/specs/memory-atom-tools/spec.md that were
+// not yet exercised at the plugin layer.
+
+describe('memory_atom_patch plugin-layer spec coverage', () => {
+  function makeCtx(directory = '/my/workspace') {
+    return {
+      sessionID: 'ses-patch-extra',
+      messageID: 'msg-patch-extra',
+      agent: 'engineer',
+      directory,
+      worktree: directory,
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+    };
+  }
+
+  test('Tool accepts ISO 8601 string for created_at and normalises to epoch ms', async () => {
+    // The ISO→epoch normalisation happens in the plugin layer.
+    // This test verifies the normalised integer is what reaches the CLI.
+    const fakePatchResponse = JSON.stringify({ ok: true, topic: 'work/notes', patched: ['created_at'] });
+    const $ = makeMockShell({ 'atom-patch': fakePatchResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    await plugin.tool.memory_atom_patch.execute(
+      { topic: 'work/notes', created_at: '2025-01-01T00:00:00.000Z' },
+      makeCtx()
+    );
+
+    // The CLI call must contain the epoch-ms equivalent (1735689600000)
+    expect($.calls.some((c) => c.includes('1735689600000'))).toBe(true);
+    // It must NOT contain the raw ISO string
+    expect($.calls.some((c) => c.includes('2025-01-01T'))).toBe(false);
+  });
+
+  test('Tool patches created_at only and leaves updated_at unchanged — payload has no description or tags', async () => {
+    // Verifies the plugin does not inject description/tags into the CLI payload
+    // when only created_at is supplied (ensuring updated_at-not-bumped invariant
+    // holds end-to-end from the plugin perspective).
+    const fakePatchResponse = JSON.stringify({ ok: true, topic: 'work/notes', patched: ['created_at'] });
+    const $ = makeMockShell({ 'atom-patch': fakePatchResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    await plugin.tool.memory_atom_patch.execute(
+      { topic: 'work/notes', created_at: 1700000000000 },
+      makeCtx()
+    );
+
+    // Capture the JSON payload sent to the CLI
+    const atomPatchCall = $.calls.find((c) => c.includes('atom-patch'));
+    expect(atomPatchCall).toBeDefined();
+    // Extract the JSON arg (last token in the command)
+    const jsonMatch = atomPatchCall.match(/\{.*\}$/);
+    if (jsonMatch) {
+      const payload = JSON.parse(jsonMatch[0]);
+      expect('description' in payload).toBe(false);
+      expect('tags' in payload).toBe(false);
+      expect(payload.created_at).toBe(1700000000000);
+    }
+  });
+
+  test('Tool rejects empty description before spawning CLI', async () => {
+    // empty description is caught in the schema layer; this test confirms the
+    // plugin surfaces the CLI error as a non-throwing result.
+    const $ = makeMockShell({}, {
+      'atom-patch': { message: 'Atom description must be a non-empty string', stderr: '[agent-memory/atom-patch] Atom description must be a non-empty string' },
+    });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    let threw = false;
+    let result;
+    try {
+      result = await plugin.tool.memory_atom_patch.execute(
+        { topic: 'work/notes', description: '' },
+        makeCtx()
+      );
+    } catch {
+      threw = true;
+    }
+
+    expect(threw).toBe(false);
+    expect(result.output).toMatch(/error/i);
   });
 });

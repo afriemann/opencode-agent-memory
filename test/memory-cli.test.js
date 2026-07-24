@@ -560,6 +560,46 @@ describe('memory.js atom-* subcommands (subprocess integration)', () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('ghost');
   });
+
+  // spec: openspec/specs/memory-atom/spec.md
+
+  test('atom-patch with description and tags updates both and exits 0 with JSON stdout', () => {
+    run(['atom-write', 'project', '/p',
+      JSON.stringify({ topic: 'work/notes', content: 'original', description: 'orig desc', tags: ['old'] })]);
+    const result = run(['atom-patch', 'project', '/p',
+      JSON.stringify({ topic: 'work/notes', description: 'new desc', tags: ['new'] })]);
+    expect(result.status).toBe(0);
+    const out = JSON.parse(result.stdout.trim());
+    expect(out.ok).toBe(true);
+    expect(out.topic).toBe('work/notes');
+    expect(out.patched).toEqual(expect.arrayContaining(['description', 'tags']));
+  });
+
+  test('atom-patch errors when the atom does not exist', () => {
+    run(['init']);
+    const result = run(['atom-patch', 'project', '/p',
+      JSON.stringify({ topic: 'arch/missing', description: 'x' })]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/does not exist/i);
+  });
+
+  test('atom-patch rejects an empty patch', () => {
+    run(['atom-write', 'project', '/p',
+      JSON.stringify({ topic: 'work/notes', content: 'c', description: 'd' })]);
+    const result = run(['atom-patch', 'project', '/p',
+      JSON.stringify({ topic: 'work/notes' })]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/at least one/i);
+  });
+
+  test('atom-patch rejects an empty description', () => {
+    run(['atom-write', 'project', '/p',
+      JSON.stringify({ topic: 'work/notes', content: 'c', description: 'orig' })]);
+    const result = run(['atom-patch', 'project', '/p',
+      JSON.stringify({ topic: 'work/notes', description: '' })]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/non-empty/i);
+  });
 });
 
 // ── prune SQL transaction tests ───────────────────────────────────────────────
