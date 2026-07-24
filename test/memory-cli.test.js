@@ -500,6 +500,36 @@ describe('memory.js atom-* subcommands (subprocess integration)', () => {
     expect(topics).toContain('arch/api');
   });
 
+  test('global scope: atom-list with empty project string succeeds', () => {
+    run(['atom-write', 'global', '',
+      JSON.stringify({ topic: 'global/rule', content: 'always use kebab-case', description: 'Style' })]);
+    const result = run(['atom-list', 'global', '']);
+    expect(result.status).toBe(0);
+    const out = JSON.parse(result.stdout.trim());
+    const topics = out.map((r) => r.topic);
+    expect(topics).toContain('global/rule');
+  });
+
+  test('global scope: atom-get with empty project string succeeds', () => {
+    run(['atom-write', 'global', '',
+      JSON.stringify({ topic: 'global/style', content: 'kebab-case everywhere', description: 'Style rule' })]);
+    const result = run(['atom-get', 'global', '', 'global/style']);
+    expect(result.status).toBe(0);
+    const out = JSON.parse(result.stdout.trim());
+    expect(out.match).not.toBeNull();
+    expect(out.match.topic).toBe('global/style');
+  });
+
+  test('global scope: atom-search with empty project string succeeds', () => {
+    run(['atom-write', 'global', '',
+      JSON.stringify({ topic: 'global/search', content: 'findable global content', description: 'Global atom' })]);
+    const result = run(['atom-search', 'global', '', JSON.stringify({ query: 'findable' })]);
+    expect(result.status).toBe(0);
+    const out = JSON.parse(result.stdout.trim());
+    expect(out.length).toBeGreaterThan(0);
+    expect(out[0].topic).toBe('global/search');
+  });
+
   test('atom-search finds atom by content', () => {
     run(['atom-write', 'project', '/p',
       JSON.stringify({ topic: 'search-target', content: 'findme content', description: 'searchable' })]);

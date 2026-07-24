@@ -437,9 +437,9 @@ export function atomSearch(db, { scope, project, query, limit = 20 }) {
   `;
 
   try {
-    if (scope === 'workspace') {
+    if (scope === 'workspace' || scope === 'project') {
       return db.prepare(buildFtsQuery(`AND ((a.scope = ? AND a.project = ?) OR (a.scope = 'global' AND a.project = ''))`))
-        .all(query, project, '', cap);
+        .all(query, scope, project, cap);
     } else if (scope === 'global') {
       return db.prepare(buildFtsQuery(`AND a.scope = 'global' AND a.project = ''`))
         .all(query, cap);
@@ -449,10 +449,10 @@ export function atomSearch(db, { scope, project, query, limit = 20 }) {
   } catch {
     // FTS5 unavailable or query error — fall back to LIKE scan
     const likePattern = `%${query}%`;
-    if (scope === 'workspace') {
+    if (scope === 'workspace' || scope === 'project') {
       return db.prepare(buildLikeQuery(
         `AND ((scope = ? AND project = ?) OR (scope = 'global' AND project = ''))`
-      ).replace(/a\./g, '')).all(likePattern, likePattern, likePattern, project, '', cap);
+      ).replace(/a\./g, '')).all(likePattern, likePattern, likePattern, scope, project, cap);
     } else if (scope === 'global') {
       return db.prepare(buildLikeQuery(`AND scope = 'global' AND project = ''`).replace(/a\./g, ''))
         .all(likePattern, likePattern, likePattern, cap);

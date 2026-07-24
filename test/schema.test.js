@@ -286,6 +286,14 @@ describe('atomSearch', () => {
     expect(projs).not.toContain('/other');
   });
 
+  test('scope=project restriction: same behaviour as scope=workspace', () => {
+    const db = setupSearchFixture();
+    // resolveScope maps workspace → {scope:'project', project:dir}; ensure it restricts correctly
+    const results = atomSearch(db, { scope: 'project', project: '/myproj', query: 'Unrelated', limit: 10 });
+    const projs = results.map((r) => r.project);
+    expect(projs).not.toContain('/other');
+  });
+
   test('LIKE fallback returns results when FTS5 throws (mock FTS5 failure)', () => {
     const db = openMemory();
     ensureSchema(db);

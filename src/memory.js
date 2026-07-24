@@ -615,7 +615,7 @@ switch (cmd) {
 
   case 'atom-write': {
     const [scope, project, jsonArg] = rest;
-    if (!scope || !project || !jsonArg) {
+    if (!scope || project == null || !jsonArg) {
       process.stderr.write('Usage: memory.js atom-write <scope> <project> <json>\n');
       process.exit(1);
     }
@@ -625,7 +625,7 @@ switch (cmd) {
 
   case 'atom-append': {
     const [scope, project, jsonArg] = rest;
-    if (!scope || !project || !jsonArg) {
+    if (!scope || project == null || !jsonArg) {
       process.stderr.write('Usage: memory.js atom-append <scope> <project> <json>\n');
       process.exit(1);
     }
@@ -635,7 +635,7 @@ switch (cmd) {
 
   case 'atom-get': {
     const [scope, project, topic] = rest;
-    if (!scope || !project || !topic) {
+    if (!scope || project == null || !topic) {
       process.stderr.write('Usage: memory.js atom-get <scope> <project> <topic>\n');
       process.exit(1);
     }
@@ -645,7 +645,7 @@ switch (cmd) {
 
   case 'atom-search': {
     const [scope, project, jsonArg] = rest;
-    if (!scope || !project || !jsonArg) {
+    if (!scope || project == null || !jsonArg) {
       process.stderr.write('Usage: memory.js atom-search <scope> <project> <json>\n');
       process.exit(1);
     }
@@ -655,7 +655,7 @@ switch (cmd) {
 
   case 'atom-list': {
     const [scope, project, prefix] = rest;
-    if (!scope || !project) {
+    if (!scope || project == null) {
       process.stderr.write('Usage: memory.js atom-list <scope> <project> [<prefix>]\n');
       process.exit(1);
     }
@@ -665,7 +665,7 @@ switch (cmd) {
 
   case 'atom-delete': {
     const [scope, project, topic] = rest;
-    if (!scope || !project || !topic) {
+    if (!scope || project == null || !topic) {
       process.stderr.write('Usage: memory.js atom-delete <scope> <project> <topic>\n');
       process.exit(1);
     }
