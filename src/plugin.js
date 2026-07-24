@@ -240,6 +240,9 @@ const AgentMemory = async ({ client, $ }) => {
 
       if (primer) {
         primers.set(sessionId, primer);
+        log(`inject: primer ready for ${sessionId} (${rows.length} sessions, ${projectAtoms.length} workspace atoms, ${globalAtoms.length} global atoms)`);
+      } else {
+        log(`inject: cold start for ${sessionId} — no prior memory or atoms, no primer`);
       }
     } catch (err) {
       log(`inject: failed for ${sessionId}`, err);
