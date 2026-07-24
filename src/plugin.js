@@ -476,7 +476,10 @@ const AgentMemory = async ({ client, $ }) => {
     description:
       'Read the current agent memory hot state for this session: recent session threads, ' +
       'current signals, and the loaded primer. Does not list durable atoms — use ' +
-      'memory_atom_list for the atom directory or memory_atom_get to fetch a specific atom by topic.',
+      'memory_atom_list for the atom directory or memory_atom_get to fetch a specific atom by topic. ' +
+      'The output includes `db_schema_version` (the actual PRAGMA user_version of the SQLite DB, ' +
+      'reflecting all migrations) and `schema_version` inside each hot_state row (always 2 — ' +
+      'that column marks when hot_state was last structurally changed, not the overall DB version).',
     args: {},
     async execute(_args, context) {
       const agent = await resolveSessionAgent(context.sessionID);
