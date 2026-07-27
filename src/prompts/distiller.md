@@ -25,12 +25,26 @@ The user message supplies two things:
 
 - **PRIOR** — the previous memory record (its three fields), or the literal `none`
   when there is no prior record.
-- **SIGNALS** — a batch of accrued work signals: files edited, todo updates, and
-  salient messages (user corrections, plan or scope changes, and stop/park
-  statements). May be empty.
+- **SIGNALS** — a batch of accrued work signals: files edited, todo updates, salient
+  user messages (corrections, plan changes, stop/park statements), and substantive
+  agent responses that record decisions, ruled-out approaches, or pivots. May be empty.
 
 Base your output solely on PRIOR and SIGNALS. Never invent state, and never infer
 unstated context or fabricate open questions.
+
+## PRIOR vs SIGNALS
+
+When SIGNALS and PRIOR describe the same problem domain but with different approaches
+or decisions, **SIGNALS take precedence** — they reflect more recent context.
+
+Concretely: if PRIOR records a pending approach (e.g. a specific parameter, method, or
+plan) and SIGNALS include an agent or user message that rules it out or replaces it with
+a different approach, do **not** carry the PRIOR approach forward. Record only the
+approach SIGNALS show as active.
+
+This rule applies only where there is a **contradiction** — SIGNALS explicitly overriding
+something PRIOR asserts. PRIOR content about domains that SIGNALS do not address at all
+is still valid and should be carried forward unchanged.
 
 ## What to produce
 

@@ -21,6 +21,11 @@
 //   - memory_atom: new column status TEXT NOT NULL DEFAULT 'active'
 //     CHECK(status IN ('active', 'resolved', 'deprecated')).
 //   - PRAGMA user_version = 4 marks migration complete.
+//
+// Schema version 5 changes:
+//   - hot_state: new nullable columns distil_cost_usd REAL,
+//     distil_tokens_in INTEGER, distil_tokens_out INTEGER.
+//   - PRAGMA user_version = 5 marks migration complete.
 
 // ── Topic normalisation ───────────────────────────────────────────────────────
 
@@ -145,6 +150,9 @@ export function ensureSchema(db) {
       open_questions      TEXT,
       anchored_git_sha    TEXT,
       schema_version      INTEGER NOT NULL DEFAULT 2,
+      distil_cost_usd     REAL,
+      distil_tokens_in    INTEGER,
+      distil_tokens_out   INTEGER,
       updated_at          INTEGER NOT NULL,
       UNIQUE (scope, agent, project, session_id)
     );
@@ -297,6 +305,40 @@ export function ensureSchema(db) {
     } else {
       // status already present — just bump the version marker
       db.exec('PRAGMA user_version = 4');
+    }
+  }
+
+  // ── Phase 5: migration to schema version 5 ───────────────────────────────
+  //   Gate: PRAGMA user_version < 5 AND distil_cost_usd column absent (shape probe)
+  //   Three nullable columns added to hot_state for per-distil cost tracking.
+  //   Each column is added only when absent (idempotent under repeated calls).
+  const versionAfterV4 = db.prepare('PRAGMA user_version').get()?.user_version ?? 0;
+  if (versionAfterV4 < 5) {
+    const hotStateCols5 = db.prepare("PRAGMA table_info(hot_state)").all().map((c) => c.name);
+    const needsCostCols = !hotStateCols5.includes('distil_cost_usd') ||
+                          !hotStateCols5.includes('distil_tokens_in') ||
+                          !hotStateCols5.includes('distil_tokens_out');
+    if (needsCostCols) {
+      db.exec('BEGIN');
+      try {
+        if (!hotStateCols5.includes('distil_cost_usd')) {
+          db.exec('ALTER TABLE hot_state ADD COLUMN distil_cost_usd REAL');
+        }
+        if (!hotStateCols5.includes('distil_tokens_in')) {
+          db.exec('ALTER TABLE hot_state ADD COLUMN distil_tokens_in INTEGER');
+        }
+        if (!hotStateCols5.includes('distil_tokens_out')) {
+          db.exec('ALTER TABLE hot_state ADD COLUMN distil_tokens_out INTEGER');
+        }
+        db.exec('PRAGMA user_version = 5');
+        db.exec('COMMIT');
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
+      }
+    } else {
+      // All cost columns already present — just bump the version marker
+      db.exec('PRAGMA user_version = 5');
     }
   }
 }

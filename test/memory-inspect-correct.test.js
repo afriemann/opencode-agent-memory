@@ -55,7 +55,7 @@ function runInspectSQL(db, agent, project) {
     .prepare(`
       SELECT id, scope, agent, project, session_id, session_name,
              last_worked_summary, next_action, open_questions,
-             anchored_git_sha, schema_version, updated_at
+             anchored_git_sha, distil_cost_usd, distil_tokens_in, distil_tokens_out, updated_at
       FROM hot_state
       WHERE scope = 'project' AND agent = ? AND project = ?
       ORDER BY updated_at DESC, id DESC
@@ -396,5 +396,112 @@ describe('CLI guard: distil-force is not a valid subcommand', () => {
     const result = runMemoryCLI(['distil-force']);
     expect(result.stderr).toMatch(/Usage:/);
     expect(result.stderr).not.toContain('distil-force');
+  });
+});
+
+// ── distil cost columns on hot_state ─────────────────────────────────────────
+// spec: openspec/changes/distiller-accuracy-agent-signals-cost/specs/memory-store/spec.md
+// spec: openspec/changes/distiller-accuracy-agent-signals-cost/specs/memory-inspect/spec.md
+
+describe('distil cost columns — schema and inspect', () => {
+  test('hot_state table has distil_cost_usd, distil_tokens_in, distil_tokens_out columns after schema migration', () => {
+    const db = openMemory();
+    const cols = db.prepare('PRAGMA table_info(hot_state)').all().map((c) => c.name);
+    expect(cols).toContain('distil_cost_usd');
+    expect(cols).toContain('distil_tokens_in');
+    expect(cols).toContain('distil_tokens_out');
+  });
+
+  test('cost columns are nullable (existing rows without cost data are tolerated)', () => {
+    const db = openMemory();
+    // Insert a row without cost columns (the legacy path)
+    db.prepare(`
+      INSERT INTO hot_state
+        (scope, agent, project, session_id, last_worked_summary, next_action,
+         open_questions, anchored_git_sha, schema_version, updated_at)
+      VALUES ('project', 'engineer', '/test', 'ses1', 'done', 'next', '[]', null, 2, 1)
+    `).run();
+    const row = db.prepare(`
+      SELECT distil_cost_usd, distil_tokens_in, distil_tokens_out
+      FROM hot_state WHERE session_id = 'ses1'
+    `).get();
+    expect(row).not.toBeNull();
+    expect(row.distil_cost_usd).toBeNull();
+    expect(row.distil_tokens_in).toBeNull();
+    expect(row.distil_tokens_out).toBeNull();
+  });
+
+  test('cost columns returned by inspect SQL when present', () => {
+    const db = openMemory();
+    db.prepare(`
+      INSERT INTO hot_state
+        (scope, agent, project, session_id, last_worked_summary, next_action,
+         open_questions, anchored_git_sha, schema_version, updated_at,
+         distil_cost_usd, distil_tokens_in, distil_tokens_out)
+      VALUES ('project', 'engineer', '/test', 'ses2', 'done', 'next', '[]', null, 2, 1,
+              0.0042, 1500, 300)
+    `).run();
+
+    // Run the same SQL as cmdInspect would use — now with cost columns included
+    const rows = db.prepare(`
+      SELECT id, scope, agent, project, session_id, session_name,
+             last_worked_summary, next_action, open_questions,
+             anchored_git_sha, distil_cost_usd, distil_tokens_in, distil_tokens_out, updated_at
+      FROM hot_state
+      WHERE scope = 'project' AND agent = 'engineer' AND project = '/test'
+      ORDER BY updated_at DESC, id DESC
+    `).all();
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].distil_cost_usd).toBeCloseTo(0.0042);
+    expect(rows[0].distil_tokens_in).toBe(1500);
+    expect(rows[0].distil_tokens_out).toBe(300);
+  });
+
+  test('cost columns null for legacy row returned as null in inspect output', () => {
+    const db = openMemory();
+    db.prepare(`
+      INSERT INTO hot_state
+        (scope, agent, project, session_id, last_worked_summary, next_action,
+         open_questions, anchored_git_sha, schema_version, updated_at)
+      VALUES ('project', 'engineer', '/test2', 'ses3', 'done', 'next', '[]', null, 2, 1)
+    `).run();
+
+    const row = db.prepare(`
+      SELECT distil_cost_usd, distil_tokens_in, distil_tokens_out
+      FROM hot_state WHERE session_id = 'ses3'
+    `).get();
+
+    expect(row.distil_cost_usd).toBeNull();
+    expect(row.distil_tokens_in).toBeNull();
+    expect(row.distil_tokens_out).toBeNull();
+  });
+
+  test('ensureSchema is idempotent when cost columns already exist', () => {
+    const db = openMemory();
+    // ensureSchema was already called in openMemory() — calling again must not throw
+    expect(() => ensureSchema(db)).not.toThrow();
+    // Columns must still be present
+    const cols = db.prepare('PRAGMA table_info(hot_state)').all().map((c) => c.name);
+    expect(cols).toContain('distil_cost_usd');
+  });
+
+  test('cmdAccrue inserts signals with agent kind', () => {
+    const db = openMemory();
+    // Simulate what cmdAccrue does with agentMessages
+    const now = Date.now();
+    const insert = db.prepare(`
+      INSERT INTO memory_signal (session_id, scope, agent, project, kind, payload, created_at)
+      VALUES (?, 'project', ?, ?, ?, ?, ?)
+    `);
+    db.exec('BEGIN');
+    insert.run('ses4', 'engineer', '/test3', 'agent', 'I decided to use SSDT override.', now);
+    db.exec('COMMIT');
+
+    const signal = db.prepare(`
+      SELECT kind, payload FROM memory_signal WHERE session_id = 'ses4'
+    `).get();
+    expect(signal.kind).toBe('agent');
+    expect(signal.payload).toBe('I decided to use SSDT override.');
   });
 });

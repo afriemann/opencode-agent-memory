@@ -102,11 +102,11 @@ describe('ensureSchema — fresh DB', () => {
     expect(() => ensureSchema(db)).not.toThrow();
   });
 
-  test('user_version is set to 4 after first ensureSchema', () => {
+  test('user_version is set to 5 after first ensureSchema', () => {
     const db = openMemory();
     ensureSchema(db);
     const v = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v).toBe(4);
+    expect(v).toBe(5);
   });
 });
 
@@ -540,11 +540,11 @@ describe('migration — populated old-schema DB', () => {
     expect(cols).not.toContain('adr_candidate');
   });
 
-  test('user_version is 4 after migration', () => {
+  test('user_version is 5 after migration', () => {
     const db = buildOldSchemaDb();
     ensureSchema(db);
     const v = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v).toBe(4);
+    expect(v).toBe(5);
   });
 
   test('legacy summaries are migrated to work/migrated-summary atom', () => {
@@ -689,7 +689,7 @@ describe('migration failure rolls back entirely and retries cleanly', () => {
     // Second ensureSchema call must complete migration successfully
     expect(() => ensureSchema(db)).not.toThrow();
     const v2 = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v2).toBe(4);
+    expect(v2).toBe(5);
 
     // hot_state row preserved after migration
     const migratedRow = db.prepare(
@@ -972,11 +972,11 @@ describe('migration — v2 to v3 (pinned column)', () => {
     expect(row.pinned).toBe(0);
   });
 
-  test('user_version is 4 after v2 to v3 migration', () => {
+  test('user_version is 5 after v2 to v3 migration', () => {
     const db = buildV2SchemaDb();
     ensureSchema(db);
     const v = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v).toBe(4);
+    expect(v).toBe(5);
   });
 
   test('v3 migration is idempotent — calling ensureSchema twice does not throw', () => {
@@ -990,7 +990,7 @@ describe('migration — v2 to v3 (pinned column)', () => {
     db.exec('ALTER TABLE memory_atom ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0');
     expect(() => ensureSchema(db)).not.toThrow();
     const v = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v).toBe(4);
+    expect(v).toBe(5);
   });
 
   test('fresh and migrated databases have identical pinned column definition', () => {
@@ -1268,11 +1268,11 @@ describe('migration — v3 to v4 (status column)', () => {
     expect(row.status).toBe('active');
   });
 
-  test('user_version is 4 after v3 to v4 migration', () => {
+  test('user_version is 5 after v3 to v4 migration', () => {
     const db = buildV3SchemaDb();
     ensureSchema(db);
     const v = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v).toBe(4);
+    expect(v).toBe(5);
   });
 
   test('v4 migration is idempotent — calling ensureSchema twice does not throw', () => {
@@ -1286,7 +1286,7 @@ describe('migration — v3 to v4 (status column)', () => {
     db.exec(`ALTER TABLE memory_atom ADD COLUMN status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'resolved', 'deprecated'))`);
     expect(() => ensureSchema(db)).not.toThrow();
     const v = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v).toBe(4);
+    expect(v).toBe(5);
   });
 
   test('fresh and migrated databases have identical status column definition', () => {
@@ -1303,6 +1303,112 @@ describe('migration — v3 to v4 (status column)', () => {
     expect(f.type).toBe(m.type);
     expect(f.dflt_value).toBe(m.dflt_value);
     expect(f.notnull).toBe(m.notnull);
+  });
+});
+
+// ── migration — v4 to v5 (distil cost columns) ───────────────────────────────
+
+describe('migration — v4 to v5 (distil cost columns on hot_state)', () => {
+  function buildV4SchemaDb() {
+    // Build a v4 database (hot_state without cost columns, memory_atom with status).
+    const db = new DatabaseSync(':memory:');
+    db.exec('PRAGMA busy_timeout = 5000;');
+    db.exec(`
+      CREATE TABLE hot_state (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        scope               TEXT    NOT NULL DEFAULT 'project',
+        agent               TEXT    NOT NULL,
+        project             TEXT    NOT NULL,
+        session_id          TEXT    NOT NULL DEFAULT '',
+        session_name        TEXT,
+        last_worked_summary TEXT,
+        next_action         TEXT,
+        open_questions      TEXT,
+        anchored_git_sha    TEXT,
+        schema_version      INTEGER NOT NULL DEFAULT 2,
+        updated_at          INTEGER NOT NULL,
+        UNIQUE (scope, agent, project, session_id)
+      );
+      CREATE TABLE memory_signal (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id  TEXT    NOT NULL,
+        scope       TEXT    NOT NULL DEFAULT 'project',
+        agent       TEXT    NOT NULL,
+        project     TEXT    NOT NULL,
+        kind        TEXT    NOT NULL,
+        payload     TEXT    NOT NULL,
+        created_at  INTEGER NOT NULL
+      );
+      CREATE TABLE distil_watermark (
+        session_id     TEXT    PRIMARY KEY,
+        last_signal_ms INTEGER NOT NULL DEFAULT 0,
+        last_distil_ms INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE memory_atom (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        scope        TEXT    NOT NULL DEFAULT 'project',
+        project      TEXT    NOT NULL DEFAULT '',
+        topic        TEXT    NOT NULL,
+        description  TEXT    NOT NULL DEFAULT '',
+        content      TEXT    NOT NULL DEFAULT '',
+        tags         TEXT    NOT NULL DEFAULT '[]',
+        pinned       INTEGER NOT NULL DEFAULT 0,
+        status       TEXT    NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'resolved', 'deprecated')),
+        session_id   TEXT,
+        session_name TEXT,
+        created_at   INTEGER NOT NULL,
+        updated_at   INTEGER NOT NULL,
+        UNIQUE (scope, project, topic)
+      );
+      PRAGMA user_version = 4;
+    `);
+    return db;
+  }
+
+  test('adds distil_cost_usd, distil_tokens_in, distil_tokens_out columns to hot_state', () => {
+    const db = buildV4SchemaDb();
+    ensureSchema(db);
+
+    const cols = db.prepare('PRAGMA table_info(hot_state)').all().map((c) => c.name);
+    expect(cols).toContain('distil_cost_usd');
+    expect(cols).toContain('distil_tokens_in');
+    expect(cols).toContain('distil_tokens_out');
+  });
+
+  test('user_version is 5 after v4 to v5 migration', () => {
+    const db = buildV4SchemaDb();
+    ensureSchema(db);
+    const v = db.prepare('PRAGMA user_version').get().user_version;
+    expect(v).toBe(5);
+  });
+
+  test('v5 migration is idempotent — calling ensureSchema twice does not throw', () => {
+    const db = buildV4SchemaDb();
+    ensureSchema(db);
+    expect(() => ensureSchema(db)).not.toThrow();
+  });
+
+  test('v5 migration is idempotent when cost columns already present (user_version < 5)', () => {
+    const db = buildV4SchemaDb();
+    // Add cost columns before calling ensureSchema (simulates a partial migration)
+    db.exec('ALTER TABLE hot_state ADD COLUMN distil_cost_usd REAL');
+    db.exec('ALTER TABLE hot_state ADD COLUMN distil_tokens_in INTEGER');
+    db.exec('ALTER TABLE hot_state ADD COLUMN distil_tokens_out INTEGER');
+    expect(() => ensureSchema(db)).not.toThrow();
+    const v = db.prepare('PRAGMA user_version').get().user_version;
+    expect(v).toBe(5);
+  });
+
+  test('existing hot_state rows are preserved after v5 migration', () => {
+    const db = buildV4SchemaDb();
+    db.prepare(`
+      INSERT INTO hot_state (agent, project, session_id, last_worked_summary, next_action, open_questions, updated_at)
+      VALUES ('engineer', '/proj', 'ses1', 'done', 'next', '[]', 42)
+    `).run();
+    ensureSchema(db);
+    const row = db.prepare("SELECT last_worked_summary, distil_cost_usd FROM hot_state WHERE session_id = 'ses1'").get();
+    expect(row.last_worked_summary).toBe('done');
+    expect(row.distil_cost_usd).toBeNull(); // nullable — not populated for migrated rows
   });
 });
 

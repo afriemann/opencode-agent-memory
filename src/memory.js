@@ -105,6 +105,7 @@ async function cmdAccrue(sessionId, agent, project, jsonArg) {
   const files = Array.isArray(delta.files) ? delta.files : [];
   const todos = Array.isArray(delta.todos) ? delta.todos : [];
   const messages = Array.isArray(delta.messages) ? delta.messages : [];
+  const agentMessages = Array.isArray(delta.agentMessages) ? delta.agentMessages : [];
 
   db.exec('BEGIN');
   try {
@@ -121,6 +122,11 @@ async function cmdAccrue(sessionId, agent, project, jsonArg) {
     for (const msg of messages) {
       if (typeof msg === 'string' && msg) {
         insert.run(sessionId, agent, project, 'message', msg, now);
+      }
+    }
+    for (const agentMsg of agentMessages) {
+      if (typeof agentMsg === 'string' && agentMsg) {
+        insert.run(sessionId, agent, project, 'agent', agentMsg, now);
       }
     }
     db.exec('COMMIT');
@@ -202,7 +208,7 @@ function cmdInspect(agent, project) {
     .prepare(`
       SELECT id, scope, agent, project, session_id, session_name,
              last_worked_summary, next_action, open_questions,
-             anchored_git_sha, updated_at
+             anchored_git_sha, distil_cost_usd, distil_tokens_in, distil_tokens_out, updated_at
       FROM hot_state
       WHERE scope = 'project' AND agent = ? AND project = ?
       ORDER BY updated_at DESC, id DESC
@@ -343,7 +349,8 @@ async function cmdDistilWrite(agent, project, jsonArg) {
     process.exit(1);
   }
 
-  const { distilled, anchoredSha, lastSignalMs, sessionId, sessionName } = input;
+  const { distilled, anchoredSha, lastSignalMs, sessionId, sessionName,
+          distilCostUsd, distilTokensIn, distilTokensOut } = input;
 
   if (!distilled || typeof distilled !== 'object') {
     process.stderr.write('[agent-memory/distil-write] missing distilled field\n');
@@ -359,14 +366,20 @@ async function cmdDistilWrite(agent, project, jsonArg) {
     Array.isArray(distilled.open_questions) ? distilled.open_questions : []
   );
 
+  // Normalise cost fields: store null when absent or not a number
+  const costUsd = typeof distilCostUsd === 'number' ? distilCostUsd : null;
+  const tokensIn = typeof distilTokensIn === 'number' ? distilTokensIn : null;
+  const tokensOut = typeof distilTokensOut === 'number' ? distilTokensOut : null;
+
   db.exec('BEGIN');
   try {
     // UPSERT session-scoped hot_state with monotonic guard
     db.prepare(`
       INSERT INTO hot_state
         (scope, agent, project, session_id, session_name, last_worked_summary, next_action,
-         open_questions, anchored_git_sha, schema_version, updated_at)
-      VALUES ('project', ?, ?, ?, ?, ?, ?, ?, ?, 2, ?)
+         open_questions, anchored_git_sha, schema_version,
+         distil_cost_usd, distil_tokens_in, distil_tokens_out, updated_at)
+      VALUES ('project', ?, ?, ?, ?, ?, ?, ?, ?, 2, ?, ?, ?, ?)
       ON CONFLICT(scope, agent, project, session_id) DO UPDATE SET
         session_name        = excluded.session_name,
         last_worked_summary = excluded.last_worked_summary,
@@ -374,12 +387,16 @@ async function cmdDistilWrite(agent, project, jsonArg) {
         open_questions      = excluded.open_questions,
         anchored_git_sha    = excluded.anchored_git_sha,
         schema_version      = excluded.schema_version,
+        distil_cost_usd     = excluded.distil_cost_usd,
+        distil_tokens_in    = excluded.distil_tokens_in,
+        distil_tokens_out   = excluded.distil_tokens_out,
         updated_at          = excluded.updated_at
       WHERE excluded.updated_at > hot_state.updated_at
     `).run(
       agent, project, sessionId ?? '', sessionName ?? null,
       summary, nextAction, openQuestions,
       anchoredSha ?? null,
+      costUsd, tokensIn, tokensOut,
       now
     );
 
