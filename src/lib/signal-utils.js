@@ -10,6 +10,9 @@ import { renderStaleness } from './git-helper.js';
 
 export const MAX_SIGNALS_PER_KIND = 20;
 
+/** Independent cap for agent-turn signals (assistant responses). */
+export const MAX_AGENT_SIGNALS = 10;
+
 // ── Time formatting ──────────────────────────────────────────────────────────
 
 /**
@@ -183,6 +186,7 @@ export function assemblePrimer({ rows, projectAtoms, globalAtoms, agent, project
  * Reduce signals per Addendum D2:
  * - Dedup 'file' signals by path (keep the latest entry per path).
  * - Cap each kind ('file', 'todo', 'message') to the N most recent.
+ * - Cap 'agent' signals independently at MAX_AGENT_SIGNALS most recent.
  *
  * @param {Array<{kind:string, payload:string, created_at?:number}>} signals
  * @returns {Array}
@@ -193,6 +197,7 @@ export function reduceSignals(signals) {
   const fileMap = new Map(); // path → signal row (latest wins)
   const todos = [];
   const messages = [];
+  const agentMessages = [];
 
   for (const s of signals) {
     if (s.kind === 'file') {
@@ -201,6 +206,8 @@ export function reduceSignals(signals) {
       todos.push(s);
     } else if (s.kind === 'message') {
       messages.push(s);
+    } else if (s.kind === 'agent') {
+      agentMessages.push(s);
     }
   }
 
@@ -214,5 +221,6 @@ export function reduceSignals(signals) {
     ...sortedFiles.slice(-MAX_SIGNALS_PER_KIND),
     ...todos.slice(-MAX_SIGNALS_PER_KIND),
     ...messages.slice(-MAX_SIGNALS_PER_KIND),
+    ...agentMessages.slice(-MAX_AGENT_SIGNALS),
   ];
 }

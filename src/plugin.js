@@ -110,11 +110,12 @@ function makeBuffer() {
     files: new Set(),    // Set<string> — file paths
     todos: [],           // Array<string> — each is JSON.stringify(Todo[])
     messages: [],        // Array<string> — D1-qualifying message text (≤200 chars)
+    agentMessages: [],   // Array<string> — substantive assistant turns (≤400 chars)
   };
 }
 
 function bufferIsEmpty(buf) {
-  return buf.files.size === 0 && buf.todos.length === 0 && buf.messages.length === 0;
+  return buf.files.size === 0 && buf.todos.length === 0 && buf.messages.length === 0 && buf.agentMessages.length === 0;
 }
 
 // ── CLI spawn helper ─────────────────────────────────────────────────────────
@@ -355,10 +356,12 @@ const AgentMemory = async ({ client, $ }) => {
         files: [...buf.files],
         todos: buf.todos.slice(),
         messages: buf.messages.slice(),
+        agentMessages: buf.agentMessages.slice(),
       };
       buf.files.clear();
       buf.todos.length = 0;
       buf.messages.length = 0;
+      buf.agentMessages.length = 0;
       try {
         await spawnMemory($, ['accrue', sessionId, agent, project], delta);
       } catch (err) {
@@ -397,6 +400,9 @@ const AgentMemory = async ({ client, $ }) => {
       const distilPrompt = buildDistilPrompt(prior, reducedSignals);
 
       let distilled = null;
+      let distilCostUsd = null;
+      let distilTokensIn = null;
+      let distilTokensOut = null;
       try {
         const res = await client.session.prompt({
           path: { id: ephId },
@@ -413,6 +419,15 @@ const AgentMemory = async ({ client, $ }) => {
           .map((p) => p.text)
           .join('\n');
         distilled = parseDistilReply(text);
+        // Extract cost from res.data.info (AssistantMessage shape)
+        const info = res && res.data && res.data.info;
+        if (info) {
+          if (typeof info.cost === 'number') distilCostUsd = info.cost;
+          if (info.tokens) {
+            if (typeof info.tokens.input === 'number') distilTokensIn = info.tokens.input;
+            if (typeof info.tokens.output === 'number') distilTokensOut = info.tokens.output;
+          }
+        }
       } catch (err) {
         log(`distil: json_schema call failed for ${sessionId}, trying text fallback`, err);
       }
@@ -436,6 +451,15 @@ const AgentMemory = async ({ client, $ }) => {
           distilled = parseDistilReply(text);
           if (distilled) {
             log(`distil: json_schema failed, text fallback succeeded for ${sessionId}`);
+            // Extract cost from fallback response
+            const info2 = res2 && res2.data && res2.data.info;
+            if (info2) {
+              if (typeof info2.cost === 'number') distilCostUsd = info2.cost;
+              if (info2.tokens) {
+                if (typeof info2.tokens.input === 'number') distilTokensIn = info2.tokens.input;
+                if (typeof info2.tokens.output === 'number') distilTokensOut = info2.tokens.output;
+              }
+            }
           }
         } catch (err) {
           log(`distil: text fallback call failed for ${sessionId}`, err);
@@ -457,6 +481,9 @@ const AgentMemory = async ({ client, $ }) => {
           lastSignalMs,
           sessionId,
           sessionName,
+          distilCostUsd,
+          distilTokensIn,
+          distilTokensOut,
         });
       } catch (err) {
         log(`distil: distil-write failed for ${sessionId}`, err);
@@ -1123,6 +1150,23 @@ const AgentMemory = async ({ client, $ }) => {
               if (text && isD1Message(text)) {
                 if (!buffers.has(sessionId)) buffers.set(sessionId, makeBuffer());
                 buffers.get(sessionId).messages.push(text.slice(0, 200));
+              }
+            } else if (msgInfo.role === 'assistant' && msgInfo.finish) {
+              // Capture completed assistant turns only (finish is truthy at step-end).
+              // Streaming chunks fire this event multiple times; finish is only set
+              // on the final event for a completed turn (W: streaming-spam prevention).
+              const body =
+                typeof msgInfo.text === 'string'
+                  ? msgInfo.text
+                  : Array.isArray(msgInfo.parts)
+                    ? msgInfo.parts
+                        .filter((p) => p && p.type === 'text')
+                        .map((p) => p.text)
+                        .join('')
+                    : '';
+              if (body && body.length >= 50) {
+                if (!buffers.has(sessionId)) buffers.set(sessionId, makeBuffer());
+                buffers.get(sessionId).agentMessages.push(body.slice(0, 400));
               }
             }
 
