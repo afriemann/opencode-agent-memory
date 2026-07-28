@@ -47,6 +47,10 @@
 //   atom-list <scope> <project> [<prefix>] [<optionsJson>]
 //     optionsJson (optional): { status?, includeDeprecated? }
 //
+//   atom-list-full <scope> <project>
+//     stdout: JSON array of { scope, project, topic, description, content, updated_at }
+//     Returns full content for all always_include=1 active atoms in scope.
+//
 //   atom-delete <scope> <project> <topic>
 //
 //   prune
@@ -63,6 +67,7 @@ import {
   atomPatch,
   atomSearch,
   atomList,
+  atomListFull,
   atomDelete,
 } from './lib/schema.js';
 import { readDistilWatermark, advanceDistilWatermark } from './lib/watermark.js';
@@ -461,7 +466,7 @@ function cmdAtomWrite(scope, project, jsonArg) {
     process.exit(1);
   }
 
-  const { topic, content, description, tags, pinned, sessionId, sessionName, createdAt } = data;
+  const { topic, content, description, tags, pinned, alwaysInclude, sessionId, sessionName, createdAt } = data;
   if (!topic) {
     process.stderr.write('[agent-memory/atom-write] topic is required\n');
     process.exit(1);
@@ -472,7 +477,7 @@ function cmdAtomWrite(scope, project, jsonArg) {
     const normTopic = normaliseTopic(topic);
     const result = atomWrite(db, {
       scope, project, topic: normTopic, content: content ?? '',
-      description, tags, pinned, sessionId, sessionName, createdAt
+      description, tags, pinned, alwaysInclude, sessionId, sessionName, createdAt
     });
     db.close();
     const msg = result.action === 'created'
@@ -572,7 +577,7 @@ function cmdAtomPatch(scope, project, jsonArg) {
     process.exit(1);
   }
 
-  const { topic, description, tags, created_at: createdAt, pinned, status } = data;
+  const { topic, description, tags, created_at: createdAt, pinned, always_include: alwaysInclude, status } = data;
   if (!topic) {
     process.stderr.write('[agent-memory/atom-patch] topic is required\n');
     process.exit(1);
@@ -583,6 +588,7 @@ function cmdAtomPatch(scope, project, jsonArg) {
   if ('tags' in data) patch.tags = tags;
   if ('created_at' in data) patch.created_at = createdAt;
   if ('pinned' in data) patch.pinned = pinned;
+  if ('always_include' in data) patch.always_include = alwaysInclude;
   if ('status' in data) patch.status = status;
 
   const db = openAndInit();
@@ -597,6 +603,13 @@ function cmdAtomPatch(scope, project, jsonArg) {
     process.stderr.write(`[agent-memory/atom-patch] ${err.message}\n`);
     process.exit(1);
   }
+}
+
+function cmdAtomListFull(scope, project) {
+  const db = openAndInit();
+  const results = atomListFull(db, { scope, project });
+  db.close();
+  process.stdout.write(JSON.stringify(results) + '\n');
 }
 
 function cmdAtomDelete(scope, project, topic) {
@@ -731,6 +744,16 @@ switch (cmd) {
     break;
   }
 
+  case 'atom-list-full': {
+    const [scope, project] = rest;
+    if (!scope || project == null) {
+      process.stderr.write('Usage: memory.js atom-list-full <scope> <project>\n');
+      process.exit(1);
+    }
+    cmdAtomListFull(scope, project);
+    break;
+  }
+
   case 'atom-delete': {
     const [scope, project, topic] = rest;
     if (!scope || project == null || !topic) {
@@ -753,7 +776,7 @@ switch (cmd) {
 
   default:
     process.stderr.write(
-      `Usage: memory.js <init|accrue|read|inspect|distil-write|correct|prune|atom-write|atom-append|atom-get|atom-search|atom-list|atom-delete|atom-patch> [args]\n`
+      `Usage: memory.js <init|accrue|read|inspect|distil-write|correct|prune|atom-write|atom-append|atom-get|atom-search|atom-list|atom-list-full|atom-delete|atom-patch> [args]\n`
     );
     process.exit(1);
 }

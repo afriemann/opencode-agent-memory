@@ -13,6 +13,7 @@ import {
   atomPatch,
   atomSearch,
   atomList,
+  atomListFull,
   atomDelete,
   checkFtsIntegrity,
 } from '../src/lib/schema.js';
@@ -46,7 +47,7 @@ describe('ensureSchema — fresh DB', () => {
 
     const cols = db.prepare("PRAGMA table_info(memory_atom)").all().map((c) => c.name);
     for (const col of ['id', 'scope', 'project', 'topic', 'description', 'content', 'tags',
-                       'pinned', 'status', 'session_id', 'session_name', 'created_at', 'updated_at']) {
+                       'pinned', 'always_include', 'status', 'session_id', 'session_name', 'created_at', 'updated_at']) {
       expect(cols).toContain(col);
     }
 
@@ -102,11 +103,11 @@ describe('ensureSchema — fresh DB', () => {
     expect(() => ensureSchema(db)).not.toThrow();
   });
 
-  test('user_version is set to 5 after first ensureSchema', () => {
+  test('user_version is set to 6 after first ensureSchema', () => {
     const db = openMemory();
     ensureSchema(db);
     const v = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v).toBe(5);
+    expect(v).toBe(6);
   });
 });
 
@@ -540,11 +541,11 @@ describe('migration — populated old-schema DB', () => {
     expect(cols).not.toContain('adr_candidate');
   });
 
-  test('user_version is 5 after migration', () => {
+  test('user_version is 6 after migration', () => {
     const db = buildOldSchemaDb();
     ensureSchema(db);
     const v = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v).toBe(5);
+    expect(v).toBe(6);
   });
 
   test('legacy summaries are migrated to work/migrated-summary atom', () => {
@@ -689,7 +690,7 @@ describe('migration failure rolls back entirely and retries cleanly', () => {
     // Second ensureSchema call must complete migration successfully
     expect(() => ensureSchema(db)).not.toThrow();
     const v2 = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v2).toBe(5);
+    expect(v2).toBe(6);
 
     // hot_state row preserved after migration
     const migratedRow = db.prepare(
@@ -972,11 +973,11 @@ describe('migration — v2 to v3 (pinned column)', () => {
     expect(row.pinned).toBe(0);
   });
 
-  test('user_version is 5 after v2 to v3 migration', () => {
+  test('user_version is 6 after v2 to v3 migration', () => {
     const db = buildV2SchemaDb();
     ensureSchema(db);
     const v = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v).toBe(5);
+    expect(v).toBe(6);
   });
 
   test('v3 migration is idempotent — calling ensureSchema twice does not throw', () => {
@@ -990,7 +991,7 @@ describe('migration — v2 to v3 (pinned column)', () => {
     db.exec('ALTER TABLE memory_atom ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0');
     expect(() => ensureSchema(db)).not.toThrow();
     const v = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v).toBe(5);
+    expect(v).toBe(6);
   });
 
   test('fresh and migrated databases have identical pinned column definition', () => {
@@ -1268,11 +1269,11 @@ describe('migration — v3 to v4 (status column)', () => {
     expect(row.status).toBe('active');
   });
 
-  test('user_version is 5 after v3 to v4 migration', () => {
+  test('user_version is 6 after v3 to v4 migration', () => {
     const db = buildV3SchemaDb();
     ensureSchema(db);
     const v = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v).toBe(5);
+    expect(v).toBe(6);
   });
 
   test('v4 migration is idempotent — calling ensureSchema twice does not throw', () => {
@@ -1286,7 +1287,7 @@ describe('migration — v3 to v4 (status column)', () => {
     db.exec(`ALTER TABLE memory_atom ADD COLUMN status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'resolved', 'deprecated'))`);
     expect(() => ensureSchema(db)).not.toThrow();
     const v = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v).toBe(5);
+    expect(v).toBe(6);
   });
 
   test('fresh and migrated databases have identical status column definition', () => {
@@ -1375,11 +1376,11 @@ describe('migration — v4 to v5 (distil cost columns on hot_state)', () => {
     expect(cols).toContain('distil_tokens_out');
   });
 
-  test('user_version is 5 after v4 to v5 migration', () => {
+  test('user_version is 6 after v4 to v5 migration', () => {
     const db = buildV4SchemaDb();
     ensureSchema(db);
     const v = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v).toBe(5);
+    expect(v).toBe(6);
   });
 
   test('v5 migration is idempotent — calling ensureSchema twice does not throw', () => {
@@ -1396,7 +1397,7 @@ describe('migration — v4 to v5 (distil cost columns on hot_state)', () => {
     db.exec('ALTER TABLE hot_state ADD COLUMN distil_tokens_out INTEGER');
     expect(() => ensureSchema(db)).not.toThrow();
     const v = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v).toBe(5);
+    expect(v).toBe(6);
   });
 
   test('existing hot_state rows are preserved after v5 migration', () => {
@@ -1739,5 +1740,312 @@ describe('atomGet with status', () => {
     expect(result.alsoIn.length).toBeGreaterThan(0);
     expect(result.alsoIn[0]).toHaveProperty('status');
     expect(result.alsoIn[0].status).toBe('deprecated');
+  });
+});
+
+// ── always_include — schema and baseline ─────────────────────────────────────
+// spec: openspec/changes/atom-always-include/specs/memory-atom/spec.md
+
+describe('always_include — schema baseline and v6 migration', () => {
+  // 10.1 — fresh DB baseline has always_include column
+  test('fresh DB has always_include column on memory_atom', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    const cols = db.prepare("PRAGMA table_info(memory_atom)").all().map((c) => c.name);
+    expect(cols).toContain('always_include');
+    const col = db.prepare("PRAGMA table_info(memory_atom)").all().find((c) => c.name === 'always_include');
+    expect(col.dflt_value).toBe('0');
+    expect(col.notnull).toBe(1);
+  });
+
+  test('user_version is 6 after fresh ensureSchema (v6 sentinel)', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    expect(db.prepare('PRAGMA user_version').get().user_version).toBe(6);
+  });
+
+  // 10.2 — v5→v6 migration adds always_include to existing DB
+  test('v5 to v6 migration adds always_include to existing memory_atom', () => {
+    const db = openMemory();
+    // Build a v5 DB without always_include
+    db.exec(`
+      CREATE TABLE memory_atom (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scope TEXT NOT NULL DEFAULT 'project',
+        project TEXT NOT NULL DEFAULT '',
+        topic TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        content TEXT NOT NULL DEFAULT '',
+        tags TEXT NOT NULL DEFAULT '[]',
+        pinned INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'active',
+        session_id TEXT,
+        session_name TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE (scope, project, topic)
+      );
+      PRAGMA user_version = 5;
+    `);
+    // Insert a row before migration
+    db.prepare(`INSERT INTO memory_atom (scope, project, topic, description, content, tags, created_at, updated_at) VALUES ('project', '/p', 'pre-existing', 'desc', 'body', '[]', 1, 1)`).run();
+
+    ensureSchema(db);
+
+    const cols = db.prepare("PRAGMA table_info(memory_atom)").all().map((c) => c.name);
+    expect(cols).toContain('always_include');
+    expect(db.prepare('PRAGMA user_version').get().user_version).toBe(6);
+
+    // Pre-existing row now has always_include = 0 (default)
+    const row = db.prepare("SELECT always_include FROM memory_atom WHERE topic='pre-existing'").get();
+    expect(row.always_include).toBe(0);
+  });
+
+  test('v6 migration is idempotent — calling ensureSchema twice does not throw', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    expect(() => ensureSchema(db)).not.toThrow();
+    expect(db.prepare('PRAGMA user_version').get().user_version).toBe(6);
+  });
+
+  test('fresh and v5-migrated databases converge: both have always_include = 0 for new rows', () => {
+    const freshDb = openMemory();
+    ensureSchema(freshDb);
+    atomWrite(freshDb, { scope: 'project', project: '/p', topic: 'fresh-row', content: 'body', description: 'd' });
+    const freshRow = freshDb.prepare("SELECT always_include FROM memory_atom WHERE topic='fresh-row'").get();
+    expect(freshRow.always_include).toBe(0);
+
+    const migratedDb = openMemory();
+    migratedDb.exec(`
+      CREATE TABLE memory_atom (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scope TEXT NOT NULL DEFAULT 'project',
+        project TEXT NOT NULL DEFAULT '',
+        topic TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        content TEXT NOT NULL DEFAULT '',
+        tags TEXT NOT NULL DEFAULT '[]',
+        pinned INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'active',
+        session_id TEXT,
+        session_name TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE (scope, project, topic)
+      );
+      PRAGMA user_version = 5;
+    `);
+    ensureSchema(migratedDb);
+    atomWrite(migratedDb, { scope: 'project', project: '/p', topic: 'migrated-row', content: 'body', description: 'd' });
+    const migratedRow = migratedDb.prepare("SELECT always_include FROM memory_atom WHERE topic='migrated-row'").get();
+    expect(migratedRow.always_include).toBe(0);
+  });
+});
+
+// ── always_include — atomWrite INSERT-only ────────────────────────────────────
+// spec: openspec/changes/atom-always-include/specs/memory-atom/spec.md
+
+describe('always_include — atomWrite INSERT-only behaviour', () => {
+  // 10.3 — always_include set on first insert, preserved on content re-write
+  test('always_include=true is stored on initial write', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'flag-test', content: 'body', description: 'd', alwaysInclude: true });
+    const row = db.prepare("SELECT always_include FROM memory_atom WHERE topic='flag-test'").get();
+    expect(row.always_include).toBe(1);
+  });
+
+  test('always_include is not overwritten on content re-write (INSERT-only)', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'insert-only', content: 'v1', description: 'd', alwaysInclude: true });
+    // Re-write without alwaysInclude — flag must NOT be cleared
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'insert-only', content: 'v2', description: 'd updated' });
+    const row = db.prepare("SELECT always_include, content, description FROM memory_atom WHERE topic='insert-only'").get();
+    expect(row.always_include).toBe(1);
+    expect(row.content).toBe('v2');
+    expect(row.description).toBe('d updated');
+  });
+
+  test('always_include defaults to 0 when not supplied', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'no-flag', content: 'body', description: 'd' });
+    const row = db.prepare("SELECT always_include FROM memory_atom WHERE topic='no-flag'").get();
+    expect(row.always_include).toBe(0);
+  });
+});
+
+// ── always_include — atomPatch ────────────────────────────────────────────────
+
+describe('always_include — atomPatch toggling', () => {
+  // 10.4 — patchable via atomPatch
+  test('atomPatch can set always_include to true', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'patch-toggle', content: 'body', description: 'd' });
+    atomPatch(db, { scope: 'project', project: '/p', topic: 'patch-toggle', patch: { always_include: true } });
+    const row = db.prepare("SELECT always_include FROM memory_atom WHERE topic='patch-toggle'").get();
+    expect(row.always_include).toBe(1);
+  });
+
+  test('atomPatch can clear always_include back to false', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'patch-clear', content: 'body', description: 'd', alwaysInclude: true });
+    atomPatch(db, { scope: 'project', project: '/p', topic: 'patch-clear', patch: { always_include: false } });
+    const row = db.prepare("SELECT always_include FROM memory_atom WHERE topic='patch-clear'").get();
+    expect(row.always_include).toBe(0);
+  });
+
+  test('always_include patch bumps updated_at', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'patch-ts', content: 'body', description: 'd' });
+    const before = db.prepare("SELECT updated_at FROM memory_atom WHERE topic='patch-ts'").get().updated_at;
+    // Ensure at least 1ms passes
+    const later = before + 1;
+    db.prepare("UPDATE memory_atom SET updated_at=? WHERE topic='patch-ts'").run(before - 100);
+    atomPatch(db, { scope: 'project', project: '/p', topic: 'patch-ts', patch: { always_include: true } });
+    const after = db.prepare("SELECT updated_at FROM memory_atom WHERE topic='patch-ts'").get().updated_at;
+    expect(after).toBeGreaterThanOrEqual(later - 100);
+  });
+
+  test('always_include is included in patched list', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'patch-list', content: 'body', description: 'd' });
+    const result = atomPatch(db, { scope: 'project', project: '/p', topic: 'patch-list', patch: { always_include: true } });
+    expect(result.patched).toContain('always_include');
+  });
+});
+
+// ── always_include — atomList returns flag column ─────────────────────────────
+
+describe('always_include — atomList returns flag', () => {
+  // 10.5 — atomList exposes always_include as boolean flag only
+  test('atomList returns always_include column for each atom', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'list-flag', content: 'body', description: 'd', alwaysInclude: true });
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'list-noflag', content: 'body2', description: 'd2' });
+    const results = atomList(db, { scope: 'project', project: '/p' });
+    const flagged = results.find((r) => r.topic === 'list-flag');
+    const unflagged = results.find((r) => r.topic === 'list-noflag');
+    expect(flagged).toBeDefined();
+    expect(flagged.always_include).toBe(1);
+    expect(unflagged).toBeDefined();
+    expect(unflagged.always_include).toBe(0);
+  });
+
+  test('atomList returns preview (not full content) even for always_include atoms', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    const longContent = 'x'.repeat(200);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'list-preview', content: longContent, description: 'd', alwaysInclude: true });
+    const results = atomList(db, { scope: 'project', project: '/p' });
+    const row = results.find((r) => r.topic === 'list-preview');
+    expect(row).toBeDefined();
+    expect(row.preview.length).toBeLessThanOrEqual(80);
+    expect(row).not.toHaveProperty('content');
+  });
+});
+
+// ── atomListFull ──────────────────────────────────────────────────────────────
+// spec: openspec/changes/atom-always-include/specs/memory-atom/spec.md
+
+describe('atomListFull — full content for always_include active atoms', () => {
+  // 10.6 — atomListFull returns full content only for always_include atoms
+  test('returns only atoms with always_include = 1', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'full-yes', content: 'full body', description: 'd', alwaysInclude: true });
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'full-no', content: 'not included', description: 'd2' });
+    const results = atomListFull(db, { scope: 'project', project: '/p' });
+    expect(results.some((r) => r.topic === 'full-yes')).toBe(true);
+    expect(results.some((r) => r.topic === 'full-no')).toBe(false);
+  });
+
+  test('returns full content (not truncated)', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    const longBody = 'word '.repeat(200).trim();
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'full-content', content: longBody, description: 'd', alwaysInclude: true });
+    const results = atomListFull(db, { scope: 'project', project: '/p' });
+    const row = results.find((r) => r.topic === 'full-content');
+    expect(row).toBeDefined();
+    expect(row.content).toBe(longBody);
+  });
+
+  // 10.7 — atomListFull returns only active atoms
+  test('excludes resolved and deprecated always_include atoms', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'full-active', content: 'active', description: 'd', alwaysInclude: true });
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'full-resolved', content: 'resolved', description: 'd', alwaysInclude: true });
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'full-deprecated', content: 'deprecated', description: 'd', alwaysInclude: true });
+    db.prepare("UPDATE memory_atom SET status='resolved' WHERE topic='full-resolved'").run();
+    db.prepare("UPDATE memory_atom SET status='deprecated' WHERE topic='full-deprecated'").run();
+    const results = atomListFull(db, { scope: 'project', project: '/p' });
+    const topics = results.map((r) => r.topic);
+    expect(topics).toContain('full-active');
+    expect(topics).not.toContain('full-resolved');
+    expect(topics).not.toContain('full-deprecated');
+  });
+
+  test('includes global atoms when scope is project/workspace', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'ws-standing', content: 'ws body', description: 'd', alwaysInclude: true });
+    atomWrite(db, { scope: 'global', project: '', topic: 'global-standing', content: 'global body', description: 'd', alwaysInclude: true });
+    const results = atomListFull(db, { scope: 'project', project: '/p' });
+    const topics = results.map((r) => r.topic);
+    expect(topics).toContain('ws-standing');
+    expect(topics).toContain('global-standing');
+  });
+
+  test('scope=global returns only global always_include atoms', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'ws-only', content: 'ws', description: 'd', alwaysInclude: true });
+    atomWrite(db, { scope: 'global', project: '', topic: 'global-only', content: 'global', description: 'd', alwaysInclude: true });
+    const results = atomListFull(db, { scope: 'global', project: '' });
+    const topics = results.map((r) => r.topic);
+    expect(topics).toContain('global-only');
+    expect(topics).not.toContain('ws-only');
+  });
+
+  test('results are ordered alphabetically by topic', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'zzz', content: 'z', description: 'd', alwaysInclude: true });
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'aaa', content: 'a', description: 'd', alwaysInclude: true });
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'mmm', content: 'm', description: 'd', alwaysInclude: true });
+    const results = atomListFull(db, { scope: 'project', project: '/p' });
+    const topics = results.map((r) => r.topic);
+    expect(topics.indexOf('aaa')).toBeLessThan(topics.indexOf('mmm'));
+    expect(topics.indexOf('mmm')).toBeLessThan(topics.indexOf('zzz'));
+  });
+
+  test('returns empty array when no always_include atoms exist', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'regular', content: 'body', description: 'd' });
+    const results = atomListFull(db, { scope: 'project', project: '/p' });
+    expect(results).toHaveLength(0);
+  });
+});
+
+// ── always_include — omit in patch leaves unchanged ───────────────────────────
+
+describe('always_include — omitting in patch leaves flag unchanged', () => {
+  test('patching only description does not clear always_include', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'omit-test', content: 'body', description: 'original', alwaysInclude: true });
+    atomPatch(db, { scope: 'project', project: '/p', topic: 'omit-test', patch: { description: 'updated desc' } });
+    const row = db.prepare("SELECT always_include, description FROM memory_atom WHERE topic='omit-test'").get();
+    expect(row.always_include).toBe(1);
+    expect(row.description).toBe('updated desc');
   });
 });

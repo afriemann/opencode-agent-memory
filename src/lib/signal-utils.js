@@ -13,6 +13,12 @@ export const MAX_SIGNALS_PER_KIND = 20;
 /** Independent cap for agent-turn signals (assistant responses). */
 export const MAX_AGENT_SIGNALS = 10;
 
+/**
+ * Maximum number of always_include atoms rendered per scope in Standing context.
+ * Enforced at render time; atoms beyond the cap are named in an overflow note.
+ */
+export const MAX_STANDING_ATOMS = 5;
+
 // ── Time formatting ──────────────────────────────────────────────────────────
 
 /**
@@ -69,19 +75,21 @@ function renderAtomLine(atom, now, { pinned = false } = {}) {
 /**
  * Assemble the memory primer text injected at session start.
  *
- * Supports multi-row session threads and atom directory sections.
+ * Supports multi-row session threads, a Standing context section for
+ * always_include atoms, and atom directory sections.
  *
  * @param {object} opts
  * @param {object[]|null} opts.rows — hot_state rows for recent sessions (may be null/empty)
  * @param {object[]} opts.projectAtoms — atom directory for current workspace (may be empty)
  * @param {object[]} opts.globalAtoms — atom directory for global scope (may be empty)
+ * @param {object[]} [opts.standingAtoms] — atoms with always_include=1; full content injected
  * @param {string} opts.agent — e.g. 'engineer'
  * @param {string} opts.project — full abs path (stored key)
  * @param {{ status:string, distance?:number }} opts.staleness
- * @param {number} [opts.cap] — max atoms per section (default 40)
+ * @param {number} [opts.cap] — max atoms per compact directory section (default 40)
  * @returns {string|null} — null when both rows and all atoms are empty
  */
-export function assemblePrimer({ rows, projectAtoms, globalAtoms, agent, project, staleness, cap = 40 }) {
+export function assemblePrimer({ rows, projectAtoms, globalAtoms, standingAtoms = [], agent, project, staleness, cap = 40 }) {
   const displayProject = lastTwoSegments(project);
   const hasRows = Array.isArray(rows) && rows.length > 0;
 
@@ -94,7 +102,28 @@ export function assemblePrimer({ rows, projectAtoms, globalAtoms, agent, project
     .filter((a) => !a.status || a.status === 'active');
   const activeGlobalAtoms = (Array.isArray(globalAtoms) ? globalAtoms : []).filter((a) => !a.status || a.status === 'active');
 
-  if (!hasRows && activeProjectAtoms.length === 0 && activeGlobalAtoms.length === 0) return null;
+  // Partition standing atoms into workspace and global buckets (already active-filtered by query).
+  // always_include atoms are excluded from the compact directory entirely.
+  // Sort by updated_at DESC so renderStandingBucket correctly selects the N most-recently-updated
+  // when slicing. This makes assemblePrimer correct regardless of caller-supplied input order.
+  const safeStanding = Array.isArray(standingAtoms) ? standingAtoms : [];
+  const sortedStanding = safeStanding.slice().sort((a, b) => (b.updated_at ?? 0) - (a.updated_at ?? 0));
+  const standingTopics = new Set(sortedStanding.map((a) => `${a.scope}:${a.project ?? ''}:${a.topic}`));
+
+  const compactProjectAtoms = activeProjectAtoms.filter(
+    (a) => !standingTopics.has(`${a.scope}:${a.project ?? ''}:${a.topic}`)
+  );
+  const compactGlobalAtoms = activeGlobalAtoms.filter(
+    (a) => !standingTopics.has(`${a.scope}:${a.project ?? ''}:${a.topic}`)
+  );
+
+  // Split standing atoms into workspace vs global for section ordering (workspace first).
+  const standingWorkspace = sortedStanding.filter((a) => a.scope !== 'global');
+  const standingGlobal = sortedStanding.filter((a) => a.scope === 'global');
+
+  const hasStanding = sortedStanding.length > 0;
+
+  if (!hasRows && compactProjectAtoms.length === 0 && compactGlobalAtoms.length === 0 && !hasStanding) return null;
 
   const now = Date.now();
   const stalenessLine = renderStaleness(staleness);
@@ -129,14 +158,71 @@ export function assemblePrimer({ rows, projectAtoms, globalAtoms, agent, project
     }
   }
 
+  // ── Standing context (always_include atoms) ─────────────────────────────────
+  if (hasStanding) {
+    lines.push('### Standing context');
+    lines.push('');
+
+    /**
+     * Render at most MAX_STANDING_ATOMS from a bucket.
+     * Bucket is ordered by updated_at DESC from the query.
+     * Take the N most recent, then re-sort those N alphabetically for stable output.
+     * Returns the overflow count (0 when all fit).
+     */
+    function renderStandingBucket(bucket) {
+      // Select the N most recently updated atoms (first N in updated_at DESC order).
+      const topN = bucket.slice(0, MAX_STANDING_ATOMS);
+      // Re-sort the visible slice alphabetically by topic for stable render order.
+      const visible = topN.slice().sort((a, b) => a.topic.localeCompare(b.topic));
+      const overflow = bucket.length - topN.length;
+      for (const atom of visible) {
+        const relTime = atom.updated_at ? formatRelativeTime(atom.updated_at, now) : '';
+        lines.push(`#### ${atom.topic} [${relTime}]`);
+        lines.push(`*"${atom.description}"*`);
+        lines.push('');
+        lines.push(atom.content);
+        lines.push('');
+      }
+      return overflow;
+    }
+
+    if (standingWorkspace.length > 0) {
+      const overflow = renderStandingBucket(standingWorkspace);
+      if (overflow > 0) {
+        const extras = standingWorkspace
+          .slice(MAX_STANDING_ATOMS)
+          .slice()
+          .sort((a, b) => a.topic.localeCompare(b.topic))
+          .map((a) => a.topic)
+          .join(', ');
+        lines.push(`(+${overflow} more standing atom${overflow === 1 ? '' : 's'} exceed the 5-per-scope cap — fetch with memory_atom_get: ${extras})`);
+        lines.push('');
+      }
+    }
+
+    if (standingGlobal.length > 0) {
+      const overflow = renderStandingBucket(standingGlobal);
+      if (overflow > 0) {
+        const extras = standingGlobal
+          .slice(MAX_STANDING_ATOMS)
+          .slice()
+          .sort((a, b) => a.topic.localeCompare(b.topic))
+          .map((a) => a.topic)
+          .join(', ');
+        lines.push(`(+${overflow} more standing atom${overflow === 1 ? '' : 's'} exceed the 5-per-scope cap — fetch with memory_atom_get: ${extras})`);
+        lines.push('');
+      }
+    }
+  }
+
   // ── Project atom directory ──────────────────────────────────────────────────
   lines.push('### Project atoms — search: memory_atom_search · fetch: memory_atom_get');
   lines.push('');
-  if (activeProjectAtoms.length > 0) {
+  if (compactProjectAtoms.length > 0) {
     lines.push('Fetch atoms on demand when relevant — do not pre-fetch at session start.');
     lines.push('');
-    const pinnedProject = activeProjectAtoms.filter((a) => a.pinned).sort((a, b) => a.topic.localeCompare(b.topic));
-    const regularProject = activeProjectAtoms.filter((a) => !a.pinned);
+    const pinnedProject = compactProjectAtoms.filter((a) => a.pinned).sort((a, b) => a.topic.localeCompare(b.topic));
+    const regularProject = compactProjectAtoms.filter((a) => !a.pinned);
     const visibleProject = regularProject.slice(0, cap);
     for (const atom of pinnedProject) {
       lines.push(renderAtomLine(atom, now, { pinned: true }));
@@ -155,11 +241,11 @@ export function assemblePrimer({ rows, projectAtoms, globalAtoms, agent, project
   // ── Global atom directory ───────────────────────────────────────────────────
   lines.push('### Global atoms');
   lines.push('');
-  if (activeGlobalAtoms.length > 0) {
+  if (compactGlobalAtoms.length > 0) {
     lines.push('Fetch atoms on demand when relevant — do not pre-fetch at session start.');
     lines.push('');
-    const pinnedGlobal = activeGlobalAtoms.filter((a) => a.pinned).sort((a, b) => a.topic.localeCompare(b.topic));
-    const regularGlobal = activeGlobalAtoms.filter((a) => !a.pinned);
+    const pinnedGlobal = compactGlobalAtoms.filter((a) => a.pinned).sort((a, b) => a.topic.localeCompare(b.topic));
+    const regularGlobal = compactGlobalAtoms.filter((a) => !a.pinned);
     const visibleGlobal = regularGlobal.slice(0, cap);
     for (const atom of pinnedGlobal) {
       lines.push(renderAtomLine(atom, now, { pinned: true }));

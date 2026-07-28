@@ -84,6 +84,8 @@ You have persistent memory via the \`memory_atom_*\` and \`memory_state_*\` tool
 
 Prefer \`status="deprecated"\` or \`status="resolved"\` over \`memory_atom_delete\` — it preserves history. \`memory_atom_list\` and \`memory_atom_search\` exclude deprecated atoms by default.
 
+**Standing context** (\`always_include\`): set \`always_include: true\` on an atom to inject its **full content** into every session primer under \`### Standing context\` — the agent reads it without a \`memory_atom_get\` call. Use only for short (≤500-word) content that must be available before the user's first message: persistent project conventions, user preferences, or global coding rules. Do NOT mark long documents, spec files, or code samples as \`always_include\`. Limit: at most 5 always_include atoms per scope (workspace and global independently) are rendered; excess atoms are named in an overflow note. The \`always_include\` flag is INSERT-only on \`memory_atom_write\`; toggle it via \`memory_atom_patch\` with \`patch: { always_include: true/false }\`. Distinguish from \`pinned\`: \`pinned\` keeps the atom at the top of the compact directory listing (one line); \`always_include\` injects the full body and removes the atom from the compact directory entirely.
+
 **Hot-state** (\`memory_state_*\`) is managed automatically — it distils on session idle. Call \`memory_state_distil\` to force an immediate save when finishing a meaningful chunk of work.`;
 
 const MAX_IN_FLIGHT = 5000;
@@ -242,19 +244,22 @@ const AgentMemory = async ({ client, $ }) => {
       // Fetch atom directory: current workspace + global
       let projectAtoms = [];
       let globalAtoms = [];
+      let standingAtoms = [];
       try {
-        const [wOut, gOut] = await Promise.all([
+        const [wOut, gOut, sOut] = await Promise.all([
           spawnMemory($, ['atom-list', 'project', project]),
           spawnMemory($, ['atom-list', 'global', '']),
+          spawnMemory($, ['atom-list-full', 'project', project]),
         ]);
         projectAtoms = JSON.parse(wOut.trim());
         globalAtoms = JSON.parse(gOut.trim());
+        standingAtoms = JSON.parse(sOut.trim());
       } catch (err) {
         log(`inject: atom-list failed for ${sessionId}`, err);
       }
 
       // Cold start: no prior memory and no atoms → no primer
-      if (rows.length === 0 && projectAtoms.length === 0 && globalAtoms.length === 0) return;
+      if (rows.length === 0 && projectAtoms.length === 0 && globalAtoms.length === 0 && standingAtoms.length === 0) return;
 
       const storedSha = rows.length > 0 ? (rows[0].anchored_git_sha ?? null) : null;
       const staleness = await gitStaleness($, project, storedSha);
@@ -262,6 +267,7 @@ const AgentMemory = async ({ client, $ }) => {
         rows,
         projectAtoms,
         globalAtoms,
+        standingAtoms,
         agent,
         project,
         staleness,
@@ -270,7 +276,7 @@ const AgentMemory = async ({ client, $ }) => {
 
       if (primer) {
         primers.set(sessionId, primer);
-        log(`inject: primer ready for ${sessionId} (${rows.length} sessions, ${projectAtoms.length} workspace atoms, ${globalAtoms.length} global atoms)`);
+        log(`inject: primer ready for ${sessionId} (${rows.length} sessions, ${projectAtoms.length} workspace atoms, ${globalAtoms.length} global atoms, ${standingAtoms.length} standing)`);
       } else {
         log(`inject: cold start for ${sessionId} — no prior memory or atoms, no primer`);
       }
@@ -620,6 +626,9 @@ const AgentMemory = async ({ client, $ }) => {
       'Returns confirmation of whether the atom was created or an existing one was overwritten. ' +
       'Optional `pinned: true` marks the atom so it always appears at the top of the session primer regardless of the cap. ' +
       'Pin state is set on the first insert and is NOT overwritten by subsequent content updates — use memory_atom_patch to change the pin state of an existing atom. ' +
+      'Optional `always_include: true` injects the atom\'s full content into every session primer under ### Standing context — use only for short (≤500-word) content needed before the user\'s first message (project conventions, user preferences). ' +
+      'At most 5 always_include atoms per scope are rendered; excess are named in an overflow note. ' +
+      'always_include is INSERT-only: re-writing an existing atom does not change it — use memory_atom_patch to toggle it. ' +
       'Status is always `active` for new atoms and is preserved on re-write — use memory_atom_patch to change an atom\'s status.',
     args: {
       topic: tool.schema.string().describe('Hierarchical key, e.g. "arch/db-layer"'),
@@ -632,13 +641,18 @@ const AgentMemory = async ({ client, $ }) => {
         'Pinned atoms are listed first, before the regular capped list. ' +
         'Default false. INSERT-only: re-writing an existing atom does not change its pin state.'
       ),
+      always_include: tool.schema.boolean().optional().describe(
+        'Inject the atom\'s full content into the session primer Standing context section. ' +
+        'Use only for short (≤500-word) content needed before the user\'s first message. ' +
+        'INSERT-only: re-writing an existing atom does not change this flag — use memory_atom_patch to toggle it.'
+      ),
       created_at: tool.schema.union([tool.schema.string(), tool.schema.number()]).optional().describe(
         'Optional creation timestamp to preserve when migrating atoms. ' +
         'Accepts an ISO 8601 date string or an epoch-ms integer. ' +
         'When omitted, the current time is used.'
       ),
     },
-    async execute({ topic, content, description, tags, scope, pinned, created_at }, context) {
+    async execute({ topic, content, description, tags, scope, pinned, always_include, created_at }, context) {
       if (scope === 'all') {
         return { title: 'memory_atom_write', output: 'Error: scope="all" is not valid for write operations. Use "workspace" or "global".' };
       }
@@ -663,7 +677,8 @@ const AgentMemory = async ({ client, $ }) => {
 
       try {
         const out = await spawnMemory($, ['atom-write', resolvedScope, project],
-          { topic, content, description, tags, pinned, sessionId: context.sessionID,
+          { topic, content, description, tags, pinned, alwaysInclude: always_include,
+            sessionId: context.sessionID,
             sessionName: sessionNames.get(context.sessionID) ?? null,
             ...(createdAt !== undefined ? { createdAt } : {}) });
         const result = JSON.parse(out.trim());
@@ -881,8 +896,9 @@ const AgentMemory = async ({ client, $ }) => {
           const createdRel = r.created_at ? formatRelativeTime(r.created_at) : 'unknown';
           const updatedRel = r.updated_at ? formatRelativeTime(r.updated_at) : 'unknown';
           const pinnedPrefix = r.pinned ? '[pinned] ' : '';
+          const alwaysIncludePrefix = r.always_include ? '[always-include] ' : '';
           const statusPrefix = (r.status && r.status !== 'active') ? `[${r.status}] ` : '';
-          return `• ${pinnedPrefix}${statusPrefix}[${r.scope}/${r.project || 'global'}] ${r.topic} — ${r.description} | ${r.preview || ''} [created: ${createdRel}, updated: ${updatedRel}]`;
+          return `• ${pinnedPrefix}${alwaysIncludePrefix}${statusPrefix}[${r.scope}/${r.project || 'global'}] ${r.topic} — ${r.description} | ${r.preview || ''} [created: ${createdRel}, updated: ${updatedRel}]`;
         });
         return { title: 'memory_atom_list', output: lines.join('\n') };
       } catch (err) {
@@ -899,13 +915,14 @@ const AgentMemory = async ({ client, $ }) => {
    */
   const memory_atom_patch = tool({
     description:
-      'Patch atom metadata (description, tags, created_at) without rewriting its content. ' +
+      'Patch atom metadata (description, tags, created_at, pinned, always_include, status) without rewriting its content. ' +
       'Supply a `patch` object containing the fields to change; absent fields are left unchanged. ' +
       'At least one field inside `patch` must be present. ' +
       'To CLEAR tags, supply `tags: []` explicitly inside `patch` — omitting `tags` leaves existing tags unchanged. ' +
       '`patch.created_at` accepts an ISO 8601 date string or an epoch-ms number. ' +
       'A created_at-only patch does NOT update the atom\'s updated_at timestamp. ' +
       '`patch.pinned` pins or unpins the atom; pinned atoms always appear at the top of the session primer. ' +
+      '`patch.always_include` toggles full-content injection into the session primer Standing context section. ' +
       '`patch.status` changes the atom\'s lifecycle visibility: "active" (default, all surfaces), ' +
       '"resolved" (hidden from primer; visible in list/search by default), or ' +
       '"deprecated" (hidden from all surfaces by default; retrieve with includeDeprecated: true). ' +
@@ -925,6 +942,9 @@ const AgentMemory = async ({ client, $ }) => {
         pinned: tool.schema.boolean().optional().describe(
           'Pin or unpin the atom. Pinned atoms appear at the top of the session primer, before the regular capped list.'
         ),
+        always_include: tool.schema.boolean().optional().describe(
+          'Toggle full-content injection into the session primer Standing context section.'
+        ),
         status: tool.schema.string().optional().describe(
           'Atom lifecycle status. One of: "active" (default, all surfaces), ' +
           '"resolved" (hidden from primer; visible in list/search by default), ' +
@@ -939,15 +959,15 @@ const AgentMemory = async ({ client, $ }) => {
         return { title: 'memory_atom_patch', output: 'Error: scope="all" is not valid for patch operations. Use "workspace" or "global".' };
       }
 
-      const { description, tags, created_at, pinned, status } = patch;
+      const { description, tags, created_at, pinned, always_include, status } = patch;
 
       // tool.schema (Zod) .optional() produces T | undefined — null is rejected at
       // schema validation before execute is called, so `!== undefined` is sufficient
       // to distinguish "caller supplied tags: []" (clear) from "caller omitted tags" (keep).
-      const PATCHABLE = ['description', 'tags', 'created_at', 'pinned', 'status'];
+      const PATCHABLE = ['description', 'tags', 'created_at', 'pinned', 'always_include', 'status'];
       const present = PATCHABLE.filter((f) => patch[f] !== undefined);
       if (present.length === 0) {
-        return { title: 'memory_atom_patch', output: 'Error: at least one of description, tags, created_at, pinned, status is required in `patch`.' };
+        return { title: 'memory_atom_patch', output: 'Error: at least one of description, tags, created_at, pinned, always_include, status is required in `patch`.' };
       }
 
       // Validate status enum at the tool layer (before passing to CLI)
@@ -987,6 +1007,7 @@ const AgentMemory = async ({ client, $ }) => {
       if (tags !== undefined) patchPayload.tags = tags;
       if (normCreatedAt !== undefined) patchPayload.created_at = normCreatedAt;
       if (pinned !== undefined) patchPayload.pinned = pinned;
+      if (always_include !== undefined) patchPayload.always_include = always_include;
       if (status !== undefined) patchPayload.status = status;
 
       try {
