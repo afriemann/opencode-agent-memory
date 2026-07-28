@@ -400,6 +400,30 @@ export function pruneHotState(db, agent, project) {
 // ── Atom DB helpers ───────────────────────────────────────────────────────────
 
 /**
+ * Query hot_state rows for projects other than currentProject active since sinceMs.
+ * Returns one row per distinct project with the agent and updated_at of the most
+ * recent activity in that project. Ordered by updated_at DESC (most recently active first).
+ *
+ * SQLite guarantees that when a non-aggregate column (agent) is selected alongside
+ * MAX(updated_at) in the same GROUP BY query, the non-aggregate value comes from
+ * the row that holds the maximum value.
+ *
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @param {string} currentProject — the current session's project path (excluded)
+ * @param {number} sinceMs — epoch ms lower bound (inclusive)
+ * @returns {Array<{ project: string, agent: string, updated_at: number }>}
+ */
+export function hotStateCrossProject(db, currentProject, sinceMs) {
+  return db.prepare(`
+    SELECT project, agent, MAX(updated_at) AS updated_at
+    FROM hot_state
+    WHERE project != ? AND updated_at >= ?
+    GROUP BY project
+    ORDER BY updated_at DESC
+  `).all(currentProject, sinceMs);
+}
+
+/**
  * Write (upsert) a memory atom.
  *
  * @param {import('node:sqlite').DatabaseSync} db

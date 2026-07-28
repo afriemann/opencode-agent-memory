@@ -59,10 +59,14 @@ export async function gitStaleness($, project, storedSha) {
 }
 
 /**
- * Render a staleness result as one of the three exact primer phrases.
+ * Render a staleness result as a human-readable primer phrase, or null when
+ * the staleness line should be omitted entirely.
  *
- * @param {{ status: string, distance?: number }} staleness
- * @returns {string}
+ * Returns null for `no-git` (project is not a git repo — omit the line).
+ * Returns a string for all other statuses.
+ *
+ * @param {{ status: string, distance?: number }|null|undefined} staleness
+ * @returns {string|null}
  */
 export function renderStaleness(staleness) {
   if (!staleness) return 'git anchor unavailable';
@@ -73,8 +77,9 @@ export function renderStaleness(staleness) {
       return `${n} commit(s) since this note`;
     }
     case 'no-anchor':
+      return 'not yet anchored to a commit';
     case 'no-git':
-      return 'git anchor unavailable';
+      return null;
     case 'diverged':
     default:
       return 'history diverged from this note\'s anchor';

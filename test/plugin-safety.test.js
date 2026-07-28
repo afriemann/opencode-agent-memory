@@ -691,13 +691,18 @@ describe('assemblePrimer (smoke — new options-object API)', () => {
   test('staleness line appears with the exact phrasing from renderStaleness', () => {
     for (const staleness of [
       { status: 'ok', distance: 3 },
-      { status: 'no-git' },
       { status: 'diverged' },
       { status: 'no-anchor' },
     ]) {
       const result = assemblePrimer({ ...BASE_OPTS, staleness });
       expect(result).toContain(`Staleness: ${renderStaleness(staleness)}`);
     }
+  });
+
+  // spec: openspec/changes/primer-ux-improvements/specs/signal-processing/spec.md
+  test('no-git staleness omits the staleness line entirely', () => {
+    const result = assemblePrimer({ ...BASE_OPTS, staleness: { status: 'no-git' } });
+    expect(result).not.toContain('Staleness:');
   });
 
   test('passive closing line present; no ADR or teach-back', () => {

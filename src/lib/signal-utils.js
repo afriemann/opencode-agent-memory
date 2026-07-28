@@ -83,13 +83,15 @@ function renderAtomLine(atom, now, { pinned = false } = {}) {
  * @param {object[]} opts.projectAtoms — atom directory for current workspace (may be empty)
  * @param {object[]} opts.globalAtoms — atom directory for global scope (may be empty)
  * @param {object[]} [opts.standingAtoms] — atoms with always_include=1; full content injected
+ * @param {object[]} [opts.crossProjectRows] — other projects active in last 24h (may be empty)
  * @param {string} opts.agent — e.g. 'engineer'
  * @param {string} opts.project — full abs path (stored key)
+ * @param {string|null} [opts.homeDir] — home directory for relative-path rendering (e.g. '/home/user')
  * @param {{ status:string, distance?:number }} opts.staleness
  * @param {number} [opts.cap] — max atoms per compact directory section (default 40)
  * @returns {string|null} — null when both rows and all atoms are empty
  */
-export function assemblePrimer({ rows, projectAtoms, globalAtoms, standingAtoms = [], agent, project, staleness, cap = 40 }) {
+export function assemblePrimer({ rows, projectAtoms, globalAtoms, standingAtoms = [], crossProjectRows = [], agent, project, homeDir = null, staleness, cap = 40 }) {
   const displayProject = lastTwoSegments(project);
   const hasRows = Array.isArray(rows) && rows.length > 0;
 
@@ -122,8 +124,9 @@ export function assemblePrimer({ rows, projectAtoms, globalAtoms, standingAtoms 
   const standingGlobal = sortedStanding.filter((a) => a.scope === 'global');
 
   const hasStanding = sortedStanding.length > 0;
+  const hasCrossProject = Array.isArray(crossProjectRows) && crossProjectRows.length > 0;
 
-  if (!hasRows && compactProjectAtoms.length === 0 && compactGlobalAtoms.length === 0 && !hasStanding) return null;
+  if (!hasRows && compactProjectAtoms.length === 0 && compactGlobalAtoms.length === 0 && !hasStanding && !hasCrossProject) return null;
 
   const now = Date.now();
   const stalenessLine = renderStaleness(staleness);
@@ -140,7 +143,7 @@ export function assemblePrimer({ rows, projectAtoms, globalAtoms, standingAtoms 
     lines.push('### Recent sessions');
     lines.push('');
     for (const row of rows) {
-      const label = row.session_name || (row.session_id ? row.session_id.slice(0, 8) : 'unknown');
+      const label = row.session_name || (row.session_id ? row.session_id.slice(0, 8) : (row.updated_at ? formatRelativeTime(row.updated_at, now) : ''));
       const relTime = row.updated_at ? formatRelativeTime(row.updated_at, now) : '';
       const summary = row.last_worked_summary ?? '';
       const nextAction = row.next_action ?? '';
@@ -156,6 +159,21 @@ export function assemblePrimer({ rows, projectAtoms, globalAtoms, standingAtoms 
       }
       lines.push('');
     }
+  }
+
+  // ── Active projects today (cross-project hot_state) ─────────────────────────
+  if (hasCrossProject) {
+    lines.push('### Active projects today');
+    lines.push('');
+    for (const row of crossProjectRows) {
+      const relPath = homeDir && row.project && row.project.startsWith(homeDir)
+        ? '~' + row.project.slice(homeDir.length)
+        : (row.project || '');
+      const relTime = row.updated_at ? formatRelativeTime(row.updated_at, now) : '';
+      const agentLabel = row.agent ? ` — ${row.agent}` : '';
+      lines.push(`- ${relPath}${agentLabel} [${relTime}]`);
+    }
+    lines.push('');
   }
 
   // ── Standing context (always_include atoms) ─────────────────────────────────
@@ -261,7 +279,9 @@ export function assemblePrimer({ rows, projectAtoms, globalAtoms, standingAtoms 
   }
   lines.push('');
 
-  lines.push(`Staleness: ${stalenessLine}`);
+  if (stalenessLine !== null) {
+    lines.push(`Staleness: ${stalenessLine}`);
+  }
 
   return lines.join('\n');
 }
