@@ -38,8 +38,8 @@ describe('DISTIL_SCHEMA', () => {
 // ── EMPTY_RECORD ──────────────────────────────────────────────────────────────
 
 describe('EMPTY_RECORD', () => {
-  test('has three keys with empty values — no adr_candidate', () => {
-    expect(EMPTY_RECORD.last_worked_summary).toBe('');
+  test('has three keys — last_worked_summary is non-empty minimal note, no adr_candidate', () => {
+    expect(EMPTY_RECORD.last_worked_summary).toBe('No meaningful activity.');
     expect(EMPTY_RECORD.next_action).toBe('');
     expect(EMPTY_RECORD.open_questions).toEqual([]);
     expect(EMPTY_RECORD).not.toHaveProperty('adr_candidate');

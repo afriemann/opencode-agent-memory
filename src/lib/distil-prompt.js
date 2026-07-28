@@ -22,10 +22,11 @@ export const DISTIL_SCHEMA = {
 };
 
 /**
- * The empty record returned when there is no prior state and no signals.
+ * The minimal record returned when there is no prior state and no signals.
+ * last_worked_summary is never empty — "No meaningful activity." is the floor.
  */
 export const EMPTY_RECORD = {
-  last_worked_summary: '',
+  last_worked_summary: 'No meaningful activity.',
   next_action: '',
   open_questions: [],
 };
