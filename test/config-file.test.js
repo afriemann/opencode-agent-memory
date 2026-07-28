@@ -533,3 +533,54 @@ describe('resolveConfig — atomInjectCap', () => {
     warnSpy.mockRestore();
   });
 });
+
+// ── 8.20 agentSignalChars ─────────────────────────────────────────────────────
+
+describe('resolveConfig — agentSignalChars', () => {
+  test('uses file value when set to valid positive integer', () => {
+    const cfg = resolveConfig({}, { agentSignalChars: 800 });
+    expect(cfg.agentSignalChars).toBe(800);
+  });
+
+  test('defaults to 1500 when neither env nor file set', () => {
+    const cfg = resolveConfig({}, {});
+    expect(cfg.agentSignalChars).toBe(1500);
+  });
+
+  test('env var MEMORY_AGENT_SIGNAL_CHARS overrides file value', () => {
+    const cfg = resolveConfig({ MEMORY_AGENT_SIGNAL_CHARS: '2000' }, { agentSignalChars: 800 });
+    expect(cfg.agentSignalChars).toBe(2000);
+  });
+
+  test('warns and falls back to 1500 for non-integer file value', () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const cfg = resolveConfig({}, { agentSignalChars: 'lots' });
+    expect(cfg.agentSignalChars).toBe(1500);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('[agent-memory]'));
+    warnSpy.mockRestore();
+  });
+
+  test('warns and falls back to 1500 for zero value', () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const cfg = resolveConfig({}, { agentSignalChars: 0 });
+    expect(cfg.agentSignalChars).toBe(1500);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('[agent-memory]'));
+    warnSpy.mockRestore();
+  });
+
+  test('warns and falls back to 1500 for negative value', () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const cfg = resolveConfig({}, { agentSignalChars: -100 });
+    expect(cfg.agentSignalChars).toBe(1500);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('[agent-memory]'));
+    warnSpy.mockRestore();
+  });
+
+  test('warns and falls back to 1500 for invalid env var', () => {
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const cfg = resolveConfig({ MEMORY_AGENT_SIGNAL_CHARS: 'bad' }, {});
+    expect(cfg.agentSignalChars).toBe(1500);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('[agent-memory]'));
+    warnSpy.mockRestore();
+  });
+});

@@ -3136,8 +3136,8 @@ describe('agent message signal capture', () => {
     expect(accrueCalls).toHaveLength(0);
   });
 
-  test('assistant message is truncated to 400 chars when stored', async () => {
-    const longMsg = 'A'.repeat(600); // 600 chars — exceeds 400 limit
+  test('assistant message is truncated to 1500 chars when stored', async () => {
+    const longMsg = 'A'.repeat(2000); // 2000 chars — exceeds 1500 limit
 
     const $ = makeMockShell({ read: COLD_READ });
     const plugin = await AgentMemory({ client: makeMockClient(), $ });
@@ -3156,10 +3156,10 @@ describe('agent message signal capture', () => {
 
     const accrueCall = $.calls.find((c) => c.includes('accrue'));
     if (accrueCall) {
-      // The JSON payload embedded in the accrue call must not contain more than 400
+      // The JSON payload embedded in the accrue call must not contain more than 1500
       // consecutive A chars (i.e. the payload was truncated)
-      expect(accrueCall).not.toContain('A'.repeat(401));
-      expect(accrueCall).toContain('A'.repeat(400));
+      expect(accrueCall).not.toContain('A'.repeat(1501));
+      expect(accrueCall).toContain('A'.repeat(1500));
     }
     // If accrue was not called, the test is inconclusive — but the short-capture
     // path tests above confirm the mechanism works.

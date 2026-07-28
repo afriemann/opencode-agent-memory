@@ -95,7 +95,8 @@ export function loadConfigFile(configPath = CONFIG_FILE_PATH) {
  *   targetAgents: string[],
  *   distilMinIntervalMs: number,
  *   distillerModel: { providerID: string, modelID: string },
- *   atomInjectCap: number
+ *   atomInjectCap: number,
+ *   agentSignalChars: number
  * }}
  */
 export function resolveConfig(env, fileCfg) {
@@ -180,5 +181,29 @@ export function resolveConfig(env, fileCfg) {
     }
   }
 
-  return { targetAgents, distilMinIntervalMs, distillerModel, atomInjectCap };
+  // ── agentSignalChars ──────────────────────────────────────────────────────
+  let agentSignalChars = 1500;
+  if (env.MEMORY_AGENT_SIGNAL_CHARS !== undefined) {
+    const v = Number(env.MEMORY_AGENT_SIGNAL_CHARS);
+    if (Number.isInteger(v) && v > 0) {
+      agentSignalChars = v;
+    } else {
+      console.warn(
+        '[agent-memory] env var "MEMORY_AGENT_SIGNAL_CHARS" must be a positive integer; using default 1500'
+      );
+    }
+  } else if (fileCfg.agentSignalChars !== undefined) {
+    const v = Number(fileCfg.agentSignalChars);
+    if (Number.isInteger(v) && v > 0) {
+      agentSignalChars = v;
+    } else {
+      console.warn(
+        '[agent-memory] config key "agentSignalChars" must be a positive integer; using default 1500'
+      );
+    }
+  }
+
+  return { targetAgents, distilMinIntervalMs, distillerModel, atomInjectCap, agentSignalChars };
 }
+
+

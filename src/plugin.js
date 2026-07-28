@@ -113,7 +113,7 @@ function makeBuffer() {
     files: new Set(),    // Set<string> — file paths
     todos: [],           // Array<string> — each is JSON.stringify(Todo[])
     messages: [],        // Array<string> — D1-qualifying message text (≤200 chars)
-    agentMessages: [],   // Array<string> — substantive assistant turns (≤400 chars)
+    agentMessages: [],   // Array<string> — substantive assistant turns (≤agentSignalChars)
   };
 }
 
@@ -167,6 +167,7 @@ const AgentMemory = async ({ client, $ }) => {
     distilMinIntervalMs: DISTIL_MIN_INTERVAL_MS,
     distillerModel: DISTILLER_MODEL,
     atomInjectCap: ATOM_INJECT_CAP,
+    agentSignalChars: AGENT_SIGNAL_CHARS,
   } = resolveConfig(process.env, _fileCfg);
   const TARGET_AGENTS = new Set(targetAgents);
 
@@ -1243,7 +1244,7 @@ const AgentMemory = async ({ client, $ }) => {
                     : '';
               if (body && body.length >= 50) {
                 if (!buffers.has(sessionId)) buffers.set(sessionId, makeBuffer());
-                buffers.get(sessionId).agentMessages.push(body.slice(0, 400));
+                buffers.get(sessionId).agentMessages.push(body.slice(0, AGENT_SIGNAL_CHARS));
               }
             }
 
