@@ -131,21 +131,21 @@ The `memory_atom_write` and `memory_atom_append` tools SHALL capture `session_id
 - **THEN** the stored atom has session_name=null and no error is raised
 
 ### Requirement: memory_atom_patch tool performs content-preserving metadata updates
-The `memory_atom_patch` registered tool SHALL invoke the `atom-patch` CLI subcommand to update one or more of `description`, `tags`, `created_at`, `pinned`, and `status` for an existing atom without modifying its content. At least one of the five patchable fields MUST be supplied; an empty call SHALL be rejected with a clear error result. Setting `tags: []` SHALL clear existing tags; omitting `tags` SHALL leave existing tags unchanged. Omitting `pinned` SHALL leave the existing pin state unchanged; supplying `pinned: false` SHALL unpin the atom. Omitting `status` SHALL leave the existing status unchanged. The `status` field SHALL be a Zod enum accepting only `'active'`, `'resolved'`, or `'deprecated'`; other values SHALL be rejected at the schema layer with a descriptive error before the CLI is invoked. The `created_at` argument SHALL accept either an ISO 8601 date string or an epoch-ms number and be normalised to an epoch-ms integer in the plugin before the CLI is invoked. A `created_at`-only patch SHALL NOT modify the atom's `updated_at` timestamp; a patch that includes `description`, `tags`, `pinned`, or `status` SHALL bump `updated_at`. An empty `description` after trimming SHALL be rejected with an error result. `scope="all"` SHALL be rejected. The optional `workspace` argument (a directory path) SHALL substitute the effective directory for scope resolution, mirroring `memory_atom_get`. On success the tool SHALL return a confirmation message naming the topic and the changed fields. It SHALL NOT propagate exceptions into the host.
+The `memory_atom_patch` registered tool SHALL invoke the `atom-patch` CLI subcommand to update one or more of `description`, `tags`, `created_at`, `pinned`, and `status` for an existing atom without modifying its content. The five patchable fields SHALL be supplied inside a required `patch` sub-object; the lookup keys `topic`, `scope`, and `workspace` remain top-level arguments. At least one field inside `patch` MUST be present; an empty `patch` object (no fields supplied) SHALL be rejected with a clear error result. Setting `patch.tags: []` SHALL clear existing tags; omitting `patch.tags` SHALL leave existing tags unchanged. Omitting `patch.pinned` SHALL leave the existing pin state unchanged; supplying `patch.pinned: false` SHALL unpin the atom. Omitting `patch.status` SHALL leave the existing status unchanged. The `patch.status` field SHALL be a Zod enum accepting only `'active'`, `'resolved'`, or `'deprecated'`; other values SHALL be rejected at the schema layer with a descriptive error before the CLI is invoked. `patch.created_at` SHALL accept either an ISO 8601 date string or an epoch-ms number and be normalised to an epoch-ms integer in the plugin before the CLI is invoked. A `created_at`-only patch SHALL NOT modify the atom's `updated_at` timestamp; a patch that includes `description`, `tags`, `pinned`, or `status` SHALL bump `updated_at`. An empty `patch.description` after trimming SHALL be rejected with an error result. `scope="all"` SHALL be rejected. The optional `workspace` argument (a directory path) SHALL substitute the effective directory for scope resolution, mirroring `memory_atom_get`. On success the tool SHALL return a confirmation message naming the topic and the changed fields. It SHALL NOT propagate exceptions into the host.
 
 #### Scenario: Tool patches status to resolved and bumps updated_at
 - **GIVEN** an atom exists at topic 'work/notes' with `status='active'` and known `updated_at`
-- **WHEN** the agent calls memory_atom_patch with `{status: 'resolved'}`
+- **WHEN** the agent calls memory_atom_patch with `patch={status: 'resolved'}`
 - **THEN** the tool returns a success message containing 'work/notes' and 'status', and `updated_at` is bumped
 
 #### Scenario: Tool rejects invalid status value at the schema layer
 - **GIVEN** an atom exists at topic 'work/notes'
-- **WHEN** the agent calls memory_atom_patch with `{status: 'invalid'}`
+- **WHEN** the agent calls memory_atom_patch with `patch={status: 'invalid'}`
 - **THEN** the tool returns an error result indicating the value must be one of the allowed enum values and does not invoke the CLI
 
 #### Scenario: Tool leaves status unchanged when status is omitted
 - **GIVEN** an atom exists at topic 'work/notes' with `status='resolved'`
-- **WHEN** the agent calls memory_atom_patch with only `{description: 'updated'}`
+- **WHEN** the agent calls memory_atom_patch with only `patch={description: 'updated'}`
 - **THEN** the atom's `status` remains `'resolved'`
 
 ### Requirement: MEMORY_PROTOCOL teaches agents status lifecycle semantics
