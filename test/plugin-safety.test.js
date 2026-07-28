@@ -928,22 +928,23 @@ describe('doDistil force parameter — throttle regression', () => {
 
 // ── Plugin tool hook tests (task 8.20) ────────────────────────────────────────
 
-const TEN_TOOLS = [
+const ALL_TOOLS = [
   'memory_state_inspect', 'memory_state_patch', 'memory_state_distil',
+  'memory_state_delete',
   'memory_atom_write', 'memory_atom_append', 'memory_atom_get',
   'memory_atom_search', 'memory_atom_list', 'memory_atom_delete',
   'memory_atom_patch',
 ];
 
 describe('plugin tool hook — factory returns tool map', () => {
-  test('AgentMemory factory returns exactly ten tools', async () => {
+  test('AgentMemory factory returns exactly eleven tools', async () => {
     const $ = makeMockShell({});
     const plugin = await AgentMemory({ client: makeMockClient(), $ });
 
     expect(plugin).toHaveProperty('event');
     expect(plugin).toHaveProperty('tool');
-    expect(Object.keys(plugin.tool)).toHaveLength(10);
-    for (const name of TEN_TOOLS) {
+    expect(Object.keys(plugin.tool)).toHaveLength(11);
+    for (const name of ALL_TOOLS) {
       expect(plugin.tool).toHaveProperty(name);
     }
   });
@@ -961,7 +962,7 @@ describe('plugin tool hook — factory returns tool map', () => {
     const $ = makeMockShell({});
     const plugin = await AgentMemory({ client: makeMockClient(), $ });
 
-    for (const name of TEN_TOOLS) {
+    for (const name of ALL_TOOLS) {
       const t = plugin.tool[name];
       expect(typeof t.description).toBe('string');
       expect(t.description.length).toBeGreaterThan(0);
@@ -1331,6 +1332,39 @@ describe('memory_distil_force tool execute', () => {
     await expect(
       plugin.tool.memory_state_distil.execute({}, ctx)
     ).resolves.toBeDefined();
+  });
+});
+
+// ── memory_state_delete tool execute ─────────────────────────────────────────
+// spec: openspec/changes/hot-state-session-delete/specs/hot-state-session-delete/spec.md
+
+describe('memory_state_delete tool execute', () => {
+  function makeContext(sessionID = 'ses_current') {
+    return { sessionID, agentID: 'engineer', workspaceID: '/home/user/repo' };
+  }
+
+  test('rejects deletion of the calling session own row', async () => {
+    const $ = makeMockShell({});
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const ctx = makeContext('ses_current');
+
+    const result = await plugin.tool.memory_state_delete.execute({ sessionId: 'ses_current' }, ctx);
+    expect(result.output).toContain('Cannot delete');
+  });
+
+  test('passes sessionId to hot-state-delete CLI and returns result', async () => {
+    const $ = makeMockShell({
+      'hot-state-delete': JSON.stringify({ deleted: 1 }),
+    });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const ctx = { sessionID: 'ses_caller', agentID: 'engineer', directory: '/home/user/repo' };
+
+    const result = await plugin.tool.memory_state_delete.execute({ sessionId: 'ses_other' }, ctx);
+    expect(result.output).toContain('deleted');
+    // Verify the CLI call included both the project path and the sessionId.
+    const lastCall = $.calls[$.calls.length - 1];
+    expect(lastCall).toContain('/home/user/repo');
+    expect(lastCall).toContain('ses_other');
   });
 });
 

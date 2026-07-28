@@ -75,6 +75,7 @@ import {
   atomListFull,
   atomDelete,
   hotStateCrossProject,
+  hotStateDelete,
 } from './lib/schema.js';
 import { readDistilWatermark, advanceDistilWatermark } from './lib/watermark.js';
 import { EMPTY_RECORD } from './lib/distil-prompt.js';
@@ -648,6 +649,17 @@ function cmdHotStateCrossProject(currentProject, sinceMs) {
   process.stdout.write(JSON.stringify(rows) + '\n');
 }
 
+function cmdHotStateDelete(project, sessionId) {
+  if (project == null || sessionId == null) {
+    process.stderr.write('Usage: memory.js hot-state-delete <project> <sessionId>\n');
+    process.exit(1);
+  }
+  const db = openAndInit();
+  const result = hotStateDelete(db, project, sessionId);
+  db.close();
+  process.stdout.write(JSON.stringify(result) + '\n');
+}
+
 // ── Dispatch ────────────────────────────────────────────────────────────────
 
 const [,, cmd, ...rest] = process.argv;
@@ -802,9 +814,15 @@ switch (cmd) {
     break;
   }
 
+  case 'hot-state-delete': {
+    const [project, sessionId] = rest;
+    cmdHotStateDelete(project, sessionId);
+    break;
+  }
+
   default:
     process.stderr.write(
-      `Usage: memory.js <init|accrue|read|inspect|distil-write|correct|prune|atom-write|atom-append|atom-get|atom-search|atom-list|atom-list-full|atom-delete|atom-patch|hot-state-cross-project> [args]\n`
+      `Usage: memory.js <init|accrue|read|inspect|distil-write|correct|prune|atom-write|atom-append|atom-get|atom-search|atom-list|atom-list-full|atom-delete|atom-patch|hot-state-cross-project|hot-state-delete> [args]\n`
     );
     process.exit(1);
 }

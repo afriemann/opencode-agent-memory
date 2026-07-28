@@ -865,6 +865,60 @@ describe('assemblePrimer — session label fallback', () => {
   });
 });
 
+// ── assemblePrimer — session_id bracket in thread header ──────────────────────
+// spec: openspec/changes/hot-state-session-delete/specs/signal-processing/spec.md
+
+describe('assemblePrimer — session_id bracket in thread header', () => {
+  const PROJECT = '/home/user/repos/project';
+  const STALENESS = { status: 'ok', distance: 0 };
+
+  test('row with non-empty session_id shows full session_id in bracket', () => {
+    const row = {
+      session_id: 'ses_abc123fullid',
+      session_name: null,
+      last_worked_summary: 'did work',
+      next_action: '',
+      open_questions: [],
+      updated_at: Date.now() - 60_000,
+    };
+    const result = assemblePrimer({ rows: [row], projectAtoms: [], globalAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    expect(result).not.toBeNull();
+    const headerLine = result.split('\n').find((l) => l.startsWith('▸'));
+    expect(headerLine).toBeDefined();
+    expect(headerLine).toContain('[ses_abc123fullid]');
+  });
+
+  test('row with empty session_id omits bracket from header line', () => {
+    const row = {
+      session_id: '',
+      session_name: null,
+      last_worked_summary: 'did work',
+      next_action: '',
+      open_questions: [],
+      updated_at: Date.now() - 60_000,
+    };
+    const result = assemblePrimer({ rows: [row], projectAtoms: [], globalAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    expect(result).not.toBeNull();
+    const headerLine = result.split('\n').find((l) => l.startsWith('▸'));
+    expect(headerLine).toBeDefined();
+    expect(headerLine).not.toContain('[');
+  });
+
+  test('row with null session_id omits bracket from header line', () => {
+    const row = {
+      session_id: null,
+      session_name: 'Named Session',
+      last_worked_summary: 'did work',
+      next_action: '',
+      open_questions: [],
+      updated_at: Date.now() - 60_000,
+    };
+    const result = assemblePrimer({ rows: [row], projectAtoms: [], globalAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    const headerLine = result.split('\n').find((l) => l.startsWith('▸'));
+    expect(headerLine).not.toContain('[');
+  });
+});
+
 // ── assemblePrimer — staleness improvements (primer-ux-improvements) ──────────
 // spec: openspec/changes/primer-ux-improvements/specs/signal-processing/spec.md
 

@@ -154,7 +154,8 @@ export function assemblePrimer({ rows, projectAtoms, globalAtoms, standingAtoms 
         ? row.open_questions
         : [];
 
-      lines.push(`▸ ${label} — ${relTime}`);
+      const sessionIdBracket = row.session_id ? ` [${row.session_id}]` : '';
+      lines.push(`▸ ${label} — ${relTime}${sessionIdBracket}`);
       const hasContent = summary || nextAction || questions.length > 0;
       if (!hasContent) {
         lines.push('  ⚠ Distillation error — no summary recorded');

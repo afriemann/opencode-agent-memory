@@ -631,6 +631,44 @@ const AgentMemory = async ({ client, $ }) => {
   });
 
   /**
+   * memory_state_delete — delete a hot_state session row by session_id.
+   */
+  const memory_state_delete = tool({
+    description:
+      'Delete a hot_state session row by session_id. ' +
+      'Pass the full session_id visible in the primer\'s Recent sessions section. ' +
+      'Pass an empty string "" to delete all orphaned rows (session_id IS NULL or empty) for the current project. ' +
+      'Cannot delete the calling session\'s own row. ' +
+      'Returns { deleted: N } — count of rows removed.',
+    args: {
+      sessionId: {
+        type: 'string',
+        description: 'The session_id of the row to delete, or "" to delete all nameless rows.',
+      },
+    },
+    async execute({ sessionId }, context) {
+      if (sessionId === context.sessionID) {
+        return {
+          title: 'memory_state_delete',
+          output: 'Cannot delete the calling session\'s own row.',
+        };
+      }
+      try {
+        const out = await spawnMemory($, ['hot-state-delete', context.directory, sessionId ?? '']);
+        return {
+          title: 'memory_state_delete',
+          output: out.trim(),
+        };
+      } catch (err) {
+        return {
+          title: 'memory_state_delete',
+          output: `Error: ${err && err.message ? err.message : String(err)}`,
+        };
+      }
+    },
+  });
+
+  /**
    * memory_atom_write — upsert a durable named atom.
    */
   const memory_atom_write = tool({
@@ -1235,6 +1273,7 @@ const AgentMemory = async ({ client, $ }) => {
       memory_state_inspect,
       memory_state_patch,
       memory_state_distil,
+      memory_state_delete,
       memory_atom_write,
       memory_atom_append,
       memory_atom_get,

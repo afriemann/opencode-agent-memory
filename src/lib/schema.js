@@ -424,6 +424,28 @@ export function hotStateCrossProject(db, currentProject, sinceMs) {
 }
 
 /**
+ * Delete hot_state row(s) for a project by session_id.
+ *
+ * - Non-empty sessionId: deletes the row with that exact session_id.
+ * - Empty string sessionId: deletes all rows where session_id IS NULL OR session_id = ''
+ *   (orphaned/migrated rows with no identity).
+ *
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @param {string} project
+ * @param {string} sessionId
+ * @returns {{ deleted: number }}
+ */
+export function hotStateDelete(db, project, sessionId) {
+  let result;
+  if (sessionId) {
+    result = db.prepare('DELETE FROM hot_state WHERE project = ? AND session_id = ?').run(project, sessionId);
+  } else {
+    result = db.prepare("DELETE FROM hot_state WHERE project = ? AND (session_id IS NULL OR session_id = '')").run(project);
+  }
+  return { deleted: result.changes };
+}
+
+/**
  * Write (upsert) a memory atom.
  *
  * @param {import('node:sqlite').DatabaseSync} db

@@ -17,6 +17,7 @@ import {
   atomDelete,
   checkFtsIntegrity,
   hotStateCrossProject,
+  hotStateDelete,
 } from '../src/lib/schema.js';
 
 function openMemory() {
@@ -2118,5 +2119,50 @@ describe('hotStateCrossProject', () => {
     const rows = hotStateCrossProject(db, '/current', sinceMs);
     expect(rows[0].project).toBe('/newer');
     expect(rows[1].project).toBe('/older');
+  });
+});
+
+// ── hotStateDelete ────────────────────────────────────────────────────────────
+// spec: openspec/changes/hot-state-session-delete/specs/hot-state-session-delete/spec.md
+
+describe('hotStateDelete', () => {
+  let db;
+  beforeEach(() => {
+    db = openMemory();
+    ensureSchema(db);
+  });
+  afterEach(() => { db.close(); });
+
+  test('deletes a row by non-empty session_id and returns deleted count 1', () => {
+    insertHotStateRow(db, { project: '/proj', sessionId: 'ses_abc123', updatedAt: Date.now() });
+    const result = hotStateDelete(db, '/proj', 'ses_abc123');
+    expect(result).toEqual({ deleted: 1 });
+    const remaining = db.prepare("SELECT count(*) AS n FROM hot_state WHERE project='/proj'").get().n;
+    expect(remaining).toBe(0);
+  });
+
+  test('deletes all nameless rows when sessionId is empty string', () => {
+    const now = Date.now();
+    insertHotStateRow(db, { project: '/proj', agent: 'engineer', sessionId: '', updatedAt: now });
+    insertHotStateRow(db, { project: '/proj', agent: 'builder', sessionId: '', updatedAt: now + 1 });
+    insertHotStateRow(db, { project: '/proj', sessionId: 'ses_keep', updatedAt: now + 2 });
+    const result = hotStateDelete(db, '/proj', '');
+    expect(result).toEqual({ deleted: 2 });
+    const remaining = db.prepare("SELECT session_id FROM hot_state WHERE project='/proj'").all();
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].session_id).toBe('ses_keep');
+  });
+
+  test('returns deleted 0 when no matching row exists', () => {
+    const result = hotStateDelete(db, '/proj', 'ses_nonexistent');
+    expect(result).toEqual({ deleted: 0 });
+  });
+
+  test('does not delete rows belonging to a different project', () => {
+    insertHotStateRow(db, { project: '/other', sessionId: 'ses_abc', updatedAt: Date.now() });
+    const result = hotStateDelete(db, '/proj', 'ses_abc');
+    expect(result).toEqual({ deleted: 0 });
+    const remaining = db.prepare("SELECT count(*) AS n FROM hot_state WHERE project='/other'").get().n;
+    expect(remaining).toBe(1);
   });
 });
