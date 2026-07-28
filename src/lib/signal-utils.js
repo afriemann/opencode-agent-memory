@@ -65,7 +65,8 @@ export function lastTwoSegments(absPath) {
  * @returns {string}
  */
 function renderAtomLine(atom, now, { pinned = false } = {}) {
-  const preview = atom.preview ? String(atom.preview).slice(0, 80) : '';
+  const rawPreview = atom.preview ? String(atom.preview).replace(/[\r\n]+/g, ' ') : '';
+  const preview = rawPreview.slice(0, 80);
   const relTime = atom.updated_at ? formatRelativeTime(atom.updated_at, now) : '';
   const contentPart = preview ? ` — ${preview}…` : '';
   const prefix = pinned ? '[pinned] ' : '';
