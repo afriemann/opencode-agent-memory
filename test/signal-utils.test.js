@@ -998,3 +998,86 @@ describe('assemblePrimer — cross-project activity section', () => {
     expect(result).not.toBeNull();
   });
 });
+
+// ── assemblePrimer — empty distil row handling ────────────────────────────────
+// Rows where last_worked_summary is empty indicate a distillation error and
+// should render a visible error indicator rather than a blank entry.
+
+describe('assemblePrimer — empty distil row handling', () => {
+  const PROJECT = '/home/user/repos/project';
+  const STALENESS = { status: 'ok', distance: 0 };
+  const NOW = Date.now();
+
+  const EMPTY_ROW = {
+    session_id: 'ses-abc123',
+    session_name: 'My session',
+    last_worked_summary: '',
+    next_action: '',
+    open_questions: [],
+    updated_at: NOW - 5 * 60_000,
+  };
+
+  const CONTENTFUL_ROW = {
+    session_id: 'ses-def456',
+    session_name: 'Good session',
+    last_worked_summary: 'Implemented the widget',
+    next_action: 'Write tests',
+    open_questions: [],
+    updated_at: NOW - 10 * 60_000,
+  };
+
+  test('empty last_worked_summary renders a distillation error indicator', () => {
+    const result = assemblePrimer({
+      rows: [EMPTY_ROW],
+      projectAtoms: [],
+      globalAtoms: [],
+      agent: 'engineer',
+      project: PROJECT,
+      staleness: STALENESS,
+    });
+    expect(result).not.toBeNull();
+    expect(result).toContain('▸ My session');
+    expect(result).toContain('Distillation error');
+  });
+
+  test('empty row does not show Last:/Next: lines', () => {
+    const result = assemblePrimer({
+      rows: [EMPTY_ROW],
+      projectAtoms: [],
+      globalAtoms: [],
+      agent: 'engineer',
+      project: PROJECT,
+      staleness: STALENESS,
+    });
+    expect(result).not.toContain('Last:');
+    expect(result).not.toContain('Next:');
+  });
+
+  test('contentful row still renders normally alongside empty row', () => {
+    const result = assemblePrimer({
+      rows: [CONTENTFUL_ROW, EMPTY_ROW],
+      projectAtoms: [],
+      globalAtoms: [],
+      agent: 'engineer',
+      project: PROJECT,
+      staleness: STALENESS,
+    });
+    expect(result).toContain('▸ Good session');
+    expect(result).toContain('Last: Implemented the widget');
+    expect(result).toContain('▸ My session');
+    expect(result).toContain('Distillation error');
+  });
+
+  test('null last_worked_summary also renders distillation error indicator', () => {
+    const nullRow = { ...EMPTY_ROW, last_worked_summary: null };
+    const result = assemblePrimer({
+      rows: [nullRow],
+      projectAtoms: [],
+      globalAtoms: [],
+      agent: 'engineer',
+      project: PROJECT,
+      staleness: STALENESS,
+    });
+    expect(result).toContain('Distillation error');
+  });
+});

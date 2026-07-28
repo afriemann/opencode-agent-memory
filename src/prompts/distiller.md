@@ -60,8 +60,9 @@ is still valid and should be carried forward unchanged.
 ## Carry-forward and empty cases
 
 - Empty SIGNALS with a PRIOR record → return the PRIOR fields unchanged.
-- PRIOR is `none`/absent and SIGNALS is empty or unparseable → return the empty
-  record (below).
+- PRIOR is `none`/absent and SIGNALS is empty or unparseable → set
+  `last_worked_summary` to `"No meaningful activity."` and return empty strings
+  for `next_action` and an empty array for `open_questions`.
 
 ## Output
 
@@ -72,13 +73,13 @@ three keys and nothing else — no prose, no markdown, no code fence, no comment
 {"last_worked_summary": "...", "next_action": "...", "open_questions": ["..."]}
 ```
 
-- `last_worked_summary` — string; empty `""` only when there is no prior record and
-  no signals.
+- `last_worked_summary` — string; **never empty `""`** — use `"No meaningful activity."` as
+  the minimum when there is no prior record and no signals.
 - `next_action` — string; empty `""` only when nothing is determinable.
 - `open_questions` — array of strings; `[]` when there are none.
 
-The empty record is exactly:
+The minimal record (no prior, no signals) is exactly:
 
 ```
-{"last_worked_summary": "", "next_action": "", "open_questions": []}
+{"last_worked_summary": "No meaningful activity.", "next_action": "", "open_questions": []}
 ```

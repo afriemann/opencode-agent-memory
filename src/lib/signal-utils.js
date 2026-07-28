@@ -152,10 +152,15 @@ export function assemblePrimer({ rows, projectAtoms, globalAtoms, standingAtoms 
         : [];
 
       lines.push(`▸ ${label} — ${relTime}`);
-      if (summary) lines.push(`  Last: ${summary}`);
-      if (nextAction) lines.push(`  Next: ${nextAction}`);
-      if (questions.length > 0) {
-        lines.push(`  Open questions: ${questions.join('; ')}`);
+      const hasContent = summary || nextAction || questions.length > 0;
+      if (!hasContent) {
+        lines.push('  ⚠ Distillation error — no summary recorded');
+      } else {
+        if (summary) lines.push(`  Last: ${summary}`);
+        if (nextAction) lines.push(`  Next: ${nextAction}`);
+        if (questions.length > 0) {
+          lines.push(`  Open questions: ${questions.join('; ')}`);
+        }
       }
       lines.push('');
     }
