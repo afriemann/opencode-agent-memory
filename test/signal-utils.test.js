@@ -6,6 +6,7 @@ import {
   formatRelativeTime,
   assemblePrimer,
   lastTwoSegments,
+  MAX_STANDING_ATOMS,
 } from '../src/lib/signal-utils.js';
 
 // ── formatRelativeTime ────────────────────────────────────────────────────────
@@ -491,5 +492,300 @@ describe('assemblePrimer — global atoms not duplicated in project section', ()
     expect(result).toContain('No project atoms yet.');
     // global atom renders in the global section
     expect(result).toContain('global/only');
+  });
+});
+
+// ── assemblePrimer — Standing context (always_include) ────────────────────────
+// spec: openspec/changes/atom-always-include/specs/signal-processing/spec.md
+
+const PROJECT = '/home/user/git/my-project';
+const STALENESS = { status: 'ok', distance: 0 };
+const NOW_REF = 1_700_000_000_000;
+
+function makeStandingAtom(topic, overrides = {}) {
+  return {
+    scope: 'project',
+    project: '/p',
+    topic,
+    description: `desc for ${topic}`,
+    content: `Full content of ${topic}`,
+    updated_at: NOW_REF,
+    ...overrides,
+  };
+}
+
+describe('assemblePrimer — Standing context section', () => {
+  // 10.8 — Standing context section rendered when standingAtoms provided
+  test('renders ### Standing context section when standingAtoms is non-empty', () => {
+    const standing = [makeStandingAtom('conventions/style')];
+    const result = assemblePrimer({
+      rows: [], projectAtoms: [], globalAtoms: [], standingAtoms: standing,
+      agent: 'engineer', project: PROJECT, staleness: STALENESS,
+    });
+    expect(result).not.toBeNull();
+    expect(result).toContain('### Standing context');
+    expect(result).toContain('Full content of conventions/style');
+  });
+
+  test('Standing context section placed after Recent sessions and before Project atoms', () => {
+    const rows = [{ session_name: 'mysession', session_id: 'abc', updated_at: NOW_REF, last_worked_summary: 'did stuff', next_action: '', open_questions: [] }];
+    const standing = [makeStandingAtom('proj-convention')];
+    const result = assemblePrimer({
+      rows, projectAtoms: [], globalAtoms: [], standingAtoms: standing,
+      agent: 'engineer', project: PROJECT, staleness: STALENESS,
+    });
+    const recentIdx = result.indexOf('### Recent sessions');
+    const standingIdx = result.indexOf('### Standing context');
+    const projectIdx = result.indexOf('### Project atoms');
+    expect(recentIdx).toBeGreaterThanOrEqual(0);
+    expect(standingIdx).toBeGreaterThan(recentIdx);
+    expect(projectIdx).toBeGreaterThan(standingIdx);
+  });
+
+  test('renders full content block with #### heading, description, and content', () => {
+    const standing = [makeStandingAtom('my/convention')];
+    const result = assemblePrimer({
+      rows: [], projectAtoms: [], globalAtoms: [], standingAtoms: standing,
+      agent: 'engineer', project: PROJECT, staleness: STALENESS,
+    });
+    expect(result).toContain('#### my/convention');
+    expect(result).toContain('"desc for my/convention"');
+    expect(result).toContain('Full content of my/convention');
+  });
+
+  // 10.9 — cap of 5 per scope, overflow note
+  test('renders exactly MAX_STANDING_ATOMS (5) workspace atoms when more are provided', () => {
+    const standing = Array.from({ length: 7 }, (_, i) =>
+      makeStandingAtom(`topic-${String(i + 1).padStart(2, '0')}`)
+    );
+    const result = assemblePrimer({
+      rows: [], projectAtoms: [], globalAtoms: [], standingAtoms: standing,
+      agent: 'engineer', project: PROJECT, staleness: STALENESS,
+    });
+    // 5 atoms rendered
+    for (let i = 1; i <= 5; i++) {
+      expect(result).toContain(`Full content of topic-0${i}`);
+    }
+    // 2 overflow named
+    expect(result).toContain('+2 more standing atom');
+    expect(result).toContain('exceed the 5-per-scope cap');
+    expect(result).toContain('topic-06');
+    expect(result).toContain('topic-07');
+  });
+
+  test('cap selects 5 most recently updated atoms, not alphabetically-first', () => {
+    // Create 7 workspace atoms; atoms 3,4,5,6,7 have older timestamps; atoms 1 and 2 also old
+    // BUT give the 5 with NEWER timestamps to be: zzz, yyy, xxx, www, vvv (alphabetically last!)
+    // and give older timestamps to: aaa, bbb (alphabetically first).
+    // The cap should select zzz,yyy,xxx,www,vvv (newest), NOT aaa,bbb,vvv,www,xxx.
+    const older = NOW_REF - 10000;
+    const newer = NOW_REF;
+    const standing = [
+      makeStandingAtom('aaa', { updated_at: older }),
+      makeStandingAtom('bbb', { updated_at: older }),
+      makeStandingAtom('vvv', { updated_at: newer }),
+      makeStandingAtom('www', { updated_at: newer }),
+      makeStandingAtom('xxx', { updated_at: newer }),
+      makeStandingAtom('yyy', { updated_at: newer }),
+      makeStandingAtom('zzz', { updated_at: newer }),
+    ];
+    const result = assemblePrimer({
+      rows: [], projectAtoms: [], globalAtoms: [], standingAtoms: standing,
+      agent: 'engineer', project: PROJECT, staleness: STALENESS,
+    });
+    // 5 newest (vvv,www,xxx,yyy,zzz) must be rendered
+    expect(result).toContain('Full content of vvv');
+    expect(result).toContain('Full content of www');
+    expect(result).toContain('Full content of xxx');
+    expect(result).toContain('Full content of yyy');
+    expect(result).toContain('Full content of zzz');
+    // 2 oldest (aaa,bbb) must be in overflow note, NOT rendered as content
+    expect(result).toContain('+2 more standing atom');
+    expect(result).toContain('aaa');
+    expect(result).toContain('bbb');
+    // aaa and bbb content must NOT appear as full blocks
+    expect(result).not.toContain('Full content of aaa');
+    expect(result).not.toContain('Full content of bbb');
+  });
+
+  test('rendered atoms within cap appear in alphabetical topic order', () => {
+    const standing = [
+      makeStandingAtom('z/last', { updated_at: NOW_REF }),
+      makeStandingAtom('a/first', { updated_at: NOW_REF }),
+      makeStandingAtom('m/middle', { updated_at: NOW_REF }),
+    ];
+    const result = assemblePrimer({
+      rows: [], projectAtoms: [], globalAtoms: [], standingAtoms: standing,
+      agent: 'engineer', project: PROJECT, staleness: STALENESS,
+    });
+    const firstIdx = result.indexOf('a/first');
+    const middleIdx = result.indexOf('m/middle');
+    const lastIdx = result.indexOf('z/last');
+    expect(firstIdx).toBeLessThan(middleIdx);
+    expect(middleIdx).toBeLessThan(lastIdx);
+  });
+
+  test('MAX_STANDING_ATOMS constant equals 5', () => {
+    expect(MAX_STANDING_ATOMS).toBe(5);
+  });
+
+  // 10.10 — global standing atoms rendered separately, capped independently
+  test('renders global standing atoms in separate bucket', () => {
+    const globalStanding = [makeStandingAtom('global/prefs', { scope: 'global', project: '' })];
+    const wsStanding = [makeStandingAtom('ws/rules')];
+    const result = assemblePrimer({
+      rows: [], projectAtoms: [], globalAtoms: [], standingAtoms: [...wsStanding, ...globalStanding],
+      agent: 'engineer', project: PROJECT, staleness: STALENESS,
+    });
+    expect(result).toContain('Full content of ws/rules');
+    expect(result).toContain('Full content of global/prefs');
+  });
+
+  // 10.11 — always_include atoms excluded from compact directory
+  test('always_include atoms are excluded from compact project atom directory', () => {
+    const projectAtoms = [
+      { scope: 'project', project: '/p', topic: 'standing-atom', description: 'desc', preview: 'preview', pinned: 0, status: 'active', updated_at: NOW_REF },
+      { scope: 'project', project: '/p', topic: 'regular-atom', description: 'desc', preview: 'preview', pinned: 0, status: 'active', updated_at: NOW_REF },
+    ];
+    const standing = [
+      { scope: 'project', project: '/p', topic: 'standing-atom', description: 'desc', content: 'Full standing content', updated_at: NOW_REF },
+    ];
+    const result = assemblePrimer({
+      rows: [], projectAtoms, globalAtoms: [], standingAtoms: standing,
+      agent: 'engineer', project: PROJECT, staleness: STALENESS,
+    });
+    // standing-atom appears in Standing context section with full content
+    expect(result).toContain('Full standing content');
+    // regular-atom still appears as compact directory entry
+    expect(result).toContain('regular-atom');
+    // standing-atom must NOT appear twice (not in compact directory)
+    const occurrences = result.split('\n').filter((l) => l.includes('standing-atom') && !l.startsWith('####'));
+    expect(occurrences.length).toBe(0);
+  });
+
+  test('always_include global atoms excluded from compact global directory', () => {
+    const globalAtoms = [
+      { scope: 'global', project: '', topic: 'global-standing', description: 'desc', preview: 'p', pinned: 0, status: 'active', updated_at: NOW_REF },
+      { scope: 'global', project: '', topic: 'global-regular', description: 'desc', preview: 'p', pinned: 0, status: 'active', updated_at: NOW_REF },
+    ];
+    const standing = [
+      { scope: 'global', project: '', topic: 'global-standing', description: 'desc', content: 'Full global content', updated_at: NOW_REF },
+    ];
+    const result = assemblePrimer({
+      rows: [], projectAtoms: [], globalAtoms, standingAtoms: standing,
+      agent: 'engineer', project: PROJECT, staleness: STALENESS,
+    });
+    expect(result).toContain('Full global content');
+    expect(result).toContain('global-regular');
+    // global-standing must not appear in compact directory (not as a one-liner entry)
+    const compactLines = result.split('\n').filter((l) => l.includes('global-standing') && !l.startsWith('####'));
+    expect(compactLines.length).toBe(0);
+  });
+
+  // 10.12 — Standing context omitted when standingAtoms is empty/absent
+  test('omits Standing context section when standingAtoms is empty', () => {
+    const projectAtoms = [{ scope: 'project', project: '/p', topic: 'atom', description: 'desc', preview: 'p', pinned: 0, status: 'active', updated_at: NOW_REF }];
+    const result = assemblePrimer({
+      rows: [], projectAtoms, globalAtoms: [], standingAtoms: [],
+      agent: 'engineer', project: PROJECT, staleness: STALENESS,
+    });
+    expect(result).not.toContain('### Standing context');
+  });
+
+  test('omits Standing context section when standingAtoms param is absent (default)', () => {
+    const projectAtoms = [{ scope: 'project', project: '/p', topic: 'atom', description: 'desc', preview: 'p', pinned: 0, status: 'active', updated_at: NOW_REF }];
+    const result = assemblePrimer({
+      rows: [], projectAtoms, globalAtoms: [],
+      agent: 'engineer', project: PROJECT, staleness: STALENESS,
+    });
+    expect(result).not.toContain('### Standing context');
+  });
+
+  // 10.13 — cold-start with only standingAtoms returns non-null primer
+  test('cold-start with only standingAtoms returns non-null primer', () => {
+    const standing = [makeStandingAtom('always-available')];
+    const result = assemblePrimer({
+      rows: [], projectAtoms: [], globalAtoms: [], standingAtoms: standing,
+      agent: 'engineer', project: PROJECT, staleness: STALENESS,
+    });
+    expect(result).not.toBeNull();
+    expect(result).toContain('### Standing context');
+    expect(result).toContain('Full content of always-available');
+  });
+
+  test('cold-start with empty rows, atoms, and no standingAtoms returns null', () => {
+    const result = assemblePrimer({
+      rows: [], projectAtoms: [], globalAtoms: [], standingAtoms: [],
+      agent: 'engineer', project: PROJECT, staleness: STALENESS,
+    });
+    expect(result).toBeNull();
+  });
+});
+
+describe('assemblePrimer — additional Standing context scenarios', () => {
+  // Pinned + always_include — no double-render
+  test('pinned+always_include atom renders only in Standing context, not in compact directory', () => {
+    const projectAtoms = [
+      { scope: 'project', project: '/p', topic: 'both-flags', description: 'desc', preview: 'preview', pinned: 1, status: 'active', updated_at: NOW_REF },
+      { scope: 'project', project: '/p', topic: 'regular', description: 'desc', preview: 'preview', pinned: 0, status: 'active', updated_at: NOW_REF },
+    ];
+    const standing = [
+      { scope: 'project', project: '/p', topic: 'both-flags', description: 'desc', content: 'Full content of both-flags', updated_at: NOW_REF },
+    ];
+    const result = assemblePrimer({
+      rows: [], projectAtoms, globalAtoms: [], standingAtoms: standing,
+      agent: 'engineer', project: PROJECT, staleness: STALENESS,
+    });
+    // Appears in Standing context as full block
+    expect(result).toContain('Full content of both-flags');
+    expect(result).toContain('#### both-flags');
+    // Must NOT appear as a compact [pinned] line in Project atoms section
+    const lines = result.split('\n');
+    const compactPinnedLine = lines.find((l) => l.includes('[pinned]') && l.includes('both-flags'));
+    expect(compactPinnedLine).toBeUndefined();
+  });
+
+  // 40-cap unaffected by always_include atoms
+  test('40-cap for compact directory is unaffected by standing atoms', () => {
+    // 42 regular atoms (not flagged) — compact directory should show 40 and overflow 2
+    const projectAtoms = Array.from({ length: 42 }, (_, i) => ({
+      scope: 'project', project: '/p', topic: `regular-${String(i).padStart(3, '0')}`,
+      description: 'desc', preview: 'preview', pinned: 0, status: 'active', updated_at: NOW_REF,
+    }));
+    const standing = [
+      makeStandingAtom('standing-1'),
+      makeStandingAtom('standing-2'),
+    ];
+    const result = assemblePrimer({
+      rows: [], projectAtoms, globalAtoms: [], standingAtoms: standing,
+      agent: 'engineer', project: PROJECT, staleness: STALENESS,
+    });
+    // Compact directory overflow note shows 2 (42 regular - 40 cap)
+    expect(result).toContain('(+2 more — call memory_atom_list to see all)');
+  });
+
+  // Global and workspace caps are independent (6+6 → 5+5 + two overflow notes)
+  test('workspace and global caps are independent: 6+6 → 5+5 with two overflow notes', () => {
+    const wsStanding = Array.from({ length: 6 }, (_, i) =>
+      makeStandingAtom(`ws/atom-${String(i + 1).padStart(2, '0')}`)
+    );
+    const globalStanding = Array.from({ length: 6 }, (_, i) =>
+      makeStandingAtom(`gl/atom-${String(i + 1).padStart(2, '0')}`, { scope: 'global', project: '' })
+    );
+    const result = assemblePrimer({
+      rows: [], projectAtoms: [], globalAtoms: [], standingAtoms: [...wsStanding, ...globalStanding],
+      agent: 'engineer', project: PROJECT, staleness: STALENESS,
+    });
+    // 5 ws atoms rendered, 1 overflow
+    for (let i = 1; i <= 5; i++) {
+      expect(result).toContain(`Full content of ws/atom-0${i}`);
+    }
+    // 5 global atoms rendered, 1 overflow
+    for (let i = 1; i <= 5; i++) {
+      expect(result).toContain(`Full content of gl/atom-0${i}`);
+    }
+    // Two overflow notes
+    const overflowNotes = result.split('\n').filter((l) => l.includes('+1 more standing atom') && l.includes('5-per-scope cap'));
+    expect(overflowNotes.length).toBe(2);
   });
 });

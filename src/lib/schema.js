@@ -26,6 +26,12 @@
 //   - hot_state: new nullable columns distil_cost_usd REAL,
 //     distil_tokens_in INTEGER, distil_tokens_out INTEGER.
 //   - PRAGMA user_version = 5 marks migration complete.
+//
+// Schema version 6 changes:
+//   - memory_atom: new column always_include INTEGER NOT NULL DEFAULT 0.
+//     When 1, the atom's full content is injected into the session primer's
+//     Standing context section instead of appearing as a compact directory line.
+//   - PRAGMA user_version = 6 marks migration complete.
 
 // ── Topic normalisation ───────────────────────────────────────────────────────
 
@@ -184,19 +190,20 @@ export function ensureSchema(db) {
     );
 
     CREATE TABLE IF NOT EXISTS memory_atom (
-      id           INTEGER PRIMARY KEY AUTOINCREMENT,
-      scope        TEXT    NOT NULL DEFAULT 'project',
-      project      TEXT    NOT NULL DEFAULT '',
-      topic        TEXT    NOT NULL,
-      description  TEXT    NOT NULL DEFAULT '',
-      content      TEXT    NOT NULL DEFAULT '',
-      tags         TEXT    NOT NULL DEFAULT '[]',
-      pinned       INTEGER NOT NULL DEFAULT 0,
-      status       TEXT    NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'resolved', 'deprecated')),
-      session_id   TEXT,
-      session_name TEXT,
-      created_at   INTEGER NOT NULL,
-      updated_at   INTEGER NOT NULL,
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      scope          TEXT    NOT NULL DEFAULT 'project',
+      project        TEXT    NOT NULL DEFAULT '',
+      topic          TEXT    NOT NULL,
+      description    TEXT    NOT NULL DEFAULT '',
+      content        TEXT    NOT NULL DEFAULT '',
+      tags           TEXT    NOT NULL DEFAULT '[]',
+      pinned         INTEGER NOT NULL DEFAULT 0,
+      always_include INTEGER NOT NULL DEFAULT 0,
+      status         TEXT    NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'resolved', 'deprecated')),
+      session_id     TEXT,
+      session_name   TEXT,
+      created_at     INTEGER NOT NULL,
+      updated_at     INTEGER NOT NULL,
       UNIQUE (scope, project, topic)
     );
 
@@ -341,6 +348,29 @@ export function ensureSchema(db) {
       db.exec('PRAGMA user_version = 5');
     }
   }
+
+  // ── Phase 6: migration to schema version 6 ───────────────────────────────
+  //   Gate: PRAGMA user_version < 6 AND always_include column absent (shape probe)
+  //   always_include mirrors the pinned precedent: added via ALTER TABLE ADD COLUMN,
+  //   idempotent under repeated calls via column-existence probe.
+  const versionAfterV5 = db.prepare('PRAGMA user_version').get()?.user_version ?? 0;
+  if (versionAfterV5 < 6) {
+    const atomCols6 = db.prepare("PRAGMA table_info(memory_atom)").all().map((c) => c.name);
+    if (!atomCols6.includes('always_include')) {
+      db.exec('BEGIN');
+      try {
+        db.exec('ALTER TABLE memory_atom ADD COLUMN always_include INTEGER NOT NULL DEFAULT 0');
+        db.exec('PRAGMA user_version = 6');
+        db.exec('COMMIT');
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
+      }
+    } else {
+      // always_include already present — just bump the version marker
+      db.exec('PRAGMA user_version = 6');
+    }
+  }
 }
 
 // ── pruneHotState ─────────────────────────────────────────────────────────────
@@ -375,12 +405,12 @@ export function pruneHotState(db, agent, project) {
  * @param {import('node:sqlite').DatabaseSync} db
  * @param {{ scope:string, project:string, topic:string, content:string,
  *            description:string, tags?:string[]|string,
- *            pinned?:boolean,
+ *            pinned?:boolean, alwaysInclude?:boolean,
  *            sessionId?:string, sessionName?:string,
  *            createdAt?:number }} opts
  * @returns {{ action: 'created'|'overwritten' }}
  */
-export function atomWrite(db, { scope, project, topic, content, description, tags, pinned, sessionId, sessionName, createdAt }) {
+export function atomWrite(db, { scope, project, topic, content, description, tags, pinned, alwaysInclude, sessionId, sessionName, createdAt }) {
   const normTopic = normaliseTopic(topic);
   if (!description || typeof description !== 'string' || !description.trim()) {
     throw new Error('Atom description is required and must be a non-empty string');
@@ -392,9 +422,11 @@ export function atomWrite(db, { scope, project, topic, content, description, tag
   // Use caller-supplied creation timestamp when provided; ignored on update (ON CONFLICT
   // does not include created_at), so it only affects the initial INSERT row.
   const insertCreatedAt = typeof createdAt === 'number' ? createdAt : now;
-  // pinned is INSERT-only: set on first insert, never overwritten by a content update.
-  // Pin state must be changed via atomPatch to prevent silent unpinning on re-write.
+  // pinned and always_include are INSERT-only: set on first insert, never overwritten
+  // by a content update. Both flags must be changed via atomPatch to prevent silent
+  // state loss on re-write.
   const pinnedValue = pinned ? 1 : 0;
+  const alwaysIncludeValue = alwaysInclude ? 1 : 0;
 
   // Check existence before upsert to report created vs overwritten
   const existing = db
@@ -403,8 +435,8 @@ export function atomWrite(db, { scope, project, topic, content, description, tag
 
   db.prepare(`
     INSERT INTO memory_atom
-      (scope, project, topic, description, content, tags, pinned, session_id, session_name, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (scope, project, topic, description, content, tags, pinned, always_include, session_id, session_name, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(scope, project, topic) DO UPDATE SET
       description  = excluded.description,
       content      = excluded.content,
@@ -413,7 +445,7 @@ export function atomWrite(db, { scope, project, topic, content, description, tag
       session_name = excluded.session_name,
       updated_at   = excluded.updated_at
   `).run(
-    scope, project, normTopic, description.trim(), content, tagsJson, pinnedValue,
+    scope, project, normTopic, description.trim(), content, tagsJson, pinnedValue, alwaysIncludeValue,
     sessionId ?? null, sessionName ?? null,
     insertCreatedAt,
     now
@@ -457,24 +489,25 @@ export function atomAppend(db, { scope, project, topic, content }) {
 /**
  * Partial, content-preserving metadata update for an existing atom.
  *
- * Patches one or more of description, tags, created_at, pinned, status in-place.
+ * Patches one or more of description, tags, created_at, pinned, always_include, status in-place.
  * - Absent fields are left unchanged.
  * - tags:[] clears tags; omitted tags keeps existing tags.
- * - updated_at is bumped when description, tags, pinned, or status is present.
+ * - updated_at is bumped when description, tags, pinned, always_include, or status is present.
  * - created_at-only patch leaves updated_at unchanged.
  * - status must be one of 'active', 'resolved', 'deprecated'.
  *
  * @param {import('node:sqlite').DatabaseSync} db
  * @param {{ scope:string, project:string, topic:string,
- *            patch: { description?:string, tags?:string[], created_at?:number, pinned?:boolean, status?:string } }} opts
+ *            patch: { description?:string, tags?:string[], created_at?:number,
+ *                     pinned?:boolean, always_include?:boolean, status?:string } }} opts
  * @returns {{ patched: string[] }}
  */
 export function atomPatch(db, { scope, project, topic, patch }) {
   const normTopic = normaliseTopic(topic);
-  const PATCHABLE = ['description', 'tags', 'created_at', 'pinned', 'status'];
+  const PATCHABLE = ['description', 'tags', 'created_at', 'pinned', 'always_include', 'status'];
   const present = PATCHABLE.filter((f) => f in patch);
   if (present.length === 0) {
-    throw new Error('at least one of description, tags, created_at, pinned, status is required');
+    throw new Error('at least one of description, tags, created_at, pinned, always_include, status is required');
   }
 
   db.exec('BEGIN IMMEDIATE');
@@ -522,12 +555,16 @@ export function atomPatch(db, { scope, project, topic, patch }) {
       setClauses.push('pinned = ?');
       values.push(patch.pinned ? 1 : 0);
     }
+    if ('always_include' in patch) {
+      setClauses.push('always_include = ?');
+      values.push(patch.always_include ? 1 : 0);
+    }
     if ('status' in patch) {
       setClauses.push('status = ?');
       values.push(patch.status);
     }
 
-    const bumpUpdatedAt = ('description' in patch) || ('tags' in patch) || ('pinned' in patch) || ('status' in patch);
+    const bumpUpdatedAt = ('description' in patch) || ('tags' in patch) || ('pinned' in patch) || ('always_include' in patch) || ('status' in patch);
     if (bumpUpdatedAt) {
       setClauses.push('updated_at = ?');
       values.push(Date.now());
@@ -699,7 +736,7 @@ export function atomList(db, { scope, project, prefix, status, includeDeprecated
   if (scope === 'all') {
     return db.prepare(`
       SELECT scope, project, topic, description,
-             substr(content, 1, 80) AS preview, pinned, status, created_at, updated_at
+             substr(content, 1, 80) AS preview, pinned, always_include, status, created_at, updated_at
       FROM memory_atom
       WHERE topic LIKE ?
         ${statusClause}
@@ -710,13 +747,57 @@ export function atomList(db, { scope, project, prefix, status, includeDeprecated
   // Default: current workspace + global
   return db.prepare(`
     SELECT scope, project, topic, description,
-           substr(content, 1, 80) AS preview, pinned, status, created_at, updated_at
+           substr(content, 1, 80) AS preview, pinned, always_include, status, created_at, updated_at
     FROM memory_atom
     WHERE topic LIKE ?
       AND ((scope = ? AND project = ?) OR (scope = 'global' AND project = ''))
       ${statusClause}
     ORDER BY pinned DESC, scope, project, topic
   `).all(likePattern, scope, project, ...statusArgs);
+}
+
+/**
+ * Return full content for all active atoms that have always_include = 1.
+ *
+ * Scope semantics:
+ *   - 'project' (or 'workspace'): current workspace atoms + global atoms
+ *   - 'global': global-only atoms
+ *   - 'all': all workspaces
+ *
+ * Results are ordered by updated_at DESC (for cap selection in the caller),
+ * with topic ASC as a tiebreaker. The caller (assemblePrimer) takes the top N
+ * by updated_at and then re-sorts those N alphabetically for stable render order.
+ *
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @param {{ scope:string, project:string }} opts
+ * @returns {object[]} — rows with scope, project, topic, description, content, updated_at
+ */
+export function atomListFull(db, { scope, project }) {
+  if (scope === 'all') {
+    return db.prepare(`
+      SELECT scope, project, topic, description, content, updated_at
+      FROM memory_atom
+      WHERE always_include = 1 AND status = 'active'
+      ORDER BY updated_at DESC, topic ASC
+    `).all();
+  }
+  if (scope === 'global') {
+    return db.prepare(`
+      SELECT scope, project, topic, description, content, updated_at
+      FROM memory_atom
+      WHERE always_include = 1 AND status = 'active'
+        AND scope = 'global' AND project = ''
+      ORDER BY updated_at DESC, topic ASC
+    `).all();
+  }
+  // Default: current workspace + global
+  return db.prepare(`
+    SELECT scope, project, topic, description, content, updated_at
+    FROM memory_atom
+    WHERE always_include = 1 AND status = 'active'
+      AND ((scope = ? AND project = ?) OR (scope = 'global' AND project = ''))
+    ORDER BY updated_at DESC, topic ASC
+  `).all(scope, project);
 }
 
 /**
