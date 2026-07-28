@@ -16,6 +16,7 @@ import {
   atomListFull,
   atomDelete,
   checkFtsIntegrity,
+  hotStateCrossProject,
 } from '../src/lib/schema.js';
 
 function openMemory() {
@@ -2047,5 +2048,75 @@ describe('always_include — omitting in patch leaves flag unchanged', () => {
     const row = db.prepare("SELECT always_include, description FROM memory_atom WHERE topic='omit-test'").get();
     expect(row.always_include).toBe(1);
     expect(row.description).toBe('updated desc');
+  });
+});
+
+// ── hotStateCrossProject ─────────────────────────────────────────────────────
+// spec: openspec/changes/primer-ux-improvements/specs/primer-cross-project-activity/spec.md
+
+function insertHotStateRow(db, { project, agent = 'engineer', sessionId = 'ses1', updatedAt }) {
+  db.prepare(`
+    INSERT INTO hot_state (scope, agent, project, session_id, last_worked_summary, next_action, open_questions, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run('project', agent, project, sessionId, '', '', '[]', updatedAt);
+}
+
+describe('hotStateCrossProject', () => {
+  let db;
+  beforeEach(() => {
+    db = openMemory();
+    ensureSchema(db);
+  });
+  afterEach(() => { db.close(); });
+
+  test('excludes rows older than sinceMs', () => {
+    const sinceMs = Date.now() - 24 * 60 * 60 * 1000;
+    insertHotStateRow(db, { project: '/other', updatedAt: sinceMs - 60_000 });
+    const rows = hotStateCrossProject(db, '/current', sinceMs);
+    expect(rows).toHaveLength(0);
+  });
+
+  test('includes rows within the last 24h for other projects', () => {
+    const sinceMs = Date.now() - 24 * 60 * 60 * 1000;
+    insertHotStateRow(db, { project: '/other', updatedAt: sinceMs + 60_000 });
+    const rows = hotStateCrossProject(db, '/current', sinceMs);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].project).toBe('/other');
+  });
+
+  test('excludes the current project', () => {
+    const sinceMs = Date.now() - 24 * 60 * 60 * 1000;
+    insertHotStateRow(db, { project: '/current', updatedAt: sinceMs + 60_000 });
+    insertHotStateRow(db, { project: '/other', sessionId: 'ses2', updatedAt: sinceMs + 60_000 });
+    const rows = hotStateCrossProject(db, '/current', sinceMs);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].project).toBe('/other');
+  });
+
+  test('returns one row per project (deduplicates multiple sessions for same project)', () => {
+    const sinceMs = Date.now() - 24 * 60 * 60 * 1000;
+    insertHotStateRow(db, { project: '/other', sessionId: 'ses1', updatedAt: sinceMs + 60_000 });
+    insertHotStateRow(db, { project: '/other', sessionId: 'ses2', updatedAt: sinceMs + 120_000 });
+    const rows = hotStateCrossProject(db, '/current', sinceMs);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].project).toBe('/other');
+  });
+
+  test('returns agent of the most recent session for each project', () => {
+    const sinceMs = Date.now() - 24 * 60 * 60 * 1000;
+    insertHotStateRow(db, { project: '/other', agent: 'builder', sessionId: 'ses1', updatedAt: sinceMs + 60_000 });
+    insertHotStateRow(db, { project: '/other', agent: 'engineer', sessionId: 'ses2', updatedAt: sinceMs + 120_000 });
+    const rows = hotStateCrossProject(db, '/current', sinceMs);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].agent).toBe('engineer');
+  });
+
+  test('returns rows ordered by updated_at DESC', () => {
+    const sinceMs = Date.now() - 24 * 60 * 60 * 1000;
+    insertHotStateRow(db, { project: '/older', sessionId: 'ses1', updatedAt: sinceMs + 60_000 });
+    insertHotStateRow(db, { project: '/newer', sessionId: 'ses2', updatedAt: sinceMs + 120_000 });
+    const rows = hotStateCrossProject(db, '/current', sinceMs);
+    expect(rows[0].project).toBe('/newer');
+    expect(rows[1].project).toBe('/older');
   });
 });

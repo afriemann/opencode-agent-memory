@@ -18,6 +18,7 @@ import { tool } from '@opencode-ai/plugin';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
+import { homedir } from 'node:os';
 import {
   DISTIL_SCHEMA,
   buildDistilPrompt,
@@ -241,10 +242,11 @@ const AgentMemory = async ({ client, $ }) => {
 
       const rows = state.recent ?? [];
 
-      // Fetch atom directory: current workspace + global
+      // Fetch atom directory: current workspace + global, and standing atoms
       let projectAtoms = [];
       let globalAtoms = [];
       let standingAtoms = [];
+      let crossProjectRows = [];
       try {
         const [wOut, gOut, sOut] = await Promise.all([
           spawnMemory($, ['atom-list', 'project', project]),
@@ -258,8 +260,18 @@ const AgentMemory = async ({ client, $ }) => {
         log(`inject: atom-list failed for ${sessionId}`, err);
       }
 
-      // Cold start: no prior memory and no atoms → no primer
-      if (rows.length === 0 && projectAtoms.length === 0 && globalAtoms.length === 0 && standingAtoms.length === 0) return;
+      // Fetch cross-project activity independently so a failure here does not degrade
+      // the established atom-list / standings data.
+      try {
+        const since24h = Date.now() - 24 * 60 * 60 * 1000;
+        const cpOut = await spawnMemory($, ['hot-state-cross-project', project, String(since24h)]);
+        crossProjectRows = JSON.parse(cpOut.trim());
+      } catch (err) {
+        log(`inject: cross-project query failed for ${sessionId}`, err);
+      }
+
+      // Cold start: no prior memory, no atoms, no cross-project activity → no primer
+      if (rows.length === 0 && projectAtoms.length === 0 && globalAtoms.length === 0 && standingAtoms.length === 0 && crossProjectRows.length === 0) return;
 
       const storedSha = rows.length > 0 ? (rows[0].anchored_git_sha ?? null) : null;
       const staleness = await gitStaleness($, project, storedSha);
@@ -268,15 +280,17 @@ const AgentMemory = async ({ client, $ }) => {
         projectAtoms,
         globalAtoms,
         standingAtoms,
+        crossProjectRows,
         agent,
         project,
+        homeDir: homedir(),
         staleness,
         cap: ATOM_INJECT_CAP,
       });
 
       if (primer) {
         primers.set(sessionId, primer);
-        log(`inject: primer ready for ${sessionId} (${rows.length} sessions, ${projectAtoms.length} workspace atoms, ${globalAtoms.length} global atoms, ${standingAtoms.length} standing)`);
+        log(`inject: primer ready for ${sessionId} (${rows.length} sessions, ${projectAtoms.length} workspace atoms, ${globalAtoms.length} global atoms, ${standingAtoms.length} standing, ${crossProjectRows.length} cross-project)`);
       } else {
         log(`inject: cold start for ${sessionId} — no prior memory or atoms, no primer`);
       }

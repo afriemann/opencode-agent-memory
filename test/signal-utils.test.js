@@ -789,3 +789,212 @@ describe('assemblePrimer — additional Standing context scenarios', () => {
     expect(overflowNotes.length).toBe(2);
   });
 });
+
+// ── assemblePrimer — session label fallback (primer-ux-improvements) ──────────
+// spec: openspec/changes/primer-ux-improvements/specs/signal-processing/spec.md
+
+describe('assemblePrimer — session label fallback', () => {
+  const PROJECT = '/home/user/repos/my/project';
+  const STALENESS = { status: 'ok', distance: 0 };
+
+  test('session label uses relative time when session_name and session_id are both absent', () => {
+    const now = Date.now();
+    const row = {
+      session_id: '',
+      session_name: null,
+      last_worked_summary: 'did some work',
+      next_action: '',
+      open_questions: [],
+      updated_at: now - 4 * 24 * 60 * 60_000, // 4 days ago
+    };
+    const result = assemblePrimer({
+      rows: [row],
+      projectAtoms: [],
+      globalAtoms: [],
+      agent: 'engineer',
+      project: PROJECT,
+      staleness: STALENESS,
+    });
+    expect(result).not.toBeNull();
+    expect(result).toContain('▸');
+    expect(result).not.toContain('unknown');
+    expect(result).toContain('4 days ago');
+  });
+
+  test('session label uses short session_id when name is absent but id is present', () => {
+    const now = Date.now();
+    const row = {
+      session_id: 'ses-abc123xyz',
+      session_name: null,
+      last_worked_summary: '',
+      next_action: '',
+      open_questions: [],
+      updated_at: now - 60_000,
+    };
+    const result = assemblePrimer({
+      rows: [row],
+      projectAtoms: [],
+      globalAtoms: [],
+      agent: 'engineer',
+      project: PROJECT,
+      staleness: STALENESS,
+    });
+    expect(result).toContain('▸ ses-abc1');
+    expect(result).not.toContain('unknown');
+  });
+
+  test('session label uses session_name when present, ignoring id', () => {
+    const now = Date.now();
+    const row = {
+      session_id: 'ses-abc123',
+      session_name: 'My Named Session',
+      last_worked_summary: '',
+      next_action: '',
+      open_questions: [],
+      updated_at: now - 60_000,
+    };
+    const result = assemblePrimer({
+      rows: [row],
+      projectAtoms: [],
+      globalAtoms: [],
+      agent: 'engineer',
+      project: PROJECT,
+      staleness: STALENESS,
+    });
+    expect(result).toContain('▸ My Named Session');
+  });
+});
+
+// ── assemblePrimer — staleness improvements (primer-ux-improvements) ──────────
+// spec: openspec/changes/primer-ux-improvements/specs/signal-processing/spec.md
+
+describe('assemblePrimer — staleness improvements', () => {
+  const PROJECT = '/home/user/repos/my/project';
+  const WARM_ROW = {
+    session_id: 'ses-abc123',
+    session_name: 'session',
+    last_worked_summary: 'did stuff',
+    next_action: '',
+    open_questions: [],
+    updated_at: Date.now() - 5 * 60_000,
+  };
+
+  test('no-anchor staleness renders "not yet anchored to a commit" phrase', () => {
+    const result = assemblePrimer({
+      rows: [WARM_ROW],
+      projectAtoms: [],
+      globalAtoms: [],
+      agent: 'engineer',
+      project: PROJECT,
+      staleness: { status: 'no-anchor' },
+    });
+    expect(result).toContain('not yet anchored to a commit');
+  });
+
+  test('no-git staleness omits staleness line entirely', () => {
+    const result = assemblePrimer({
+      rows: [WARM_ROW],
+      projectAtoms: [],
+      globalAtoms: [],
+      agent: 'engineer',
+      project: PROJECT,
+      staleness: { status: 'no-git' },
+    });
+    expect(result).not.toContain('Staleness:');
+  });
+});
+
+// ── assemblePrimer — cross-project activity section (primer-ux-improvements) ──
+// spec: openspec/changes/primer-ux-improvements/specs/primer-cross-project-activity/spec.md
+
+describe('assemblePrimer — cross-project activity section', () => {
+  const PROJECT = '/home/user/repos/project';
+  const STALENESS = { status: 'ok', distance: 0 };
+  const NOW = Date.now();
+
+  test('includes "### Active projects today" when crossProjectRows is non-empty', () => {
+    const cpRows = [{ project: '/home/user/repos/other', agent: 'engineer', updated_at: NOW - 60_000 }];
+    const result = assemblePrimer({
+      rows: [],
+      projectAtoms: [],
+      globalAtoms: [],
+      agent: 'engineer',
+      project: PROJECT,
+      staleness: STALENESS,
+      crossProjectRows: cpRows,
+      homeDir: '/home/user',
+    });
+    expect(result).not.toBeNull();
+    expect(result).toContain('### Active projects today');
+    expect(result).toContain('repos/other');
+    expect(result).toContain('engineer');
+  });
+
+  test('omits "### Active projects today" when crossProjectRows is empty', () => {
+    const projectAtoms = [{ topic: 'x', description: 'd', preview: 'p', updated_at: NOW }];
+    const result = assemblePrimer({
+      rows: [],
+      projectAtoms,
+      globalAtoms: [],
+      agent: 'engineer',
+      project: PROJECT,
+      staleness: STALENESS,
+      crossProjectRows: [],
+    });
+    expect(result).not.toContain('### Active projects today');
+  });
+
+  test('renders relative "~/" path when homeDir is provided', () => {
+    const cpRows = [{ project: '/home/user/repos/other-project', agent: 'engineer', updated_at: NOW - 60_000 }];
+    const result = assemblePrimer({
+      rows: [],
+      projectAtoms: [],
+      globalAtoms: [],
+      agent: 'engineer',
+      project: PROJECT,
+      staleness: STALENESS,
+      crossProjectRows: cpRows,
+      homeDir: '/home/user',
+    });
+    expect(result).not.toBeNull();
+    expect(result).toContain('~/repos/other-project');
+  });
+
+  test('"### Active projects today" appears after ### Recent sessions', () => {
+    const cpRows = [{ project: '/home/user/repos/other', agent: 'engineer', updated_at: NOW - 60_000 }];
+    const recentRows = [{
+      session_id: 'abc', session_name: 'my session',
+      updated_at: NOW - 5 * 60_000, last_worked_summary: 'stuff',
+      next_action: '', open_questions: [],
+    }];
+    const result = assemblePrimer({
+      rows: recentRows,
+      projectAtoms: [],
+      globalAtoms: [],
+      agent: 'engineer',
+      project: PROJECT,
+      staleness: STALENESS,
+      crossProjectRows: cpRows,
+      homeDir: '/home/user',
+    });
+    const recentIdx = result.indexOf('### Recent sessions');
+    const crossIdx = result.indexOf('### Active projects today');
+    expect(recentIdx).toBeGreaterThanOrEqual(0);
+    expect(crossIdx).toBeGreaterThan(recentIdx);
+  });
+
+  test('cold-start with only cross-project rows returns non-null primer', () => {
+    const cpRows = [{ project: '/home/user/repos/other', agent: 'engineer', updated_at: NOW - 60_000 }];
+    const result = assemblePrimer({
+      rows: [],
+      projectAtoms: [],
+      globalAtoms: [],
+      agent: 'engineer',
+      project: PROJECT,
+      staleness: STALENESS,
+      crossProjectRows: cpRows,
+      homeDir: '/home/user',
+    });
+    expect(result).not.toBeNull();
+  });
+});

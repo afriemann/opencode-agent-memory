@@ -55,6 +55,11 @@
 //
 //   prune
 //     Delete memory_signal rows older than 30 days. Idempotent.
+//
+//   hot-state-cross-project <currentProject> <sinceMs>
+//     stdout: JSON array of { project, updated_at }
+//     Query hot_state for projects other than currentProject active since sinceMs.
+//     Returns one row per distinct project, most recently active first.
 
 import { openDb } from './lib/db.js';
 import {
@@ -69,6 +74,7 @@ import {
   atomList,
   atomListFull,
   atomDelete,
+  hotStateCrossProject,
 } from './lib/schema.js';
 import { readDistilWatermark, advanceDistilWatermark } from './lib/watermark.js';
 import { EMPTY_RECORD } from './lib/distil-prompt.js';
@@ -630,6 +636,18 @@ function cmdAtomDelete(scope, project, topic) {
   }
 }
 
+function cmdHotStateCrossProject(currentProject, sinceMs) {
+  const ms = Number(sinceMs);
+  if (!Number.isFinite(ms)) {
+    process.stderr.write('memory.js hot-state-cross-project: sinceMs must be a finite integer\n');
+    process.exit(1);
+  }
+  const db = openAndInit();
+  const rows = hotStateCrossProject(db, currentProject, ms);
+  db.close();
+  process.stdout.write(JSON.stringify(rows) + '\n');
+}
+
 // ── Dispatch ────────────────────────────────────────────────────────────────
 
 const [,, cmd, ...rest] = process.argv;
@@ -774,9 +792,19 @@ switch (cmd) {
     break;
   }
 
+  case 'hot-state-cross-project': {
+    const [currentProject, sinceMs] = rest;
+    if (currentProject == null || sinceMs == null) {
+      process.stderr.write('Usage: memory.js hot-state-cross-project <currentProject> <sinceMs>\n');
+      process.exit(1);
+    }
+    cmdHotStateCrossProject(currentProject, sinceMs);
+    break;
+  }
+
   default:
     process.stderr.write(
-      `Usage: memory.js <init|accrue|read|inspect|distil-write|correct|prune|atom-write|atom-append|atom-get|atom-search|atom-list|atom-list-full|atom-delete|atom-patch> [args]\n`
+      `Usage: memory.js <init|accrue|read|inspect|distil-write|correct|prune|atom-write|atom-append|atom-get|atom-search|atom-list|atom-list-full|atom-delete|atom-patch|hot-state-cross-project> [args]\n`
     );
     process.exit(1);
 }

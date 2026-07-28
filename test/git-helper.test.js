@@ -147,14 +147,14 @@ describe('renderStaleness', () => {
     expect(s).toBe('0 commit(s) since this note');
   });
 
-  test('no-anchor status renders unavailable phrasing', () => {
+  test('no-anchor status renders "not yet anchored to a commit"', () => {
     const s = renderStaleness({ status: 'no-anchor' });
-    expect(s).toBe('git anchor unavailable');
+    expect(s).toBe('not yet anchored to a commit');
   });
 
-  test('no-git status renders unavailable phrasing', () => {
+  test('no-git status returns null (staleness line should be omitted)', () => {
     const s = renderStaleness({ status: 'no-git' });
-    expect(s).toBe('git anchor unavailable');
+    expect(s).toBeNull();
   });
 
   test('diverged status renders history-diverged phrasing', () => {
