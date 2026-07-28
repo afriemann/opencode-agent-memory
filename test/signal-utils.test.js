@@ -1136,4 +1136,34 @@ describe('assemblePrimer — atom preview newline stripping', () => {
     // The topic must appear exactly once, on a single line
     expect(lines.filter((l) => l.includes('my/atom'))).toHaveLength(1);
   });
+
+  test('unclosed backtick in truncated preview is closed so downstream markdown is not corrupted', () => {
+    // Simulate a preview that ends mid-backtick span after slicing to 80 chars:
+    // "Always use `--profile cloudops` (or `AWS_PROFILE=" — 51 chars, but a longer
+    // real-world body truncated at 80 would leave the final backtick open.
+    const preview80 = 'Always use `--profile cloudops` (or `AWS_PROFILE=cloudops`) for the project -- '.slice(0, 80);
+    // preview80 should now end with an open backtick context; force the odd case:
+    const oddPreview = preview80.slice(0, 77) + ' `A'; // 80 chars, 3 backticks (odd)
+    const atom = {
+      topic: 'clarky-aws-profile',
+      description: 'AWS profile',
+      preview: oddPreview,
+      updated_at: NOW - 60_000,
+    };
+    const result = assemblePrimer({
+      rows: [],
+      projectAtoms: [atom],
+      globalAtoms: [],
+      agent: 'engineer',
+      project: PROJECT,
+      staleness: STALENESS,
+    });
+    expect(result).not.toBeNull();
+    const lines = result.split('\n');
+    const atomLine = lines.find((l) => l.includes('clarky-aws-profile'));
+    expect(atomLine).toBeDefined();
+    // The rendered line must contain an even number of backticks.
+    const backticks = (atomLine.match(/`/g) ?? []).length;
+    expect(backticks % 2).toBe(0);
+  });
 });
