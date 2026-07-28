@@ -4,27 +4,23 @@
 TBD - created by archiving change memory-atoms-and-session-hot-state. Update Purpose after archive.
 ## Requirements
 ### Requirement: memory_atom table stores named durable knowledge atoms
-The system SHALL maintain a `memory_atom` table with columns `id` (INTEGER PRIMARY KEY AUTOINCREMENT), `scope`, `project`, `topic`, `description`, `content`, `tags` (JSON), `session_id`, `session_name`, `created_at`, `updated_at`, `pinned` (INTEGER NOT NULL DEFAULT 0), and `status` (TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'resolved', 'deprecated'))), and a UNIQUE constraint on `(scope, project, topic)`. A new `memory_atom_fts` FTS5 virtual table (external-content) and three sync triggers (`memory_atom_ai`, `memory_atom_ad`, `memory_atom_au`) SHALL be created alongside the base table in `ensureSchema`. The baseline `CREATE TABLE IF NOT EXISTS` definition SHALL include the `status` column with its `DEFAULT` and `CHECK` so a fresh database is schema-identical to one that has undergone the v4 migration. The `ensureSchema` function SHALL apply a v4 migration (guarded by `PRAGMA user_version < 4` and a `PRAGMA table_info` column-existence probe) that runs `ALTER TABLE memory_atom ADD COLUMN status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','resolved','deprecated'))` on existing databases and then stamps `PRAGMA user_version = 4`. The identical `CHECK` constraint SHALL appear on both provisioning paths (fresh `CREATE TABLE` and v4 `ALTER TABLE ADD COLUMN`) to preserve the schema-convergence invariant. The `status` column SHALL NOT be included in the FTS5 index or its sync triggers.
 
-#### Scenario: Fresh database creates memory_atom table with status column
-- **GIVEN** `ensureSchema` is called on a fresh database
-- **WHEN** `PRAGMA table_info(memory_atom)` is inspected
-- **THEN** the `memory_atom` table exists with a `status TEXT NOT NULL DEFAULT 'active'` column carrying the enum CHECK, alongside all previously defined columns including `pinned`
+The `memory_atom` table SHALL include an `always_include INTEGER NOT NULL DEFAULT 0` column. Existing rows following a v5→v6 migration SHALL have `always_include = 0`. The v6 migration block SHALL be gated by `PRAGMA user_version < 6`, probe `PRAGMA table_info(memory_atom)` for the absence of `always_include`, run `ALTER TABLE memory_atom ADD COLUMN always_include INTEGER NOT NULL DEFAULT 0`, then stamp `PRAGMA user_version = 6`. A fresh-install database's `CREATE TABLE` baseline SHALL include `always_include INTEGER NOT NULL DEFAULT 0` so that fresh and migrated databases are schema-identical. The FTS5 virtual table and its sync triggers SHALL remain unchanged.
 
-#### Scenario: v4 migration adds status column to an existing v3 database
-- **GIVEN** a database at schema version 3 without a `status` column
-- **WHEN** `ensureSchema` is called
-- **THEN** the `memory_atom` table gains a `status TEXT NOT NULL DEFAULT 'active' CHECK(...)` column, all existing atoms have `status = 'active'`, and `PRAGMA user_version` returns 4
+#### Scenario: Existing database gains always_include column after v6 migration
+- **GIVEN** a database at schema version 5 with existing atoms
+- **WHEN** `ensureSchema` runs
+- **THEN** the `memory_atom` table gains an `always_include` column and all existing rows have `always_include = 0`
 
-#### Scenario: v4 migration is idempotent when status column already exists
-- **GIVEN** a database where the `status` column already exists (shape probe hits)
-- **WHEN** `ensureSchema` is called
-- **THEN** `ALTER TABLE` is NOT run again (no duplicate-column error) and `PRAGMA user_version` is stamped to 4
+#### Scenario: Fresh database includes always_include column without migration
+- **GIVEN** a brand-new database with no prior schema
+- **WHEN** `ensureSchema` runs
+- **THEN** the `memory_atom` table contains `always_include INTEGER NOT NULL DEFAULT 0` from the baseline CREATE TABLE
 
-#### Scenario: Fresh and migrated databases are schema-identical for the status column
-- **GIVEN** one fresh database and one v3 database after v4 migration
-- **WHEN** `PRAGMA table_info(memory_atom)` is inspected on both
-- **THEN** both contain the `status` column with the same type, default, and CHECK constraint
+#### Scenario: v6 migration is safe to re-run
+- **GIVEN** a database already at version 6 with always_include present
+- **WHEN** `ensureSchema` runs again
+- **THEN** no ALTER TABLE is executed and the schema is unchanged
 
 ### Requirement: normaliseTopic normalises a topic string
 The system SHALL provide a shared `normaliseTopic(topic)` helper that lowercases the string, collapses spaces and underscores to hyphens, and strips leading and trailing slashes. The resulting string SHALL be the canonical stored form for topic keys.
@@ -169,37 +165,18 @@ The system SHALL execute a full-text MATCH query across all atoms when no scope 
 - **THEN** each result row includes a `status` field equal to `'resolved'`
 
 ### Requirement: atom-list returns current-workspace and global atoms by default
-The system SHALL list atoms matching an optional topic prefix, returning current-workspace and global atoms by default. When `scope='all'` is passed, it SHALL include atoms from all workspaces. By default, `atom-list` SHALL exclude `deprecated` atoms (returning only `active` and `resolved`). When an optional filters JSON blob (`{ status?, includeDeprecated? }`) is supplied as the fourth positional argument: if `status` is present it SHALL be used as an exact-match filter (overriding the default and `includeDeprecated`); if `includeDeprecated` is truthy (and `status` is absent) it SHALL lift all status filtering (all three values returned). Each result SHALL include topic, description, 80-char content preview, scope, project, `created_at`, `updated_at`, `pinned`, and `status`. The `atom-list` CLI output SHALL prefix each pinned atom entry with `[pinned]` and each non-active atom entry with `[resolved]` or `[deprecated]` as appropriate.
 
-#### Scenario: atom-list default excludes deprecated atoms
-- **GIVEN** atoms exist with `status='active'`, `status='resolved'`, and `status='deprecated'`
-- **WHEN** `atom-list` is called with no filters argument
-- **THEN** the active and resolved atoms are returned and the deprecated atom is excluded
+The `atom-list` command SHALL include `always_include` (as a `0` or `1` integer) in its output for every atom row. The `always_include` value SHALL be the raw integer flag; full atom content SHALL NOT be returned by `atom-list` regardless of the flag value.
 
-#### Scenario: atom-list with includeDeprecated returns all statuses
-- **GIVEN** atoms exist with all three status values
-- **WHEN** `atom-list` is called with filters `{"includeDeprecated":true}`
-- **THEN** all three atoms are returned
+#### Scenario: atom-list output includes always_include flag
+- **GIVEN** atoms exist with mixed `always_include` values (0 and 1)
+- **WHEN** `atom-list` is called
+- **THEN** each row in the output includes the `always_include` field with the correct value
 
-#### Scenario: atom-list with status filter returns only that status
-- **GIVEN** atoms exist with `status='active'`, `status='resolved'`, and `status='deprecated'`
-- **WHEN** `atom-list` is called with filters `{"status":"deprecated"}`
-- **THEN** only the deprecated atom is returned
-
-#### Scenario: atom-list status filter takes precedence over includeDeprecated
-- **GIVEN** atoms exist with all three status values
-- **WHEN** `atom-list` is called with filters `{"status":"active","includeDeprecated":true}`
-- **THEN** only the active atom is returned
-
-#### Scenario: atom-list output labels non-active atoms with their status
-- **GIVEN** atoms exist with `status='resolved'` and `status='deprecated'` (via includeDeprecated)
-- **WHEN** `atom-list` is called with `{"includeDeprecated":true}`
-- **THEN** the resolved atom entry is prefixed with `[resolved]` and the deprecated atom entry is prefixed with `[deprecated]`
-
-#### Scenario: atom-list result rows include the status field
-- **GIVEN** a deprecated atom exists in the database and is requested via `{"includeDeprecated":true}`
-- **WHEN** `atom-list` is called and its JSON rows are inspected
-- **THEN** each row includes a `status` field with the correct value
+#### Scenario: atom-list does not return full content for always_include atoms
+- **GIVEN** an atom with `always_include = 1` and long content
+- **WHEN** `atom-list` is called
+- **THEN** the row's content field is the 80-character `preview` and does not contain the full content
 
 ### Requirement: atom-delete removes the atom and updates the FTS index
 The system SHALL delete the atom identified by (scope, project, topic) and return a one-line confirmation on stdout. The AFTER DELETE trigger SHALL update the FTS index so the deleted atom is no longer findable via MATCH.
@@ -246,27 +223,23 @@ The system SHALL accept an optional `createdAt` field (epoch ms integer) in the 
 - **THEN** the `created_at` column value is approximately `Date.now()` at the time of the call
 
 ### Requirement: atom-patch performs a content-preserving partial metadata update
-The system SHALL implement an `atom-patch` CLI subcommand that updates one or more of `description`, `tags`, `created_at`, `pinned`, and `status` for an existing atom without touching its content. The patch argument SHALL be a JSON blob supplied as the third positional argument. At least one of `description`, `tags`, `created_at`, `pinned`, or `status` MUST be present in the patch; an empty call SHALL be rejected with a non-zero exit and a clear error message. The operation SHALL use `BEGIN IMMEDIATE` to acquire the write lock before reading the current row, preventing check-then-write races. The system SHALL then build and run a single dynamic `UPDATE` statement from only the fields present in the patch. For each present field: `description` is trimmed and stored (empty string after trim SHALL be rejected); `tags` array is stored as JSON (`[]` is stored as `'[]'`, clearing any existing tags); `created_at` is stored as an epoch-ms integer as supplied; `pinned` is coerced to `0` (falsy) or `1` (truthy) and stored; `status` SHALL be one of `'active'`, `'resolved'`, or `'deprecated'` and SHALL be rejected with a clear error if any other value is supplied. The `updated_at` timestamp SHALL be bumped to the current time if and only if `description`, `tags`, `pinned`, or `status` is present in the patch; a `created_at`-only patch SHALL NOT modify `updated_at`. On success, the system SHALL print a JSON object `{ ok: true, topic: <topic>, patched: [<field>, …] }` on stdout and exit 0. If the target atom does not exist, the process SHALL exit non-zero and emit an error message on stderr. FTS re-indexing SHALL occur automatically via the existing `memory_atom_au` AFTER-UPDATE trigger.
 
-#### Scenario: atom-patch with status updates status and bumps updated_at
-- **GIVEN** an atom exists at topic 'work/notes' with `status='active'` and known `updated_at`
-- **WHEN** `atom-patch` is called with `{"status":"resolved"}`
-- **THEN** the atom's `status` is `'resolved'`, `updated_at` is newer than before, content is unchanged, and stdout contains `{ ok: true, topic: 'work/notes', patched: ['status'] }`
+The `atom-patch` command SHALL accept `always_include` as a patchable field in the patch object. An explicit `always_include: true` SHALL set the column to `1`; an explicit `always_include: false` SHALL set it to `0`; an omitted `always_include` key SHALL leave the column unchanged. When `always_include` is changed, `updated_at` SHALL be bumped to the current timestamp.
 
-#### Scenario: atom-patch rejects an invalid status value
-- **GIVEN** an atom exists at topic 'work/notes'
-- **WHEN** `atom-patch` is called with `{"status":"invalid"}`
-- **THEN** the process exits non-zero and stderr contains a message indicating the value must be one of `active`, `resolved`, `deprecated`
+#### Scenario: Patch sets always_include to true
+- **GIVEN** an atom with `always_include = 0`
+- **WHEN** `atom-patch` is called with `patch.always_include = true`
+- **THEN** the atom has `always_include = 1` and `updated_at` is updated
 
-#### Scenario: atom-patch with absent status field leaves existing status unchanged
-- **GIVEN** an atom exists at topic 'work/notes' with `status='resolved'`
-- **WHEN** `atom-patch` is called with `{"description":"updated"}` (no `status` field)
-- **THEN** the atom's `status` remains `'resolved'`
+#### Scenario: Patch clears always_include
+- **GIVEN** an atom with `always_include = 1`
+- **WHEN** `atom-patch` is called with `patch.always_include = false`
+- **THEN** the atom has `always_include = 0` and `updated_at` is updated
 
-#### Scenario: atom-patch with status only does not change content
-- **GIVEN** an atom exists at topic 'work/notes' with known content
-- **WHEN** `atom-patch` is called with `{"status":"deprecated"}`
-- **THEN** the atom's content is unchanged and `status` is `'deprecated'`
+#### Scenario: Omitting always_include in patch leaves it unchanged
+- **GIVEN** an atom with `always_include = 1`
+- **WHEN** `atom-patch` is called with a patch that does not include `always_include`
+- **THEN** the atom still has `always_include = 1`
 
 ### Requirement: atom-write preserves existing pinned state on upsert
 The system SHALL include `pinned` in the INSERT column list of the `atom-write` upsert with the caller-supplied value (default `0`). `pinned` SHALL NOT appear in the `ON CONFLICT … DO UPDATE SET` clause; when the topic already exists, the existing `pinned` value SHALL be preserved regardless of what `pinned` value the caller passes. Changing pin state after creation SHALL require an explicit `atom-patch` call.
@@ -303,4 +276,42 @@ The system SHALL NOT include `status` in either the INSERT column list or the `O
 - **GIVEN** an atom exists at topic 'arch/db' with `status = 'deprecated'`
 - **WHEN** `atom-write` is called for the same topic with new content
 - **THEN** the atom's content is updated and `status` remains `'deprecated'`
+
+### Requirement: atom-write preserves always_include flag on upsert
+
+The `atom-write` command SHALL accept an optional `always_include` argument (default `0`). On first creation the provided value SHALL be written. On a content re-write to an existing topic, `always_include` SHALL NOT be included in the `ON CONFLICT DO UPDATE SET` clause; the existing flag value SHALL be preserved unchanged. To change the flag after creation, callers MUST use `atom-patch`.
+
+#### Scenario: atom-write stores always_include on first creation
+- **GIVEN** no atom exists for the given topic
+- **WHEN** `atom-write` is called with `always_include = 1`
+- **THEN** the created atom has `always_include = 1`
+
+#### Scenario: atom-write preserves always_include on re-write
+- **GIVEN** an atom exists with `always_include = 1`
+- **WHEN** `atom-write` is called again for the same topic with new content (and `always_include` omitted or set to 0)
+- **THEN** the atom retains `always_include = 1` and the content is updated
+
+#### Scenario: atom-write defaults always_include to 0 when omitted
+- **GIVEN** no atom exists for the given topic
+- **WHEN** `atom-write` is called without specifying `always_include`
+- **THEN** the created atom has `always_include = 0`
+
+### Requirement: atom-list-full returns full content for always_include active atoms
+
+The `atom-list-full` command SHALL return full content rows — `scope`, `project`, `topic`, `description`, `content`, `updated_at` — for all atoms where `always_include = 1 AND status = 'active'` in the current workspace scope and the global scope, in a single query, ordered by `updated_at DESC, topic`. Only `status = 'active'` atoms SHALL be included; resolved and deprecated atoms SHALL be excluded even if flagged. The command SHALL NOT apply a row limit.
+
+#### Scenario: atom-list-full returns workspace and global flagged atoms together
+- **GIVEN** a workspace atom with `always_include = 1, status = 'active'` and a global atom with `always_include = 1, status = 'active'`
+- **WHEN** `atom-list-full` is called for the current workspace
+- **THEN** both atoms appear in the output, each carrying their `scope` field
+
+#### Scenario: atom-list-full excludes resolved and deprecated atoms
+- **GIVEN** atoms with `always_include = 1` and `status = 'resolved'` or `status = 'deprecated'`
+- **WHEN** `atom-list-full` is called
+- **THEN** those atoms are absent from the output
+
+#### Scenario: atom-list-full excludes non-flagged atoms
+- **GIVEN** an active atom with `always_include = 0`
+- **WHEN** `atom-list-full` is called
+- **THEN** that atom is absent from the output
 

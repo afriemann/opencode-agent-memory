@@ -4,17 +4,18 @@
 TBD - created by archiving change memory-atoms-and-session-hot-state. Update Purpose after archive.
 ## Requirements
 ### Requirement: memory_atom_write tool upserts an atom with required description
-The `memory_atom_write` registered tool SHALL invoke the `atom-write` CLI subcommand, passing a required `description` field and optional `scope` (default `'workspace'`). The tool SHALL accept an optional `created_at` argument (ISO 8601 string or epoch ms integer); when supplied it SHALL be converted to epoch ms and forwarded to the CLI as `createdAt`. The tool SHALL accept an optional `pinned` boolean argument (default `false`); when supplied it SHALL be forwarded to the CLI as `pinned`. The `pinned` value is applied only on INSERT (first creation); on a re-write of an existing atom the existing `pinned` state is preserved — use `memory_atom_patch` to change pin state. Atom `status` is always `'active'` at creation and is preserved on content re-write — `status` is never an argument to `memory_atom_write`. The tool description SHALL state both the INSERT-only pin caveat and the status preservation rule explicitly. The tool SHALL return the create-or-overwrite confirmation line from the CLI. It SHALL return an informative error result on CLI failure and SHALL NOT propagate exceptions into the opencode host.
 
-#### Scenario: Tool creates a new atom with active status
-- **GIVEN** no atom exists at the given topic in the current workspace
-- **WHEN** the agent calls memory_atom_write with topic, content, and description
-- **THEN** the tool returns 'Created atom at <topic>' and the new atom has `status='active'`
+The `memory_atom_write` tool SHALL accept an optional `always_include` boolean argument (default `false`). The tool description SHALL state that `always_include` is INSERT-only: setting it on first creation stores the value; a re-write of the same topic never changes it, and `memory_atom_patch` MUST be used to toggle it after creation.
 
-#### Scenario: Tool preserves resolved status on re-write
-- **GIVEN** an atom exists at the given topic with `status='resolved'`
-- **WHEN** the agent calls memory_atom_write with the same topic and new content
-- **THEN** the tool returns 'Updated existing atom at <topic>…' and the atom's `status` remains `'resolved'`
+#### Scenario: memory_atom_write accepts always_include on creation
+- **GIVEN** no atom exists for the given topic
+- **WHEN** `memory_atom_write` is called with `always_include: true`
+- **THEN** the created atom has `always_include = 1` and the call succeeds
+
+#### Scenario: memory_atom_write INSERT-only caveat is documented in the tool description
+- **GIVEN** the plugin tool definitions are loaded
+- **WHEN** the `memory_atom_write` tool description is inspected
+- **THEN** it states that `always_include` is set on first creation and a re-write never changes it
 
 ### Requirement: memory_atom_append tool appends to an existing atom
 The `memory_atom_append` registered tool SHALL invoke the `atom-append` CLI subcommand. It SHALL return the full updated content on success. If the topic does not exist the CLI exits non-zero and the tool SHALL surface the error message ("Atom '<topic>' does not exist — use memory_atom_write to create it first") as a ToolResult. It SHALL NOT propagate exceptions into the host.
@@ -131,28 +132,25 @@ The `memory_atom_write` and `memory_atom_append` tools SHALL capture `session_id
 - **THEN** the stored atom has session_name=null and no error is raised
 
 ### Requirement: memory_atom_patch tool performs content-preserving metadata updates
-The `memory_atom_patch` registered tool SHALL invoke the `atom-patch` CLI subcommand to update one or more of `description`, `tags`, `created_at`, `pinned`, and `status` for an existing atom without modifying its content. At least one of the five patchable fields MUST be supplied; an empty call SHALL be rejected with a clear error result. Setting `tags: []` SHALL clear existing tags; omitting `tags` SHALL leave existing tags unchanged. Omitting `pinned` SHALL leave the existing pin state unchanged; supplying `pinned: false` SHALL unpin the atom. Omitting `status` SHALL leave the existing status unchanged. The `status` field SHALL be a Zod enum accepting only `'active'`, `'resolved'`, or `'deprecated'`; other values SHALL be rejected at the schema layer with a descriptive error before the CLI is invoked. The `created_at` argument SHALL accept either an ISO 8601 date string or an epoch-ms number and be normalised to an epoch-ms integer in the plugin before the CLI is invoked. A `created_at`-only patch SHALL NOT modify the atom's `updated_at` timestamp; a patch that includes `description`, `tags`, `pinned`, or `status` SHALL bump `updated_at`. An empty `description` after trimming SHALL be rejected with an error result. `scope="all"` SHALL be rejected. The optional `workspace` argument (a directory path) SHALL substitute the effective directory for scope resolution, mirroring `memory_atom_get`. On success the tool SHALL return a confirmation message naming the topic and the changed fields. It SHALL NOT propagate exceptions into the host.
 
-#### Scenario: Tool patches status to resolved and bumps updated_at
-- **GIVEN** an atom exists at topic 'work/notes' with `status='active'` and known `updated_at`
-- **WHEN** the agent calls memory_atom_patch with `{status: 'resolved'}`
-- **THEN** the tool returns a success message containing 'work/notes' and 'status', and `updated_at` is bumped
+The `memory_atom_patch` tool's `patch` sub-object SHALL accept an optional `always_include` boolean field. An explicit `true` SHALL set the flag; an explicit `false` SHALL clear it; an omitted key SHALL leave the existing value unchanged.
 
-#### Scenario: Tool rejects invalid status value at the schema layer
-- **GIVEN** an atom exists at topic 'work/notes'
-- **WHEN** the agent calls memory_atom_patch with `{status: 'invalid'}`
-- **THEN** the tool returns an error result indicating the value must be one of the allowed enum values and does not invoke the CLI
+#### Scenario: memory_atom_patch toggles always_include via patch sub-object
+- **GIVEN** an atom with `always_include = 0`
+- **WHEN** `memory_atom_patch` is called with `patch: { always_include: true }`
+- **THEN** the atom has `always_include = 1`
 
-#### Scenario: Tool leaves status unchanged when status is omitted
-- **GIVEN** an atom exists at topic 'work/notes' with `status='resolved'`
-- **WHEN** the agent calls memory_atom_patch with only `{description: 'updated'}`
-- **THEN** the atom's `status` remains `'resolved'`
+#### Scenario: memory_atom_patch clears always_include via patch sub-object
+- **GIVEN** an atom with `always_include = 1`
+- **WHEN** `memory_atom_patch` is called with `patch: { always_include: false }`
+- **THEN** the atom has `always_include = 0`
 
 ### Requirement: MEMORY_PROTOCOL teaches agents status lifecycle semantics
-The `MEMORY_PROTOCOL` constant injected into tracked-session system prompts SHALL include a lifecycle block that: names the three status values (`active`, `resolved`, `deprecated`) and their visibility semantics (active = all surfaces; resolved = list/search default + atom-get, not primer; deprecated = explicit retrieval only); instructs agents to prefer `memory_atom_patch` with `status='deprecated'` or `status='resolved'` over `memory_atom_delete` when retiring an atom; and clarifies that `atom-list` and `atom-search` exclude deprecated atoms by default.
 
-#### Scenario: MEMORY_PROTOCOL contains status lifecycle guidance
-- **GIVEN** the MEMORY_PROTOCOL constant is read from the plugin source
-- **WHEN** its text is inspected
-- **THEN** it contains the three status values with their visibility semantics, a statement preferring patch-status over delete, and a note that deprecated atoms are excluded from list/search by default
+The `MEMORY_PROTOCOL` constant SHALL include guidance on the `always_include` flag: when to use it (atoms whose full content is needed at session start without a fetch — project conventions, user preferences, standing checklists under ~500 words); how to toggle it (`memory_atom_patch` with `patch: { always_include: true/false }`); the 5-per-scope render cap; the misuse warning (do not use for long-form content such as spec documents, logs, or large code samples); and the explicit distinction from `pinned` (pinned → compact line at top of directory; always_include → full content injected before the directory, no fetch needed).
+
+#### Scenario: MEMORY_PROTOCOL contains always_include guidance
+- **GIVEN** the plugin tool definitions are loaded
+- **WHEN** the `MEMORY_PROTOCOL` constant is inspected
+- **THEN** it contains a description of `always_include`, the toggle command, the 5-per-scope cap, the misuse warning, and the distinction from `pinned`
 
