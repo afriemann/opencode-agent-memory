@@ -1081,3 +1081,59 @@ describe('assemblePrimer — empty distil row handling', () => {
     expect(result).toContain('Distillation error');
   });
 });
+
+// ── assemblePrimer — atom preview newline stripping ───────────────────────────
+// Atom content previews may contain newlines (e.g. "## Error\n\nBad Request").
+// They must be collapsed to spaces so the atom directory stays single-line per
+// entry and headings in preview text don't get rendered as UI error blocks.
+
+describe('assemblePrimer — atom preview newline stripping', () => {
+  const PROJECT = '/home/user/repos/project';
+  const STALENESS = { status: 'ok', distance: 0 };
+  const NOW = Date.now();
+
+  test('newlines in atom preview are replaced with spaces', () => {
+    const atom = {
+      topic: 'reality/some-bug',
+      description: 'A bug report',
+      preview: '# Heading\n\n## Error\nBad Request: This model does not support',
+      updated_at: NOW - 60_000,
+    };
+    const result = assemblePrimer({
+      rows: [],
+      projectAtoms: [atom],
+      globalAtoms: [],
+      agent: 'engineer',
+      project: PROJECT,
+      staleness: STALENESS,
+    });
+    expect(result).not.toBeNull();
+    // No standalone "## Error" heading on its own line
+    const lines = result.split('\n');
+    expect(lines.some((l) => l.trim() === '## Error')).toBe(false);
+    // The preview content is still present, just on a single line
+    expect(result).toContain('reality/some-bug');
+  });
+
+  test('atom entry with multiline preview renders as a single directory line', () => {
+    const atom = {
+      topic: 'my/atom',
+      description: 'desc',
+      preview: 'line one\nline two',
+      updated_at: NOW - 60_000,
+    };
+    const result = assemblePrimer({
+      rows: [],
+      projectAtoms: [atom],
+      globalAtoms: [],
+      agent: 'engineer',
+      project: PROJECT,
+      staleness: STALENESS,
+    });
+    const lines = result.split('\n');
+    const atomLine = lines.find((l) => l.includes('my/atom'));
+    expect(atomLine).toBeDefined();
+    // The topic must appear exactly once, on a single line
+    expect(lines.filter((l) => l.includes('my/atom'))).toHaveLength(1);
+  });
+});
