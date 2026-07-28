@@ -336,6 +336,10 @@ const AgentMemory = async ({ client, $ }) => {
 
     const agent = session && session.agent;
     const project = session && session.directory;
+    // Refresh the session name so the primer always shows the final title,
+    // not the "New session - <timestamp>" default from session.created.
+    const freshTitle = session && session.title;
+    if (freshTitle != null) sessionNames.set(sessionId, freshTitle);
 
     if (!agent || !TARGET_AGENTS.has(agent)) return;
     if (!project) return;

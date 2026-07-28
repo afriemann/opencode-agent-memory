@@ -1755,6 +1755,49 @@ describe('session.created — sessionNames capture (task 8.21)', () => {
     // No crash is the minimal assertion here.
   });
 
+  test('doDistil refreshes session name from client.session.get, overriding stale session.created title', async () => {
+    // Simulate: session.created fires with the default opencode title, then
+    // by session.idle the real title has been set on the session object.
+    const client = makeMockClient();
+    client.session.get = async ({ path: { id } }) => ({
+      data: { id, agent: 'engineer', directory: '/test/proj', title: 'My real session title' },
+    });
+
+    const distilWriteCalls = [];
+    const $ = makeMockShell({
+      read: JSON.stringify({ prior: null, signals: [], watermark: null }),
+      'atom-list': '[]',
+      'atom-list-full': '[]',
+      'hot-state-cross-project': '[]',
+    });
+    // Intercept the distil-write call to capture the full command string.
+    const origFn = $;
+    const wrappedShell = function (strings, ...values) {
+      const cmd = strings.reduce((acc, s, i) => acc + s + (values[i] !== undefined ? String(values[i]) : ''), '');
+      if (cmd.includes('distil-write')) distilWriteCalls.push(cmd);
+      return origFn(strings, ...values);
+    };
+    wrappedShell.calls = origFn.calls;
+
+    const plugin = await AgentMemory({ client, $: wrappedShell });
+
+    // session.created fires with a stale default title (empty/null here)
+    await plugin.event({ event: {
+      type: 'session.created',
+      properties: {
+        sessionID: 'ses-stale',
+        info: { id: 'ses-stale', agent: 'engineer', directory: '/test/proj', title: 'New session - 2026-07-28T00:00:00.000Z' },
+      },
+    }});
+
+    // session.idle triggers doDistil, which calls client.session.get and gets the fresh title
+    await plugin.event({ event: { type: 'session.idle', properties: { sessionID: 'ses-stale' } } });
+
+    // The distil-write stdin payload must contain the fresh title
+    expect(distilWriteCalls.length).toBeGreaterThan(0);
+    expect(distilWriteCalls[distilWriteCalls.length - 1]).toContain('My real session title');
+  });
+
   test('cold start with no atoms results in no primer (null)', async () => {
     const $ = makeMockShell({ read: COLD_READ, 'atom-list': '[]' });
     const plugin = await AgentMemory({ client: makeBasicClient(), $ });
