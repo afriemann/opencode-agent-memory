@@ -33,16 +33,17 @@
 //                open_questions. Absent fields keep current values.
 //     Upserts a skeleton row when absent (cold-start safe).
 //
-//   atom-write <scope> <project> <json>
-//     json: { topic, content, description, tags?, sessionId?, sessionName? }
+//   atom-write <contextDirectory> <json>
+//     json: { workspace, topic, content, description, tags?, sessionId?, sessionName? }
+//     workspace: null | "." | absolute path (resolved to git root)
 //
-//   atom-append <scope> <project> <json>
-//     json: { topic, content }
+//   atom-append <contextDirectory> <json>
+//     json: { workspace, topic, content }
 //
 //   atom-get <scope> <project> <topic>
 //
 //   atom-search <scope> <project> <json>
-//     json: { query, limit?, status?, includeDeprecated? }
+//     json: { keywords, limit?, status?, includeDeprecated? }
 //
 //   atom-list <scope> <project> [<prefix>] [<optionsJson>]
 //     optionsJson (optional): { status?, includeDeprecated? }
@@ -51,7 +52,12 @@
 //     stdout: JSON array of { scope, project, topic, description, content, updated_at }
 //     Returns full content for all always_include=1 active atoms in scope.
 //
-//   atom-delete <scope> <project> <topic>
+//   atom-delete <contextDirectory> <json>
+//     json: { workspace, topic }
+//
+//   atom-list-workspaces [<optionsJson>]
+//     optionsJson (optional): { includeDeprecated? }
+//     stdout: JSON array of { workspace, count }
 //
 //   prune
 //     Delete memory_signal rows older than 30 days. Idempotent.
@@ -74,9 +80,11 @@ import {
   atomList,
   atomListFull,
   atomDelete,
+  atomListWorkspaces,
   hotStateCrossProject,
   hotStateDelete,
 } from './lib/schema.js';
+import { resolveWorkspace } from './lib/workspace.js';
 import { readDistilWatermark, advanceDistilWatermark } from './lib/watermark.js';
 import { EMPTY_RECORD } from './lib/distil-prompt.js';
 
@@ -464,7 +472,7 @@ function cmdPrune() {
 
 // ── Atom subcommand handlers ─────────────────────────────────────────────────
 
-function cmdAtomWrite(scope, project, jsonArg) {
+function cmdAtomWrite(contextDirectory, jsonArg) {
   let data;
   try {
     data = JSON.parse(jsonArg);
@@ -473,12 +481,21 @@ function cmdAtomWrite(scope, project, jsonArg) {
     process.exit(1);
   }
 
-  const { topic, content, description, tags, pinned, alwaysInclude, sessionId, sessionName, createdAt } = data;
+  const { workspace, topic, content, description, tags, pinned, alwaysInclude, sessionId, sessionName, createdAt } = data;
   if (!topic) {
     process.stderr.write('[agent-memory/atom-write] topic is required\n');
     process.exit(1);
   }
 
+  let resolved;
+  try {
+    resolved = resolveWorkspace(workspace, contextDirectory);
+  } catch (err) {
+    process.stderr.write(`[agent-memory/atom-write] ${err.message}\n`);
+    process.exit(1);
+  }
+
+  const { scope, project } = resolved;
   const db = openAndInit();
   try {
     const normTopic = normaliseTopic(topic);
@@ -490,7 +507,7 @@ function cmdAtomWrite(scope, project, jsonArg) {
     const msg = result.action === 'created'
       ? `Created atom at ${normTopic}`
       : `Updated existing atom at ${normTopic} (previous content overwritten)`;
-    process.stdout.write(JSON.stringify({ ok: true, action: result.action, message: msg }) + '\n');
+    process.stdout.write(JSON.stringify({ ok: true, action: result.action, message: msg, scope, project }) + '\n');
   } catch (err) {
     db.close();
     process.stderr.write(`[agent-memory/atom-write] ${err.message}\n`);
@@ -498,7 +515,7 @@ function cmdAtomWrite(scope, project, jsonArg) {
   }
 }
 
-function cmdAtomAppend(scope, project, jsonArg) {
+function cmdAtomAppend(contextDirectory, jsonArg) {
   let data;
   try {
     data = JSON.parse(jsonArg);
@@ -507,17 +524,26 @@ function cmdAtomAppend(scope, project, jsonArg) {
     process.exit(1);
   }
 
-  const { topic, content } = data;
+  const { workspace, topic, content } = data;
   if (!topic) {
     process.stderr.write('[agent-memory/atom-append] topic is required\n');
     process.exit(1);
   }
 
+  let resolved;
+  try {
+    resolved = resolveWorkspace(workspace, contextDirectory);
+  } catch (err) {
+    process.stderr.write(`[agent-memory/atom-append] ${err.message}\n`);
+    process.exit(1);
+  }
+
+  const { scope, project } = resolved;
   const db = openAndInit();
   try {
     const updated = atomAppend(db, { scope, project, topic, content: content ?? '' });
     db.close();
-    process.stdout.write(JSON.stringify({ ok: true, content: updated }) + '\n');
+    process.stdout.write(JSON.stringify({ ok: true, content: updated, scope, project }) + '\n');
   } catch (err) {
     db.close();
     process.stderr.write(`[agent-memory/atom-append] ${err.message}\n`);
@@ -541,16 +567,16 @@ function cmdAtomSearch(scope, project, jsonArg) {
     process.exit(1);
   }
 
-  const { query, limit, status, includeDeprecated } = data;
-  if (!query) {
-    process.stderr.write('[agent-memory/atom-search] query is required\n');
+  const { keywords, limit, status, includeDeprecated } = data;
+  if (!keywords) {
+    process.stderr.write('[agent-memory/atom-search] keywords is required\n');
     process.exit(1);
   }
 
   // When scope='all', pass 'all' so atomSearch drops scope predicate
   const searchScope = scope === 'all' ? 'all' : scope;
   const db = openAndInit();
-  const results = atomSearch(db, { scope: searchScope, project, query, limit, status, includeDeprecated });
+  const results = atomSearch(db, { scope: searchScope, project, keywords, limit, status, includeDeprecated });
   db.close();
   process.stdout.write(JSON.stringify(results) + '\n');
 }
@@ -575,7 +601,7 @@ function cmdAtomList(scope, project, prefix, optionsJson) {
   process.stdout.write(JSON.stringify(results) + '\n');
 }
 
-function cmdAtomPatch(scope, project, jsonArg) {
+function cmdAtomPatch(contextDirectory, jsonArg) {
   let data;
   try {
     data = JSON.parse(jsonArg);
@@ -584,10 +610,29 @@ function cmdAtomPatch(scope, project, jsonArg) {
     process.exit(1);
   }
 
-  const { topic, description, tags, created_at: createdAt, pinned, always_include: alwaysInclude, status } = data;
+  const { workspace, targetWorkspace, topic, description, tags, created_at: createdAt, pinned, always_include: alwaysInclude, status } = data;
   if (!topic) {
     process.stderr.write('[agent-memory/atom-patch] topic is required\n');
     process.exit(1);
+  }
+
+  let source;
+  try {
+    source = resolveWorkspace(workspace, contextDirectory);
+  } catch (err) {
+    process.stderr.write(`[agent-memory/atom-patch] ${err.message}\n`);
+    process.exit(1);
+  }
+
+  // Resolve destination (move target) when targetWorkspace is provided
+  let dest = source;
+  if (targetWorkspace !== undefined) {
+    try {
+      dest = resolveWorkspace(targetWorkspace, contextDirectory);
+    } catch (err) {
+      process.stderr.write(`[agent-memory/atom-patch] targetWorkspace: ${err.message}\n`);
+      process.exit(1);
+    }
   }
 
   const patch = {};
@@ -600,11 +645,28 @@ function cmdAtomPatch(scope, project, jsonArg) {
 
   const db = openAndInit();
   try {
-    const result = atomPatch(db, { scope, project, topic, patch });
+    const result = atomPatch(db, { source, dest, topic, patch });
     db.close();
-    process.stdout.write(
-      JSON.stringify({ ok: true, topic: normaliseTopic(topic), patched: result.patched }) + '\n'
-    );
+    if (result.moved) {
+      process.stdout.write(
+        JSON.stringify({
+          ok: true, topic: normaliseTopic(topic),
+          moved: true,
+          from: result.from,
+          to: result.to,
+          patched: result.patched,
+        }) + '\n'
+      );
+    } else {
+      process.stdout.write(
+        JSON.stringify({
+          ok: true, topic: normaliseTopic(topic),
+          patched: result.patched,
+          scope: source.scope,
+          project: source.project,
+        }) + '\n'
+      );
+    }
   } catch (err) {
     db.close();
     process.stderr.write(`[agent-memory/atom-patch] ${err.message}\n`);
@@ -619,17 +681,53 @@ function cmdAtomListFull(scope, project) {
   process.stdout.write(JSON.stringify(results) + '\n');
 }
 
-function cmdAtomDelete(scope, project, topic) {
+function cmdAtomListWorkspaces(optionsJson) {
+  let includeDeprecated = false;
+  if (optionsJson) {
+    let opts;
+    try {
+      opts = JSON.parse(optionsJson);
+    } catch {
+      process.stderr.write('[agent-memory/atom-list-workspaces] invalid options JSON\n');
+      process.exit(1);
+    }
+    includeDeprecated = opts.includeDeprecated ?? false;
+  }
+  const db = openAndInit();
+  const results = atomListWorkspaces(db, { includeDeprecated });
+  db.close();
+  process.stdout.write(JSON.stringify(results) + '\n');
+}
+
+function cmdAtomDelete(contextDirectory, jsonArg) {
+  let data;
+  try {
+    data = JSON.parse(jsonArg);
+  } catch {
+    process.stderr.write('[agent-memory/atom-delete] invalid JSON argument\n');
+    process.exit(1);
+  }
+
+  const { workspace, topic } = data;
   if (!topic) {
     process.stderr.write('[agent-memory/atom-delete] topic is required\n');
     process.exit(1);
   }
 
+  let resolved;
+  try {
+    resolved = resolveWorkspace(workspace, contextDirectory);
+  } catch (err) {
+    process.stderr.write(`[agent-memory/atom-delete] ${err.message}\n`);
+    process.exit(1);
+  }
+
+  const { scope, project } = resolved;
   const db = openAndInit();
   try {
     const result = atomDelete(db, { scope, project, topic });
     db.close();
-    process.stdout.write(JSON.stringify({ ok: true, deleted: result.deleted }) + '\n');
+    process.stdout.write(JSON.stringify({ ok: true, deleted: result.deleted, scope, project }) + '\n');
   } catch (err) {
     db.close();
     process.stderr.write(`[agent-memory/atom-delete] ${err.message}\n`);
@@ -725,22 +823,22 @@ switch (cmd) {
   }
 
   case 'atom-write': {
-    const [scope, project, jsonArg] = rest;
-    if (!scope || project == null || !jsonArg) {
-      process.stderr.write('Usage: memory.js atom-write <scope> <project> <json>\n');
+    const [contextDirectory, jsonArg] = rest;
+    if (!contextDirectory || !jsonArg) {
+      process.stderr.write('Usage: memory.js atom-write <contextDirectory> <json>\n');
       process.exit(1);
     }
-    cmdAtomWrite(scope, project, jsonArg);
+    cmdAtomWrite(contextDirectory, jsonArg);
     break;
   }
 
   case 'atom-append': {
-    const [scope, project, jsonArg] = rest;
-    if (!scope || project == null || !jsonArg) {
-      process.stderr.write('Usage: memory.js atom-append <scope> <project> <json>\n');
+    const [contextDirectory, jsonArg] = rest;
+    if (!contextDirectory || !jsonArg) {
+      process.stderr.write('Usage: memory.js atom-append <contextDirectory> <json>\n');
       process.exit(1);
     }
-    cmdAtomAppend(scope, project, jsonArg);
+    cmdAtomAppend(contextDirectory, jsonArg);
     break;
   }
 
@@ -784,23 +882,29 @@ switch (cmd) {
     break;
   }
 
+  case 'atom-list-workspaces': {
+    const [optionsJson] = rest;
+    cmdAtomListWorkspaces(optionsJson);
+    break;
+  }
+
   case 'atom-delete': {
-    const [scope, project, topic] = rest;
-    if (!scope || project == null || !topic) {
-      process.stderr.write('Usage: memory.js atom-delete <scope> <project> <topic>\n');
+    const [contextDirectory, jsonArg] = rest;
+    if (!contextDirectory || !jsonArg) {
+      process.stderr.write('Usage: memory.js atom-delete <contextDirectory> <json>\n');
       process.exit(1);
     }
-    cmdAtomDelete(scope, project, topic);
+    cmdAtomDelete(contextDirectory, jsonArg);
     break;
   }
 
   case 'atom-patch': {
-    const [scope, project, jsonArg] = rest;
-    if (!scope || project == null || !jsonArg) {
-      process.stderr.write('Usage: memory.js atom-patch <scope> <project> <json>\n');
+    const [contextDirectory, jsonArg] = rest;
+    if (!contextDirectory || !jsonArg) {
+      process.stderr.write('Usage: memory.js atom-patch <contextDirectory> <json>\n');
       process.exit(1);
     }
-    cmdAtomPatch(scope, project, jsonArg);
+    cmdAtomPatch(contextDirectory, jsonArg);
     break;
   }
 
@@ -822,7 +926,7 @@ switch (cmd) {
 
   default:
     process.stderr.write(
-      `Usage: memory.js <init|accrue|read|inspect|distil-write|correct|prune|atom-write|atom-append|atom-get|atom-search|atom-list|atom-list-full|atom-delete|atom-patch|hot-state-cross-project|hot-state-delete> [args]\n`
+      `Usage: memory.js <init|accrue|read|inspect|distil-write|correct|prune|atom-write|atom-append|atom-get|atom-search|atom-list|atom-list-full|atom-delete|atom-patch|atom-list-workspaces|hot-state-cross-project|hot-state-delete> [args]\n`
     );
     process.exit(1);
 }
