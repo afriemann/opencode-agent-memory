@@ -2021,19 +2021,9 @@ describe('atomListFull — full content for always_include active atoms', () => 
   test('results are ordered alphabetically by topic', () => {
     const db = openMemory();
     ensureSchema(db);
-    // Insert directly with an identical updated_at for all rows so the primary sort
-    // (updated_at DESC) never discriminates and the secondary sort (topic ASC) always
-    // applies.  Using atomWrite() would use Date.now() per call, and on a loaded
-    // system consecutive calls can land in different milliseconds, making the
-    // ordering non-deterministic.
-    const T = 1_000_000;
-    for (const [topic, content] of [['zzz', 'z'], ['aaa', 'a'], ['mmm', 'm']]) {
-      db.prepare(`
-        INSERT INTO memory_atom
-          (scope, project, topic, description, content, tags, always_include, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, '[]', 1, ?, ?)
-      `).run('project', '/p', topic, 'd', content, T, T);
-    }
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'zzz', content: 'z', description: 'd', alwaysInclude: true });
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'aaa', content: 'a', description: 'd', alwaysInclude: true });
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'mmm', content: 'm', description: 'd', alwaysInclude: true });
     const results = atomListFull(db, { scope: 'project', project: '/p' });
     const topics = results.map((r) => r.topic);
     expect(topics.indexOf('aaa')).toBeLessThan(topics.indexOf('mmm'));
