@@ -4,6 +4,21 @@
 
 The plugin SHALL provide a `resolveWorkspace(workspace, contextDirectory)` function that replaces `resolveScope`. The function SHALL map: `workspace === null` → `{ scope: 'global', project: '' }`; `workspace === '.'` → expand to `contextDirectory` (absolute), then resolve to git root; any absolute path string → resolve to git root; any non-null non-absolute non-`"."` string → return a validation error as tool output without spawning. Git-root resolution SHALL walk up from the expanded path looking for a `.git` directory (not file — `.git` files are worktree pointers and SHALL be skipped, causing the walk to continue upward); when the filesystem root is reached with no `.git` directory found the expanded path SHALL be returned as-is. `"."` SHALL be expanded to `contextDirectory` (via `path.resolve`) before any walk-up begins — the literal `"."` string SHALL never be passed to the git-root walk or stored in the database.
 
+For read-only tools (`memory_atom_list`, `memory_atom_search`, `memory_atom_get`) the plugin SHALL retain a `resolveScope(scope, directory)` helper that maps the existing agent-facing scope string to CLI positionals: `'workspace'` or `undefined` → `{scope:'project', project:directory}`; `'global'` → `{scope:'global', project:''}`; `'all'` → `{scope:'all', project:''}`.
+
+#### Scenario: resolveScope maps 'workspace' to project scope with directory
+- **GIVEN** the current project directory is '/home/user/my-project'
+- **WHEN** resolveScope is called with scope='workspace' and directory='/home/user/my-project'
+- **THEN** the result is { scope: 'project', project: '/home/user/my-project' }
+
+#### Scenario: resolveScope maps 'global' to empty project
+- **WHEN** resolveScope is called with scope='global'
+- **THEN** the result is { scope: 'global', project: '' }
+
+#### Scenario: resolveScope maps 'all' to empty project for read operations
+- **WHEN** resolveScope is called with scope='all' for a read operation
+- **THEN** the result is { scope: 'all', project: '' }
+
 #### Scenario: resolveWorkspace maps null to global scope
 - **GIVEN** `workspace` is `null`
 - **WHEN** `resolveWorkspace(null, '/home/user/project')` is called
@@ -33,6 +48,16 @@ The plugin SHALL provide a `resolveWorkspace(workspace, contextDirectory)` funct
 
 The `memory_atom_write` tool SHALL remove the `scope` parameter and instead expose a required `workspace` parameter. `workspace` SHALL accept `null` (global store), `"."` (current project — resolves to git root of `context.directory`), or an absolute path string (foreign project — resolves to its git root). Callers that omit `workspace` SHALL receive a schema validation error. Callers that supply a relative path other than `"."` SHALL receive a tool-output validation error without spawning. The confirmation output SHALL end with the resolved location: `[workspace: /path]` or `[global]`. The tool description SHALL direct callers to use `memory_atom_append` when they need to add content without replacing existing content.
 
+#### Scenario: memory_atom_write accepts always_include on creation
+- **GIVEN** no atom exists for the given topic
+- **WHEN** `memory_atom_write` is called with `always_include: true`
+- **THEN** the created atom has `always_include = 1` and the call succeeds
+
+#### Scenario: memory_atom_write INSERT-only caveat is documented in the tool description
+- **GIVEN** the plugin tool definitions are loaded
+- **WHEN** the `memory_atom_write` tool description is inspected
+- **THEN** it states that `always_include` is set on first creation and a re-write never changes it
+
 #### Scenario: memory_atom_write with workspace="." writes to current project git root
 - **GIVEN** opencode is running in `/repo` where `/repo/.git` is a directory
 - **WHEN** `memory_atom_write` is called with `workspace: "."`, topic, content, description
@@ -57,6 +82,16 @@ The `memory_atom_write` tool SHALL remove the `scope` parameter and instead expo
 
 The `memory_atom_append` tool SHALL remove the `scope` parameter and instead expose a required `workspace` parameter with the same null/`"."`/absolute-path semantics and validation as `memory_atom_write`. The tool description SHALL state that the tool is for adding content without replacing existing content, and SHALL direct callers to use `memory_atom_write` to replace content entirely.
 
+#### Scenario: Tool appends content and returns updated full content
+- **GIVEN** an atom exists at the given topic
+- **WHEN** the agent calls memory_atom_append with additional content
+- **THEN** the tool returns the full content of the atom after the append
+
+#### Scenario: Tool surfaces error when topic is missing
+- **GIVEN** no atom exists at the given topic
+- **WHEN** the agent calls memory_atom_append
+- **THEN** the tool returns an error result containing the missing-topic message and does not throw
+
 #### Scenario: memory_atom_append with workspace="." appends to current project atom
 - **GIVEN** an atom exists at topic 'work/notes' in the current project workspace
 - **WHEN** `memory_atom_append` is called with `workspace: "."` and content
@@ -66,6 +101,16 @@ The `memory_atom_append` tool SHALL remove the `scope` parameter and instead exp
 
 The `memory_atom_delete` tool SHALL remove the `scope` parameter and instead expose a required `workspace` parameter with the same null/`"."`/absolute-path semantics and validation as `memory_atom_write`. The tool description SHALL instruct callers to prefer `memory_atom_patch` with `status="deprecated"` or `status="resolved"` over deletion, and SHALL reserve deletion for atoms that must be permanently removed. The confirmation output SHALL end with the resolved location.
 
+#### Scenario: Tool removes an existing atom and returns confirmation
+- **GIVEN** an atom exists at the given (scope, topic)
+- **WHEN** the agent calls memory_atom_delete
+- **THEN** the atom is removed and the tool returns a one-line confirmation
+
+#### Scenario: Tool returns error result when topic does not exist
+- **GIVEN** no atom exists at the given (scope, topic)
+- **WHEN** the agent calls memory_atom_delete
+- **THEN** the tool returns an informative error result and does not throw
+
 #### Scenario: memory_atom_delete with workspace="." deletes from current project
 - **GIVEN** an atom exists at the given topic in the current project workspace
 - **WHEN** `memory_atom_delete` is called with `workspace: "."`
@@ -74,6 +119,16 @@ The `memory_atom_delete` tool SHALL remove the `scope` parameter and instead exp
 ### Requirement: memory_atom_patch tool performs content-preserving metadata updates
 
 The `memory_atom_patch` tool SHALL remove the `scope` parameter and expose a required top-level `workspace` parameter (source locator — where the atom currently lives) with the same null/`"."`/absolute-path semantics as `memory_atom_write`. The `patch` sub-object SHALL gain an optional `workspace` field (destination) — when `patch.workspace` is supplied, the tool SHALL perform an atomic move: the atom is deleted from the source workspace and re-inserted at the destination in one transaction (BEGIN IMMEDIATE). Combined move + metadata: other patch fields present alongside `patch.workspace` are applied to the atom before it lands at the destination. Source equals destination (resolved locators identical): treated as an in-place patch. Destination conflict: overwritten. `patch.workspace` SHALL follow the same null/`"."`/absolute-path resolution rules as the top-level `workspace`.
+
+#### Scenario: memory_atom_patch toggles always_include via patch sub-object
+- **GIVEN** an atom with `always_include = 0`
+- **WHEN** `memory_atom_patch` is called with `patch: { always_include: true }`
+- **THEN** the atom has `always_include = 1`
+
+#### Scenario: memory_atom_patch clears always_include via patch sub-object
+- **GIVEN** an atom with `always_include = 1`
+- **WHEN** `memory_atom_patch` is called with `patch: { always_include: false }`
+- **THEN** the atom has `always_include = 0`
 
 #### Scenario: memory_atom_patch moves atom to new workspace
 - **GIVEN** an atom exists at topic 'arch/db' in project '/repo-a'
@@ -99,6 +154,21 @@ The `memory_atom_patch` tool SHALL remove the `scope` parameter and expose a req
 
 The `memory_atom_search` tool's `query` parameter SHALL be renamed to `keywords`. The tool description SHALL state that search is BM25 keyword-based full-text matching — NOT semantic or vector search — and SHALL instruct callers to use exact terms. The tool description SHALL cross-reference `memory_atom_list` for topic-based browsing. The `scope` parameter description SHALL note that its default is `"all"` and that this differs from `memory_atom_list` which defaults to `"workspace"`.
 
+#### Scenario: Tool default excludes deprecated matches
+- **GIVEN** matching atoms exist with all three status values
+- **WHEN** the agent calls memory_atom_search without status arguments
+- **THEN** only active and resolved matching atoms are returned
+
+#### Scenario: Tool with includeDeprecated includes deprecated matches
+- **GIVEN** matching atoms exist with all three status values
+- **WHEN** the agent calls memory_atom_search with includeDeprecated=true
+- **THEN** matching atoms of all three status values are returned
+
+#### Scenario: Tool with status='resolved' returns only resolved matches
+- **GIVEN** matching atoms exist with all three status values
+- **WHEN** the agent calls memory_atom_search with status='resolved'
+- **THEN** only resolved matching atoms are returned
+
 #### Scenario: memory_atom_search accepts keywords (not query)
 - **GIVEN** atoms exist with matching content
 - **WHEN** `memory_atom_search` is called with `keywords: "auth config"`
@@ -112,6 +182,11 @@ The `memory_atom_search` tool's `query` parameter SHALL be renamed to `keywords`
 ### Requirement: MEMORY_PROTOCOL teaches agents status lifecycle semantics
 
 The `MEMORY_PROTOCOL` constant SHALL replace the "Scope" guidance paragraph with an "Addressing" paragraph that states: pass `workspace: "."` for the current project (resolves to its git root), `workspace: null` for global — and that `workspace` is always required (there is no default). The constant SHALL include a "Searching" note that states `memory_atom_search` uses BM25 keyword matching and is NOT semantic search. The constant SHALL include a `/migrate-workspace-atoms` procedure that instructs agents to: call `memory_workspaces_list`, check each path against its git root via `git -C <path> rev-parse --show-toplevel`, and for each non-root path move its atoms to the git root using `memory_atom_patch` with `patch.workspace` set to the git root.
+
+#### Scenario: MEMORY_PROTOCOL contains always_include guidance
+- **GIVEN** the plugin tool definitions are loaded
+- **WHEN** the `MEMORY_PROTOCOL` constant is inspected
+- **THEN** it contains a description of `always_include`, the toggle command, the 5-per-scope cap, the misuse warning, and the distinction from `pinned`
 
 #### Scenario: MEMORY_PROTOCOL contains workspace addressing guidance
 - **GIVEN** the plugin tool definitions are loaded
