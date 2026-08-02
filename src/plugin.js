@@ -17,7 +17,7 @@
 import { tool } from '@opencode-ai/plugin';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { join, dirname } from 'node:path';
+import { join, dirname, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import {
   DISTIL_SCHEMA,
@@ -74,7 +74,7 @@ You have persistent memory via the \`memory_atom_*\` and \`memory_state_*\` tool
 
 **Read before re-investigating**: before exploring a familiar domain, call \`memory_atom_search\` or \`memory_atom_list\` — previous findings may already be recorded. Use \`memory_atom_get\` to retrieve the full content of a specific atom.
 
-**Scope**: use \`workspace\` (default) for project-specific facts; use \`global\` for facts true across all projects (host config, tool versions, cross-repo conventions).
+**Addressing**: pass \`workspace: "."\` to write to the current project (resolves to its git root), \`workspace: null\` to write globally. Always pass \`workspace\` explicitly — there is no default.
 
 **Update atom metadata** (\`memory_atom_patch\`) when you need to correct description, tags, created_at, or pin state without rewriting content — e.g. re-dating a migrated atom or pinning it. Use \`memory_atom_write\` when content itself changes.
 
@@ -87,7 +87,15 @@ Prefer \`status="deprecated"\` or \`status="resolved"\` over \`memory_atom_delet
 
 **Standing context** (\`always_include\`): set \`always_include: true\` on an atom to inject its **full content** into every session primer under \`### Standing context\` — the agent reads it without a \`memory_atom_get\` call. Use only for short (≤500-word) content that must be available before the user's first message: persistent project conventions, user preferences, or global coding rules. Do NOT mark long documents, spec files, or code samples as \`always_include\`. Limit: at most 5 always_include atoms per scope (workspace and global independently) are rendered; excess atoms are named in an overflow note. The \`always_include\` flag is INSERT-only on \`memory_atom_write\`; toggle it via \`memory_atom_patch\` with \`patch: { always_include: true/false }\`. Distinguish from \`pinned\`: \`pinned\` keeps the atom at the top of the compact directory listing (one line); \`always_include\` injects the full body and removes the atom from the compact directory entirely.
 
-**Hot-state** (\`memory_state_*\`) is managed automatically — it distils on session idle. Call \`memory_state_distil\` to force an immediate save when finishing a meaningful chunk of work.`;
+**Searching**: \`memory_atom_search\` uses BM25 keyword matching — NOT semantic search. Use exact terms.
+
+**Hot-state** (\`memory_state_*\`) is managed automatically — it distils on session idle. Call \`memory_state_distil\` to force an immediate save when finishing a meaningful chunk of work.
+
+**Migrate workspace paths to git roots** (\`/migrate-workspace-atoms\`):
+If atoms were written before git-root normalisation (e.g. from a subdirectory), run this procedure:
+1. Call \`memory_workspaces_list\` to enumerate every stored workspace path.
+2. For each path, run \`git -C <path> rev-parse --show-toplevel\`. If it fails (non-git), skip.
+3. If path ≠ git root: for each atom in that workspace (via \`memory_atom_list\`), call \`memory_atom_patch\` with \`workspace: <old-path>\` (source) and \`patch: { workspace: <git-root> }\` (destination) to move it. This is idempotent — atoms already at the git root are skipped.`;
 
 const MAX_IN_FLIGHT = 5000;
 
@@ -142,10 +150,45 @@ async function spawnMemory($, args, stdinData) {
   return await $`node ${SCRIPT} ${sub} ${rest}`.quiet().text();
 }
 
-// ── Scope resolution ─────────────────────────────────────────────────────────
+// ── Workspace validation (plugin-side, pre-spawn) ────────────────────────────
+
+/**
+ * Validate a workspace locator at the plugin layer (before spawning).
+ * Returns null on success, or a human-readable error string on failure.
+ *
+ * Accepted values: null (global), "." (current project), or an absolute path.
+ * Any other value is rejected with a clear message.
+ *
+ * @param {unknown} workspace
+ * @returns {string|null} — null if valid, error message if invalid
+ */
+function validateWorkspace(workspace) {
+  if (workspace === null || workspace === undefined) return null;
+  if (typeof workspace !== 'string') {
+    return `workspace must be null or a string — got: ${typeof workspace}`;
+  }
+  if (workspace === '.') return null;
+  if (isAbsolute(workspace)) return null;
+  return `workspace must be null, ".", or an absolute path — got: "${workspace}"`;
+}
+
+/**
+ * Format the resolved storage location for confirmation output.
+ *
+ * @param {string} scope — 'global' | 'project'
+ * @param {string} project — the git-root path (empty string when global)
+ * @returns {string}
+ */
+function formatLocation(scope, project) {
+  return scope === 'global' ? '[global]' : `[workspace: ${project}]`;
+}
+
+// ── Scope resolution (read-only tools only) ───────────────────────────────────
 
 /**
  * Resolve a user-facing scope string to { scope, project } positional args.
+ * Used by read-only tools (atom-get, atom-list, atom-search) that still use
+ * the legacy <scope> <project> positional CLI shape.
  *
  * @param {string|undefined} scope — 'workspace' | 'global' | 'all' | undefined
  * @param {string} directory — session working directory
@@ -532,8 +575,9 @@ const AgentMemory = async ({ client, $ }) => {
   const memory_state_inspect = tool({
     description:
       'Read the current agent memory hot state for this session: recent session threads, ' +
-      'current signals, and the loaded primer. Does not list durable atoms — use ' +
-      'memory_atom_list for the atom directory or memory_atom_get to fetch a specific atom by topic.',
+      'current signals, and the loaded primer. Read-only — does not modify any state, signals, or ' +
+      'session records. Does not list durable atoms — use memory_atom_list for the atom directory or ' +
+      'memory_atom_get to fetch a specific atom by topic. To correct fields in the hot state, use memory_state_patch.',
     args: {},
     async execute(_args, context) {
       const agent = await resolveSessionAgent(context.sessionID);
@@ -565,7 +609,9 @@ const AgentMemory = async ({ client, $ }) => {
    */
   const memory_state_patch = tool({
     description:
-      'Apply a partial correction to the agent memory hot state. ' +
+      'Apply a partial update to the agent memory hot state. ' +
+      'Call memory_state_inspect first to read the current state. ' +
+      'Patchable fields: last_worked_summary, next_action, open_questions. ' +
       'Only fields included in `patch` are updated; omitted fields are unchanged. ' +
       'Does not delete signals or advance the distil watermark.',
     args: {
@@ -610,7 +656,8 @@ const AgentMemory = async ({ client, $ }) => {
     description:
       'Force an immediate memory distillation for the current session, bypassing the idle ' +
       'throttle window. All other guards (ephemeral skip, tracked-agent check) still apply. ' +
-      'The distil-force subcommand has no CLI form; only this plugin tool triggers it.',
+      'Call when finishing a meaningful chunk of work to ensure the session state is saved before ' +
+      'the session ends or before handing off to another agent.',
     args: {},
     async execute(_args, context) {
       const agent = await resolveSessionAgent(context.sessionID);
@@ -643,7 +690,7 @@ const AgentMemory = async ({ client, $ }) => {
       'Delete a hot_state session row by session_id. ' +
       'Pass the full session_id visible in the primer\'s Recent sessions section. ' +
       'Pass an empty string "" to delete all orphaned rows (session_id IS NULL or empty) for the current project. ' +
-      'Cannot delete the calling session\'s own row. ' +
+      'Cannot delete the calling session\'s own row — doing so would corrupt the current session\'s state. ' +
       'Returns { deleted: N } — count of rows removed.',
     args: {
       sessionId: {
@@ -678,21 +725,20 @@ const AgentMemory = async ({ client, $ }) => {
    */
   const memory_atom_write = tool({
     description:
-      'Write (upsert) a durable named memory atom. ' +
-      'The `description` field is required and describes what the atom is for. ' +
-      'Returns confirmation of whether the atom was created or an existing one was overwritten. ' +
-      'Optional `pinned: true` marks the atom so it always appears at the top of the session primer regardless of the cap. ' +
-      'Pin state is set on the first insert and is NOT overwritten by subsequent content updates — use memory_atom_patch to change the pin state of an existing atom. ' +
-      'Optional `always_include: true` injects the atom\'s full content into every session primer under ### Standing context — use only for short (≤500-word) content needed before the user\'s first message (project conventions, user preferences). ' +
-      'At most 5 always_include atoms per scope are rendered; excess are named in an overflow note. ' +
-      'always_include is INSERT-only: re-writing an existing atom does not change it — use memory_atom_patch to toggle it. ' +
-      'Status is always `active` for new atoms and is preserved on re-write — use memory_atom_patch to change an atom\'s status.',
+      'Write (upsert) a durable named memory atom. Returns confirmation including the resolved storage location. ' +
+      'To add content without replacing existing content, use memory_atom_append instead.',
     args: {
       topic: tool.schema.string().describe('Hierarchical key, e.g. "arch/db-layer"'),
       content: tool.schema.string().describe('Full atom content'),
       description: tool.schema.string().describe('What this atom is for (required)'),
       tags: tool.schema.array(tool.schema.string()).optional().describe('Optional tags'),
-      scope: tool.schema.string().optional().describe('"workspace" (default), "global"'),
+      workspace: tool.schema.union([tool.schema.string(), tool.schema.null()]).describe(
+        'Required. Pass null for the global store, "." for the current project (resolves to its git root), ' +
+        'or an absolute path for a foreign project (also resolved to its git root). ' +
+        'Paths are normalised to the nearest .git directory walking upward; .git files (worktree pointers) are skipped ' +
+        'so all worktrees resolve to the main repo root. If no .git directory is found, the path is used as-is. ' +
+        '"." is always safe for the current project regardless of which subdirectory opencode was launched from.'
+      ),
       pinned: tool.schema.boolean().optional().describe(
         'Pin this atom so it always appears in the session primer. ' +
         'Pinned atoms are listed first, before the regular capped list. ' +
@@ -709,11 +755,11 @@ const AgentMemory = async ({ client, $ }) => {
         'When omitted, the current time is used.'
       ),
     },
-    async execute({ topic, content, description, tags, scope, pinned, always_include, created_at }, context) {
-      if (scope === 'all') {
-        return { title: 'memory_atom_write', output: 'Error: scope="all" is not valid for write operations. Use "workspace" or "global".' };
+    async execute({ topic, content, description, tags, workspace, pinned, always_include, created_at }, context) {
+      const validationError = validateWorkspace(workspace);
+      if (validationError) {
+        return { title: 'memory_atom_write', output: `Error: ${validationError}` };
       }
-      const { scope: resolvedScope, project } = resolveScope(scope, context.directory);
 
       // Convert caller-supplied creation timestamp to epoch ms.
       let createdAt;
@@ -733,13 +779,17 @@ const AgentMemory = async ({ client, $ }) => {
       }
 
       try {
-        const out = await spawnMemory($, ['atom-write', resolvedScope, project],
-          { topic, content, description, tags, pinned, alwaysInclude: always_include,
+        const out = await spawnMemory($, ['atom-write', context.directory],
+          { workspace, topic, content, description, tags, pinned, alwaysInclude: always_include,
             sessionId: context.sessionID,
             sessionName: sessionNames.get(context.sessionID) ?? null,
             ...(createdAt !== undefined ? { createdAt } : {}) });
         const result = JSON.parse(out.trim());
-        return { title: 'memory_atom_write', output: result.message };
+        const location = formatLocation(result.scope, result.project);
+        const msg = result.action === 'created'
+          ? `Created atom at ${topic} ${location}`
+          : `Updated existing atom at ${topic} (previous content overwritten) ${location}`;
+        return { title: 'memory_atom_write', output: msg };
       } catch (err) {
         return {
           title: 'memory_atom_write',
@@ -756,21 +806,31 @@ const AgentMemory = async ({ client, $ }) => {
     description:
       'Append content to an existing memory atom. ' +
       'Uses a "\\n---\\n" separator. Errors if the topic does not exist — ' +
-      'use memory_atom_write to create it first.',
+      'use memory_atom_write to create it first. ' +
+      'Use when adding information without replacing existing content. ' +
+      'To replace content entirely, use memory_atom_write. ' +
+      'Returns the full updated content of the atom after appending.',
     args: {
       topic: tool.schema.string().describe('Topic key of the atom to append to'),
       content: tool.schema.string().describe('Content to append'),
-      scope: tool.schema.string().optional().describe('"workspace" (default), "global"'),
+      workspace: tool.schema.union([tool.schema.string(), tool.schema.null()]).describe(
+        'Required. Pass null for the global store, "." for the current project (resolves to its git root), ' +
+        'or an absolute path for a foreign project (also resolved to its git root). ' +
+        'Paths are normalised to the nearest .git directory walking upward; .git files (worktree pointers) are skipped ' +
+        'so all worktrees resolve to the main repo root. If no .git directory is found, the path is used as-is. ' +
+        '"." is always safe for the current project regardless of which subdirectory opencode was launched from.'
+      ),
     },
-    async execute({ topic, content, scope }, context) {
-      if (scope === 'all') {
-        return { title: 'memory_atom_append', output: 'Error: scope="all" is not valid for write operations. Use "workspace" or "global".' };
+    async execute({ topic, content, workspace }, context) {
+      const validationError = validateWorkspace(workspace);
+      if (validationError) {
+        return { title: 'memory_atom_append', output: `Error: ${validationError}` };
       }
-      const { scope: resolvedScope, project } = resolveScope(scope, context.directory);
       try {
-        const out = await spawnMemory($, ['atom-append', resolvedScope, project], { topic, content });
+        const out = await spawnMemory($, ['atom-append', context.directory], { workspace, topic, content });
         const result = JSON.parse(out.trim());
-        return { title: 'memory_atom_append', output: result.content };
+        const location = formatLocation(result.scope, result.project);
+        return { title: 'memory_atom_append', output: `${result.content} ${location}` };
       } catch (err) {
         return {
           title: 'memory_atom_append',
@@ -795,10 +855,14 @@ const AgentMemory = async ({ client, $ }) => {
       'The output always includes `status:` so you can determine whether the atom needs lifecycle management.',
     args: {
       topic: tool.schema.string().describe('Topic key to look up'),
-      scope: tool.schema.string().optional().describe('"workspace" (default), "global"'),
+      scope: tool.schema.string().optional().describe(
+        '"workspace" (default), "global". scope="global" overrides the workspace parameter when both are set.'
+      ),
       workspace: tool.schema.string().optional().describe(
         'Directory path of a foreign workspace (from an alsoIn listing). ' +
-        'When set, resolves the atom against this path instead of the current session directory.'
+        'When set, resolves the atom against this path instead of the current session directory. ' +
+        'Does NOT move the atom. Note: workspace targeting on get is not yet git-root normalised — ' +
+        'pass the exact path shown inside [workspace: <path>] in an alsoIn entry.'
       ),
     },
     async execute({ topic, scope, workspace }, context) {
@@ -850,16 +914,23 @@ const AgentMemory = async ({ client, $ }) => {
    */
   const memory_atom_search = tool({
     description:
-      'Full-text search across memory atoms. ' +
+      'BM25 keyword-based full-text search across memory atoms — NOT semantic or vector search. ' +
       'Searches all workspaces by default. ' +
-      'Use scope="workspace" to restrict to current workspace + global, or scope="global" for global only. ' +
-      'By default, returns active and resolved atoms (deprecated excluded). ' +
+      'Returns active and resolved atoms by default (deprecated excluded). ' +
       'Pass `status` for an exact-match filter on one status value. ' +
-      'Pass `includeDeprecated: true` to include all atoms regardless of status.',
+      'Pass `includeDeprecated: true` to include all atoms regardless of status. ' +
+      'For topic-based browsing rather than keyword search, use memory_atom_list.',
     args: {
-      query: tool.schema.string().describe('Search query'),
+      keywords: tool.schema.string().describe(
+        'Space-separated keywords to match (BM25 token matching). ' +
+        'Use exact terms that appear in atom content, topic, or description. ' +
+        'Natural-language phrases return poor results; prefer discrete nouns and identifiers.'
+      ),
       limit: tool.schema.number().optional().describe('Max results (default 20)'),
-      scope: tool.schema.string().optional().describe('"all" (default), "workspace", "global"'),
+      scope: tool.schema.string().optional().describe(
+        '"all" (default — searches all workspaces); note this default differs from memory_atom_list ' +
+        'which defaults to "workspace". Use "workspace" to restrict to current workspace + global, or "global" for global only.'
+      ),
       status: tool.schema.string().optional().describe(
         'Exact-match status filter. One of: "active", "resolved", "deprecated". ' +
         'Overrides the default active+resolved filter.'
@@ -869,7 +940,7 @@ const AgentMemory = async ({ client, $ }) => {
         'Overrides the default active+resolved filter.'
       ),
     },
-    async execute({ query, limit, scope, status, includeDeprecated }, context) {
+    async execute({ keywords, limit, scope, status, includeDeprecated }, context) {
       const { scope: resolvedScope, project } = resolveScope(scope ?? 'all', context.directory);
       if (status !== undefined) {
         const VALID_STATUSES = ['active', 'resolved', 'deprecated'];
@@ -878,7 +949,7 @@ const AgentMemory = async ({ client, $ }) => {
         }
       }
       try {
-        const out = await spawnMemory($, ['atom-search', resolvedScope, project], { query, limit, status, includeDeprecated });
+        const out = await spawnMemory($, ['atom-search', resolvedScope, project], { keywords, limit, status, includeDeprecated });
         const results = JSON.parse(out.trim());
         if (!results || results.length === 0) {
           return { title: 'memory_atom_search', output: 'No results found.' };
@@ -911,10 +982,13 @@ const AgentMemory = async ({ client, $ }) => {
       'By default, returns active and resolved atoms (deprecated excluded). ' +
       'Pass `status` for an exact-match filter on one status value. ' +
       'Pass `includeDeprecated: true` to include all atoms regardless of status. ' +
-      'Non-active atoms are shown with a `[resolved]` or `[deprecated]` prefix in the output.',
+      'Non-active atoms are shown with a `[resolved]` or `[deprecated]` prefix in the output. ' +
+      'To search by content keywords rather than topic prefix, use memory_atom_search.',
     args: {
       prefix: tool.schema.string().optional().describe('Topic prefix filter (e.g. "arch/")'),
-      scope: tool.schema.string().optional().describe('"workspace" (default), "global", "all"'),
+      scope: tool.schema.string().optional().describe(
+        '"workspace" (default — current project + global atoms); "global" (global only); "all" (all workspaces including other projects).'
+      ),
       status: tool.schema.string().optional().describe(
         'Exact-match status filter. One of: "active", "resolved", "deprecated". ' +
         'Overrides the default active+resolved filter.'
@@ -973,22 +1047,26 @@ const AgentMemory = async ({ client, $ }) => {
   const memory_atom_patch = tool({
     description:
       'Patch atom metadata (description, tags, created_at, pinned, always_include, status) without rewriting its content. ' +
+      'Also supports an atomic workspace move: supply patch.workspace to relocate the atom to a different workspace ' +
+      'in one transaction (delete from source, re-insert at destination). ' +
       'Supply a `patch` object containing the fields to change; absent fields are left unchanged. ' +
       'At least one field inside `patch` must be present. ' +
       'To CLEAR tags, supply `tags: []` explicitly inside `patch` — omitting `tags` leaves existing tags unchanged. ' +
       '`patch.created_at` accepts an ISO 8601 date string or an epoch-ms number. ' +
       'A created_at-only patch does NOT update the atom\'s updated_at timestamp. ' +
-      '`patch.pinned` pins or unpins the atom; pinned atoms always appear at the top of the session primer. ' +
-      '`patch.always_include` toggles full-content injection into the session primer Standing context section. ' +
       '`patch.status` changes the atom\'s lifecycle visibility: "active" (default, all surfaces), ' +
       '"resolved" (hidden from primer; visible in list/search by default), or ' +
       '"deprecated" (hidden from all surfaces by default; retrieve with includeDeprecated: true). ' +
       'Use memory_atom_write when you need to change the atom\'s content.',
     args: {
       topic: tool.schema.string().describe('Topic key of the atom to patch'),
-      scope: tool.schema.string().optional().describe('"workspace" (default), "global"'),
-      workspace: tool.schema.string().optional().describe(
-        'Directory path of a foreign workspace. When set, resolves the atom against this path instead of the current session directory.'
+      workspace: tool.schema.union([tool.schema.string(), tool.schema.null()]).describe(
+        'Required. Pass null for the global store, "." for the current project (resolves to its git root), ' +
+        'or an absolute path for a foreign project (also resolved to its git root). ' +
+        'Paths are normalised to the nearest .git directory walking upward; .git files (worktree pointers) are skipped ' +
+        'so all worktrees resolve to the main repo root. If no .git directory is found, the path is used as-is. ' +
+        '"." is always safe for the current project regardless of which subdirectory opencode was launched from. ' +
+        'This is the source — where the atom currently lives. To move the atom, supply patch.workspace.'
       ),
       patch: tool.schema.object({
         description: tool.schema.string().optional().describe('New description (must be non-empty if supplied)'),
@@ -1007,23 +1085,40 @@ const AgentMemory = async ({ client, $ }) => {
           '"resolved" (hidden from primer; visible in list/search by default), ' +
           '"deprecated" (hidden from all surfaces by default).'
         ),
+        workspace: tool.schema.union([tool.schema.string(), tool.schema.null()]).optional().describe(
+          'Optional. If supplied, triggers an atomic move: the atom is deleted from the source workspace and ' +
+          're-inserted at the destination in one transaction. Accepts the same null/"."/absolute-path values as ' +
+          'the top-level workspace param. Combined with other patch fields: metadata is updated and the atom is ' +
+          'moved in one operation. Source == destination: treated as an in-place patch. Destination conflict: overwritten.'
+        ),
       }).describe('Fields to patch. At least one field must be present.'),
     },
-    async execute({ topic, patch = {}, scope, workspace }, context) {
+    async execute({ topic, patch = {}, workspace }, context) {
       // patch = {} is a defensive default; schema requires patch but execute() can be
       // called directly in tests that bypass schema validation — the empty-patch guard below handles the fallback.
-      if (scope === 'all') {
-        return { title: 'memory_atom_patch', output: 'Error: scope="all" is not valid for patch operations. Use "workspace" or "global".' };
+
+      // Validate source workspace
+      const sourceValidationError = validateWorkspace(workspace);
+      if (sourceValidationError) {
+        return { title: 'memory_atom_patch', output: `Error: ${sourceValidationError}` };
       }
 
-      const { description, tags, created_at, pinned, always_include, status } = patch;
+      const { description, tags, created_at, pinned, always_include, status, workspace: destWorkspace } = patch;
 
-      // tool.schema (Zod) .optional() produces T | undefined — null is rejected at
-      // schema validation before execute is called, so `!== undefined` is sufficient
-      // to distinguish "caller supplied tags: []" (clear) from "caller omitted tags" (keep).
+      // Validate destination workspace when a move is requested
+      if (destWorkspace !== undefined) {
+        const destValidationError = validateWorkspace(destWorkspace);
+        if (destValidationError) {
+          return { title: 'memory_atom_patch', output: `Error: patch.workspace: ${destValidationError}` };
+        }
+      }
+
+      // Collect patchable metadata fields (exclude workspace — that's a move trigger, not metadata)
       const PATCHABLE = ['description', 'tags', 'created_at', 'pinned', 'always_include', 'status'];
       const present = PATCHABLE.filter((f) => patch[f] !== undefined);
-      if (present.length === 0) {
+      const isMove = destWorkspace !== undefined;
+
+      if (present.length === 0 && !isMove) {
         return { title: 'memory_atom_patch', output: 'Error: at least one of description, tags, created_at, pinned, always_include, status is required in `patch`.' };
       }
 
@@ -1055,25 +1150,33 @@ const AgentMemory = async ({ client, $ }) => {
         }
       }
 
-      const effectiveDirectory = workspace ?? context.directory;
-      const { scope: resolvedScope, project } = resolveScope(scope, effectiveDirectory);
-
       // Build the patch JSON with only present fields
-      const patchPayload = { topic };
+      // patch.workspace becomes targetWorkspace in the CLI payload (move trigger)
+      const patchPayload = { topic, workspace };
       if (description !== undefined) patchPayload.description = description;
       if (tags !== undefined) patchPayload.tags = tags;
       if (normCreatedAt !== undefined) patchPayload.created_at = normCreatedAt;
       if (pinned !== undefined) patchPayload.pinned = pinned;
       if (always_include !== undefined) patchPayload.always_include = always_include;
       if (status !== undefined) patchPayload.status = status;
+      if (isMove) patchPayload.targetWorkspace = destWorkspace;
 
       try {
-        const out = await spawnMemory($, ['atom-patch', resolvedScope, project], patchPayload);
+        const out = await spawnMemory($, ['atom-patch', context.directory], patchPayload);
         const result = JSON.parse(out.trim());
+        if (result.moved) {
+          const fromLoc = formatLocation(result.from.scope, result.from.project);
+          const toLoc   = formatLocation(result.to.scope, result.to.project);
+          return {
+            title: 'memory_atom_patch',
+            output: `Moved atom '${result.topic || topic}' from ${fromLoc} to ${toLoc}`,
+          };
+        }
         const changedFields = result.patched ? result.patched.join(', ') : present.join(', ');
+        const location = formatLocation(result.scope, result.project);
         return {
           title: 'memory_atom_patch',
-          output: `Patched atom '${result.topic || topic}' (${changedFields}).`,
+          output: `Patched atom '${result.topic || topic}' (${changedFields}) ${location}`,
         };
       } catch (err) {
         return {
@@ -1089,25 +1192,73 @@ const AgentMemory = async ({ client, $ }) => {
    */
   const memory_atom_delete = tool({
     description:
-      'Delete a memory atom by topic. ' +
-      'Errors if the atom does not exist.',
+      'Delete a memory atom by topic. Errors if the atom does not exist. ' +
+      'Returns confirmation including the resolved storage location. ' +
+      'PREFER memory_atom_patch with status="deprecated" or status="resolved" over deletion — ' +
+      'those preserve history while hiding the atom from normal surfaces. ' +
+      'Use delete only when the atom must be permanently removed (e.g. it contains secrets or was created in error).',
     args: {
       topic: tool.schema.string().describe('Topic key of the atom to delete'),
-      scope: tool.schema.string().optional().describe('"workspace" (default), "global"'),
+      workspace: tool.schema.union([tool.schema.string(), tool.schema.null()]).describe(
+        'Required. Pass null for the global store, "." for the current project (resolves to its git root), ' +
+        'or an absolute path for a foreign project (also resolved to its git root). ' +
+        'Paths are normalised to the nearest .git directory walking upward; .git files (worktree pointers) are skipped ' +
+        'so all worktrees resolve to the main repo root. If no .git directory is found, the path is used as-is. ' +
+        '"." is always safe for the current project regardless of which subdirectory opencode was launched from.'
+      ),
     },
-    async execute({ topic, scope }, context) {
-      if (scope === 'all') {
-        return { title: 'memory_atom_delete', output: 'Error: scope="all" is not valid for delete operations. Use "workspace" or "global".' };
+    async execute({ topic, workspace }, context) {
+      const validationError = validateWorkspace(workspace);
+      if (validationError) {
+        return { title: 'memory_atom_delete', output: `Error: ${validationError}` };
       }
-      const { scope: resolvedScope, project } = resolveScope(scope, context.directory);
       try {
-        const out = await spawnMemory($, ['atom-delete', resolvedScope, project, topic]);
+        const out = await spawnMemory($, ['atom-delete', context.directory], { workspace, topic });
         const result = JSON.parse(out.trim());
-        return { title: 'memory_atom_delete', output: `Deleted atom '${topic}' (${result.deleted} row removed).` };
+        const location = formatLocation(result.scope, result.project);
+        return { title: 'memory_atom_delete', output: `Deleted atom '${topic}' (${result.deleted} row removed) ${location}` };
       } catch (err) {
         return {
           title: 'memory_atom_delete',
           output: `Error deleting atom: ${err && err.message ? err.message : String(err)}`,
+        };
+      }
+    },
+  });
+
+  /**
+   * memory_workspaces_list — list all workspace git-root paths that have stored atoms.
+   */
+  const memory_workspaces_list = tool({
+    description:
+      'List all workspace git-root paths that contain at least one stored atom, with per-workspace atom counts. ' +
+      'Global atoms are NOT listed here — use memory_atom_list with scope="global" for those. ' +
+      'Output: one line per workspace — "• /path — N atom(s)"; ends with a usage note. ' +
+      'Pass includeDeprecated: true to count deprecated atoms alongside active and resolved ones.',
+    args: {
+      includeDeprecated: tool.schema.boolean().optional().describe(
+        'When true, count deprecated atoms alongside active and resolved ones.'
+      ),
+    },
+    async execute({ includeDeprecated }, _context) {
+      try {
+        const optionsJson = includeDeprecated !== undefined
+          ? JSON.stringify({ includeDeprecated })
+          : undefined;
+        const out = await spawnMemory($,
+          optionsJson ? ['atom-list-workspaces', optionsJson] : ['atom-list-workspaces']
+        );
+        const results = JSON.parse(out.trim());
+        if (!results || results.length === 0) {
+          return { title: 'memory_workspaces_list', output: 'No workspaces with stored atoms.' };
+        }
+        const lines = results.map((r) => `• ${r.workspace} — ${r.count} atom(s)`);
+        lines.push('\nTo migrate atoms to their git-root paths, run /migrate-workspace-atoms.');
+        return { title: 'memory_workspaces_list', output: lines.join('\n') };
+      } catch (err) {
+        return {
+          title: 'memory_workspaces_list',
+          output: `Error listing workspaces: ${err && err.message ? err.message : String(err)}`,
         };
       }
     },
@@ -1286,6 +1437,7 @@ const AgentMemory = async ({ client, $ }) => {
       memory_atom_search,
       memory_atom_list,
       memory_atom_delete,
+      memory_workspaces_list,
     },
     /**
      * Inject the memory primer into the LLM system prompt on every call for

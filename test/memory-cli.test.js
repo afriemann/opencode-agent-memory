@@ -433,8 +433,8 @@ describe('memory.js atom-* subcommands (subprocess integration)', () => {
 
   test('atom-write creates a new atom and returns created action', () => {
     const result = run([
-      'atom-write', 'project', '/p',
-      JSON.stringify({ topic: 'arch/db', content: 'Using SQLite', description: 'DB design' }),
+      'atom-write', '/p',
+      JSON.stringify({ workspace: '/p', topic: 'arch/db', content: 'Using SQLite', description: 'DB design' }),
     ]);
     expect(result.status).toBe(0);
     const out = JSON.parse(result.stdout.trim());
@@ -443,35 +443,35 @@ describe('memory.js atom-* subcommands (subprocess integration)', () => {
   });
 
   test('atom-write on existing topic returns overwritten action', () => {
-    run(['atom-write', 'project', '/p',
-      JSON.stringify({ topic: 'arch/db', content: 'v1', description: 'desc' })]);
-    const result = run(['atom-write', 'project', '/p',
-      JSON.stringify({ topic: 'arch/db', content: 'v2', description: 'desc updated' })]);
+    run(['atom-write', '/p',
+      JSON.stringify({ workspace: '/p', topic: 'arch/db', content: 'v1', description: 'desc' })]);
+    const result = run(['atom-write', '/p',
+      JSON.stringify({ workspace: '/p', topic: 'arch/db', content: 'v2', description: 'desc updated' })]);
     expect(result.status).toBe(0);
     const out = JSON.parse(result.stdout.trim());
     expect(out.action).toBe('overwritten');
   });
 
   test('atom-append appends with separator', () => {
-    run(['atom-write', 'project', '/p',
-      JSON.stringify({ topic: 'log', content: 'first', description: 'd' })]);
-    const result = run(['atom-append', 'project', '/p',
-      JSON.stringify({ topic: 'log', content: 'second' })]);
+    run(['atom-write', '/p',
+      JSON.stringify({ workspace: '/p', topic: 'log', content: 'first', description: 'd' })]);
+    const result = run(['atom-append', '/p',
+      JSON.stringify({ workspace: '/p', topic: 'log', content: 'second' })]);
     expect(result.status).toBe(0);
     const out = JSON.parse(result.stdout.trim());
     expect(out.content).toBe('first\n---\nsecond');
   });
 
   test('atom-append exits non-zero for missing topic', () => {
-    const result = run(['atom-append', 'project', '/p',
-      JSON.stringify({ topic: 'no-such-topic', content: 'x' })]);
+    const result = run(['atom-append', '/p',
+      JSON.stringify({ workspace: '/p', topic: 'no-such-topic', content: 'x' })]);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('does not exist');
   });
 
   test('atom-get returns match for existing atom', () => {
-    run(['atom-write', 'project', '/p',
-      JSON.stringify({ topic: 'notes', content: 'body text', description: 'my notes' })]);
+    run(['atom-write', '/p',
+      JSON.stringify({ workspace: '/p', topic: 'notes', content: 'body text', description: 'my notes' })]);
     const result = run(['atom-get', 'project', '/p', 'notes']);
     expect(result.status).toBe(0);
     const out = JSON.parse(result.stdout.trim());
@@ -488,10 +488,10 @@ describe('memory.js atom-* subcommands (subprocess integration)', () => {
   });
 
   test('atom-list returns written atoms', () => {
-    run(['atom-write', 'project', '/p',
-      JSON.stringify({ topic: 'arch/db', content: 'x', description: 'DB' })]);
-    run(['atom-write', 'project', '/p',
-      JSON.stringify({ topic: 'arch/api', content: 'y', description: 'API' })]);
+    run(['atom-write', '/p',
+      JSON.stringify({ workspace: '/p', topic: 'arch/db', content: 'x', description: 'DB' })]);
+    run(['atom-write', '/p',
+      JSON.stringify({ workspace: '/p', topic: 'arch/api', content: 'y', description: 'API' })]);
     const result = run(['atom-list', 'project', '/p']);
     expect(result.status).toBe(0);
     const out = JSON.parse(result.stdout.trim());
@@ -501,8 +501,8 @@ describe('memory.js atom-* subcommands (subprocess integration)', () => {
   });
 
   test('global scope: atom-list with empty project string succeeds', () => {
-    run(['atom-write', 'global', '',
-      JSON.stringify({ topic: 'global/rule', content: 'always use kebab-case', description: 'Style' })]);
+    run(['atom-write', '/ctx',
+      JSON.stringify({ workspace: null, topic: 'global/rule', content: 'always use kebab-case', description: 'Style' })]);
     const result = run(['atom-list', 'global', '']);
     expect(result.status).toBe(0);
     const out = JSON.parse(result.stdout.trim());
@@ -511,8 +511,8 @@ describe('memory.js atom-* subcommands (subprocess integration)', () => {
   });
 
   test('global scope: atom-get with empty project string succeeds', () => {
-    run(['atom-write', 'global', '',
-      JSON.stringify({ topic: 'global/style', content: 'kebab-case everywhere', description: 'Style rule' })]);
+    run(['atom-write', '/ctx',
+      JSON.stringify({ workspace: null, topic: 'global/style', content: 'kebab-case everywhere', description: 'Style rule' })]);
     const result = run(['atom-get', 'global', '', 'global/style']);
     expect(result.status).toBe(0);
     const out = JSON.parse(result.stdout.trim());
@@ -521,9 +521,9 @@ describe('memory.js atom-* subcommands (subprocess integration)', () => {
   });
 
   test('global scope: atom-search with empty project string succeeds', () => {
-    run(['atom-write', 'global', '',
-      JSON.stringify({ topic: 'global/search', content: 'findable global content', description: 'Global atom' })]);
-    const result = run(['atom-search', 'global', '', JSON.stringify({ query: 'findable' })]);
+    run(['atom-write', '/ctx',
+      JSON.stringify({ workspace: null, topic: 'global/search', content: 'findable global content', description: 'Global atom' })]);
+    const result = run(['atom-search', 'global', '', JSON.stringify({ keywords: 'findable' })]);
     expect(result.status).toBe(0);
     const out = JSON.parse(result.stdout.trim());
     expect(out.length).toBeGreaterThan(0);
@@ -531,9 +531,9 @@ describe('memory.js atom-* subcommands (subprocess integration)', () => {
   });
 
   test('atom-search finds atom by content', () => {
-    run(['atom-write', 'project', '/p',
-      JSON.stringify({ topic: 'search-target', content: 'findme content', description: 'searchable' })]);
-    const result = run(['atom-search', 'project', '/p', JSON.stringify({ query: 'findme' })]);
+    run(['atom-write', '/p',
+      JSON.stringify({ workspace: '/p', topic: 'search-target', content: 'findme content', description: 'searchable' })]);
+    const result = run(['atom-search', 'project', '/p', JSON.stringify({ keywords: 'findme' })]);
     expect(result.status).toBe(0);
     const out = JSON.parse(result.stdout.trim());
     expect(out.length).toBeGreaterThan(0);
@@ -541,9 +541,9 @@ describe('memory.js atom-* subcommands (subprocess integration)', () => {
   });
 
   test('atom-delete removes the atom', () => {
-    run(['atom-write', 'project', '/p',
-      JSON.stringify({ topic: 'deleteme', content: 'bye', description: 'd' })]);
-    const del = run(['atom-delete', 'project', '/p', 'deleteme']);
+    run(['atom-write', '/p',
+      JSON.stringify({ workspace: '/p', topic: 'deleteme', content: 'bye', description: 'd' })]);
+    const del = run(['atom-delete', '/p', JSON.stringify({ workspace: '/p', topic: 'deleteme' })]);
     expect(del.status).toBe(0);
     const out = JSON.parse(del.stdout.trim());
     expect(out.deleted).toBe(1);
@@ -556,7 +556,7 @@ describe('memory.js atom-* subcommands (subprocess integration)', () => {
 
   test('atom-delete exits non-zero for missing topic', () => {
     run(['init']);
-    const result = run(['atom-delete', 'project', '/p', 'ghost']);
+    const result = run(['atom-delete', '/p', JSON.stringify({ workspace: '/p', topic: 'ghost' })]);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('ghost');
   });
@@ -564,10 +564,10 @@ describe('memory.js atom-* subcommands (subprocess integration)', () => {
   // spec: openspec/specs/memory-atom/spec.md
 
   test('atom-patch with description and tags updates both and exits 0 with JSON stdout', () => {
-    run(['atom-write', 'project', '/p',
-      JSON.stringify({ topic: 'work/notes', content: 'original', description: 'orig desc', tags: ['old'] })]);
-    const result = run(['atom-patch', 'project', '/p',
-      JSON.stringify({ topic: 'work/notes', description: 'new desc', tags: ['new'] })]);
+    run(['atom-write', '/p',
+      JSON.stringify({ workspace: '/p', topic: 'work/notes', content: 'original', description: 'orig desc', tags: ['old'] })]);
+    const result = run(['atom-patch', '/p',
+      JSON.stringify({ workspace: '/p', topic: 'work/notes', description: 'new desc', tags: ['new'] })]);
     expect(result.status).toBe(0);
     const out = JSON.parse(result.stdout.trim());
     expect(out.ok).toBe(true);
@@ -577,26 +577,26 @@ describe('memory.js atom-* subcommands (subprocess integration)', () => {
 
   test('atom-patch errors when the atom does not exist', () => {
     run(['init']);
-    const result = run(['atom-patch', 'project', '/p',
-      JSON.stringify({ topic: 'arch/missing', description: 'x' })]);
+    const result = run(['atom-patch', '/p',
+      JSON.stringify({ workspace: '/p', topic: 'arch/missing', description: 'x' })]);
     expect(result.status).toBe(1);
     expect(result.stderr).toMatch(/does not exist/i);
   });
 
   test('atom-patch rejects an empty patch', () => {
-    run(['atom-write', 'project', '/p',
-      JSON.stringify({ topic: 'work/notes', content: 'c', description: 'd' })]);
-    const result = run(['atom-patch', 'project', '/p',
-      JSON.stringify({ topic: 'work/notes' })]);
+    run(['atom-write', '/p',
+      JSON.stringify({ workspace: '/p', topic: 'work/notes', content: 'c', description: 'd' })]);
+    const result = run(['atom-patch', '/p',
+      JSON.stringify({ workspace: '/p', topic: 'work/notes' })]);
     expect(result.status).toBe(1);
     expect(result.stderr).toMatch(/at least one/i);
   });
 
   test('atom-patch rejects an empty description', () => {
-    run(['atom-write', 'project', '/p',
-      JSON.stringify({ topic: 'work/notes', content: 'c', description: 'orig' })]);
-    const result = run(['atom-patch', 'project', '/p',
-      JSON.stringify({ topic: 'work/notes', description: '' })]);
+    run(['atom-write', '/p',
+      JSON.stringify({ workspace: '/p', topic: 'work/notes', content: 'c', description: 'orig' })]);
+    const result = run(['atom-patch', '/p',
+      JSON.stringify({ workspace: '/p', topic: 'work/notes', description: '' })]);
     expect(result.status).toBe(1);
     expect(result.stderr).toMatch(/non-empty/i);
   });

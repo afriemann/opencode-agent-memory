@@ -933,17 +933,17 @@ const ALL_TOOLS = [
   'memory_state_delete',
   'memory_atom_write', 'memory_atom_append', 'memory_atom_get',
   'memory_atom_search', 'memory_atom_list', 'memory_atom_delete',
-  'memory_atom_patch',
+  'memory_atom_patch', 'memory_workspaces_list',
 ];
 
 describe('plugin tool hook — factory returns tool map', () => {
-  test('AgentMemory factory returns exactly eleven tools', async () => {
+  test('AgentMemory factory returns exactly twelve tools', async () => {
     const $ = makeMockShell({});
     const plugin = await AgentMemory({ client: makeMockClient(), $ });
 
     expect(plugin).toHaveProperty('event');
     expect(plugin).toHaveProperty('tool');
-    expect(Object.keys(plugin.tool)).toHaveLength(11);
+    expect(Object.keys(plugin.tool)).toHaveLength(12);
     for (const name of ALL_TOOLS) {
       expect(plugin.tool).toHaveProperty(name);
     }
@@ -1818,19 +1818,20 @@ describe('session.created — sessionNames capture (task 8.21)', () => {
   });
 });
 
-// ── 8.22 resolveScope unit tests ─────────────────────────────────────────────
+// ── 8.22 workspace validation unit tests ─────────────────────────────────────
+// Tests the new workspace-based addressing via plugin.tool calls.
 
-describe('resolveScope (task 8.22)', () => {
+describe('workspace addressing (task 8.22)', () => {
   // Access the helper by verifying tool behaviour (white-box via tool spawns)
-  // We test via plugin.tool.memory_atom_write to verify scope resolution,
-  // since resolveScope is a module-private helper.
+  // We test via plugin.tool.memory_atom_write to verify workspace resolution,
+  // since validateWorkspace is a module-private helper.
 
-  test('workspace (default/undefined) → scope=project, project=directory', async () => {
+  test('workspace="." → contextDirectory passed as positional, workspace in payload', async () => {
     const captured = [];
     const $ = function(strings, ...values) {
       const cmd = strings.reduce((a, s, i) => a + s + (values[i] !== undefined ? String(values[i]) : ''), '');
       captured.push(cmd);
-      const obj = { quiet: () => obj, text: async () => JSON.stringify({ ok: true, action: 'created', message: 'Created atom at test' }) };
+      const obj = { quiet: () => obj, text: async () => JSON.stringify({ ok: true, action: 'created', scope: 'project', project: '/my/workspace' }) };
       return obj;
     };
 
@@ -1847,21 +1848,22 @@ describe('resolveScope (task 8.22)', () => {
     };
 
     await plugin.tool.memory_atom_write.execute({
-      topic: 'test', content: 'body', description: 'desc', scope: undefined,
+      topic: 'test', content: 'body', description: 'desc', workspace: '.',
     }, ctx);
 
-    // The atom-write spawn should pass 'project' as scope and '/my/workspace' as project
+    // The atom-write spawn should pass contextDirectory as positional
     const atomWriteCall = captured.find((c) => c.includes('atom-write'));
-    expect(atomWriteCall).toContain('project');
     expect(atomWriteCall).toContain('/my/workspace');
+    // workspace="." travels in the JSON payload
+    expect(atomWriteCall).toContain('"workspace":"."');
   });
 
-  test('global → scope=global, project=""', async () => {
+  test('workspace=null → global write', async () => {
     const captured = [];
     const $ = function(strings, ...values) {
       const cmd = strings.reduce((a, s, i) => a + s + (values[i] !== undefined ? String(values[i]) : ''), '');
       captured.push(cmd);
-      const obj = { quiet: () => obj, text: async () => JSON.stringify({ ok: true, action: 'created', message: 'Created atom at test' }) };
+      const obj = { quiet: () => obj, text: async () => JSON.stringify({ ok: true, action: 'created', scope: 'global', project: '' }) };
       return obj;
     };
 
@@ -1878,11 +1880,12 @@ describe('resolveScope (task 8.22)', () => {
     };
 
     await plugin.tool.memory_atom_write.execute({
-      topic: 'global-test', content: 'body', description: 'desc', scope: 'global',
+      topic: 'global-test', content: 'body', description: 'desc', workspace: null,
     }, ctx);
 
     const atomWriteCall = captured.find((c) => c.includes('atom-write'));
-    expect(atomWriteCall).toContain('global');
+    // null workspace travels in the JSON payload
+    expect(atomWriteCall).toContain('"workspace":null');
   });
 
   test('all → scope=all for read-only operations (atom-list)', async () => {
@@ -1918,7 +1921,7 @@ describe('resolveScope (task 8.22)', () => {
     const $ = function(strings, ...values) {
       const cmd = strings.reduce((a, s, i) => a + s + (values[i] !== undefined ? String(values[i]) : ''), '');
       captured.push(cmd);
-      const obj = { quiet: () => obj, text: async () => JSON.stringify({ ok: true, action: 'created', message: 'Created atom at ts-iso' }) };
+      const obj = { quiet: () => obj, text: async () => JSON.stringify({ ok: true, action: 'created', scope: 'project', project: '/my/workspace' }) };
       return obj;
     };
 
@@ -1939,7 +1942,7 @@ describe('resolveScope (task 8.22)', () => {
     const expectedEpochMs = new Date(isoDate).getTime();
 
     await plugin.tool.memory_atom_write.execute({
-      topic: 'ts-iso', content: 'body', description: 'desc', created_at: isoDate,
+      topic: 'ts-iso', content: 'body', description: 'desc', workspace: '.', created_at: isoDate,
     }, ctx);
 
     const atomWriteCall = captured.find((c) => c.includes('atom-write'));
@@ -1954,7 +1957,7 @@ describe('resolveScope (task 8.22)', () => {
     const $ = function(strings, ...values) {
       const cmd = strings.reduce((a, s, i) => a + s + (values[i] !== undefined ? String(values[i]) : ''), '');
       captured.push(cmd);
-      const obj = { quiet: () => obj, text: async () => JSON.stringify({ ok: true, action: 'created', message: 'Created atom at ts-num' }) };
+      const obj = { quiet: () => obj, text: async () => JSON.stringify({ ok: true, action: 'created', scope: 'project', project: '/my/workspace' }) };
       return obj;
     };
 
@@ -1973,7 +1976,7 @@ describe('resolveScope (task 8.22)', () => {
     const numericEpochMs = 1_700_000_000_000;
 
     await plugin.tool.memory_atom_write.execute({
-      topic: 'ts-num', content: 'body', description: 'desc', created_at: numericEpochMs,
+      topic: 'ts-num', content: 'body', description: 'desc', workspace: '.', created_at: numericEpochMs,
     }, ctx);
 
     const atomWriteCall = captured.find((c) => c.includes('atom-write'));
@@ -2269,13 +2272,13 @@ describe('memory_atom_patch tool', () => {
     expect(typeof plugin.tool.memory_atom_patch.execute).toBe('function');
   });
 
-  test("Tool rejects scope='all'", async () => {
+  test("Tool rejects invalid workspace (relative non-dot path)", async () => {
     const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
     const result = await plugin.tool.memory_atom_patch.execute(
-      { topic: 'work/notes', scope: 'all', patch: { description: 'x' } },
+      { topic: 'work/notes', workspace: 'relative/path', patch: { description: 'x' } },
       makeCtx()
     );
-    expect(result.output).toMatch(/scope.*all|all.*not valid/i);
+    expect(result.output).toMatch(/absolute path|relative/i);
   });
 
   test('Tool rejects empty patch call', async () => {
@@ -3327,25 +3330,232 @@ describe('memory_atom_patch — always_include plugin plumbing', () => {
 describe('MEMORY_PROTOCOL — always_include guidance', () => {
   test('MEMORY_PROTOCOL string contains always_include guidance', async () => {
     // We verify the system prompt string injected into sessions references always_include.
-    // This is a static check via the plugin factory output (the systemPrompt tool return).
-    const captured = [];
-    let injectedSystemPrompt = null;
+    // MEMORY_PROTOCOL is injected via the experimental.chat.system.transform hook.
+    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({ 'prune': '{}' }) });
 
-    const mockClient = makeMockClient({
-      promptHandler: async (body) => {
-        injectedSystemPrompt = body?.system ?? null;
-        return { data: { parts: [{ type: 'text', text: '{"last_worked_summary":"","next_action":"","open_questions":[]}' }] } };
-      },
+    // After a session.created, the protocol is injected via system.transform.
+    // Check that the injected string contains 'always_include'.
+    await fire(plugin, 'session.created', {
+      sessionID: 'ses-protocol-check',
+      info: { agent: 'engineer', directory: '/proj', title: null },
     });
+    const system = await invokeSystemTransform(plugin, 'ses-protocol-check');
+    // The MEMORY_PROTOCOL (system[0]) should reference always_include
+    expect(system.length).toBeGreaterThan(0);
+    expect(system[0]).toContain('always_include');
+  });
+});
 
-    const plugin = await AgentMemory({ client: mockClient, $: makeMockShell({ 'prune': '{}' }) });
+// ── workspace validation on write/mutate tools ────────────────────────────────
+// spec: openspec/changes/memory-api-explicit-scope-and-keyword-search/specs/workspace-discovery/spec.md
 
-    // The MEMORY_PROTOCOL is a module-level constant injected via system prompt.
-    // Rather than testing private internals, confirm via MEMORY_PROTOCOL import indirection.
-    // We import plugin.js and grep the source for the constant.
-    // Simplest approach: check that memory_atom_write description references always_include.
-    const desc = plugin.tool.memory_atom_write.description ?? '';
-    expect(typeof desc).toBe('string');
-    expect(desc.toLowerCase()).toContain('always_include');
+describe('workspace validation on write/mutate tools', () => {
+  function makeCtx(directory = '/my/workspace') {
+    return {
+      sessionID: 'ses-ws-val',
+      messageID: 'msg-ws-val',
+      agent: 'engineer',
+      directory,
+      worktree: directory,
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+    };
+  }
+
+  test('memory_atom_write rejects relative non-dot workspace', async () => {
+    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
+    const result = await plugin.tool.memory_atom_write.execute(
+      { topic: 't', content: 'c', description: 'd', workspace: 'relative/path' },
+      makeCtx()
+    );
+    expect(result.output).toMatch(/absolute path|relative/i);
+  });
+
+  test('memory_atom_write accepts null workspace (global)', async () => {
+    const $ = makeMockShell({ 'atom-write': JSON.stringify({ ok: true, action: 'created', scope: 'global', project: '' }) });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const result = await plugin.tool.memory_atom_write.execute(
+      { topic: 't', content: 'c', description: 'd', workspace: null },
+      makeCtx()
+    );
+    expect(result.output).toContain('[global]');
+  });
+
+  test('memory_atom_write location suffix contains git root path for project write', async () => {
+    const $ = makeMockShell({ 'atom-write': JSON.stringify({ ok: true, action: 'created', scope: 'project', project: '/my/workspace' }) });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const result = await plugin.tool.memory_atom_write.execute(
+      { topic: 't', content: 'c', description: 'd', workspace: '.' },
+      makeCtx()
+    );
+    expect(result.output).toContain('[workspace: /my/workspace]');
+  });
+
+  test('memory_atom_delete rejects relative non-dot workspace', async () => {
+    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
+    const result = await plugin.tool.memory_atom_delete.execute(
+      { topic: 't', workspace: 'relative/path' },
+      makeCtx()
+    );
+    expect(result.output).toMatch(/absolute path|relative/i);
+  });
+
+  test('memory_atom_delete location suffix in output', async () => {
+    const $ = makeMockShell({ 'atom-delete': JSON.stringify({ ok: true, deleted: 1, scope: 'project', project: '/my/workspace' }) });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const result = await plugin.tool.memory_atom_delete.execute(
+      { topic: 'arch/db', workspace: '.' },
+      makeCtx()
+    );
+    expect(result.output).toContain('[workspace: /my/workspace]');
+    expect(result.output).toContain('arch/db');
+  });
+
+  test('memory_atom_patch with patch.workspace triggers move confirmation', async () => {
+    const fakePatchResponse = JSON.stringify({
+      ok: true, topic: 'work/notes', moved: true,
+      from: { scope: 'project', project: '/src' },
+      to:   { scope: 'project', project: '/dst' },
+      patched: [],
+    });
+    const $ = makeMockShell({ 'atom-patch': fakePatchResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    const result = await plugin.tool.memory_atom_patch.execute(
+      { topic: 'work/notes', workspace: '/src', patch: { workspace: '/dst' } },
+      makeCtx('/src')
+    );
+
+    expect(result.output).toMatch(/moved/i);
+    expect(result.output).toContain('[workspace: /src]');
+    expect(result.output).toContain('[workspace: /dst]');
+  });
+
+  test('memory_atom_patch targetWorkspace in JSON payload when patch.workspace supplied', async () => {
+    const fakePatchResponse = JSON.stringify({
+      ok: true, topic: 'work/notes', moved: true,
+      from: { scope: 'project', project: '/my/workspace' },
+      to:   { scope: 'global', project: '' },
+      patched: [],
+    });
+    const $ = makeMockShell({ 'atom-patch': fakePatchResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    await plugin.tool.memory_atom_patch.execute(
+      { topic: 'work/notes', workspace: '.', patch: { workspace: null } },
+      makeCtx('/my/workspace')
+    );
+
+    // The CLI payload should have targetWorkspace (null → global)
+    const patchCall = $.calls.find((c) => c.includes('atom-patch'));
+    expect(patchCall).toBeDefined();
+    expect(patchCall).toContain('"targetWorkspace":null');
+  });
+});
+
+// ── memory_atom_search keywords rename ───────────────────────────────────────
+// spec: openspec/changes/memory-api-explicit-scope-and-keyword-search/specs/workspace-discovery/spec.md
+
+describe('memory_atom_search keywords rename', () => {
+  function makeCtx(directory = '/my/workspace') {
+    return {
+      sessionID: 'ses-search',
+      messageID: 'msg-search',
+      agent: 'engineer',
+      directory,
+      worktree: directory,
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+    };
+  }
+
+  test('memory_atom_search uses "keywords" arg (not "query")', async () => {
+    const $ = makeMockShell({ 'atom-search': JSON.stringify([]) });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const args = plugin.tool.memory_atom_search.args;
+    expect(args).toHaveProperty('keywords');
+    expect(args).not.toHaveProperty('query');
+  });
+
+  test('memory_atom_search sends keywords in CLI payload', async () => {
+    const $ = makeMockShell({ 'atom-search': JSON.stringify([]) });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    await plugin.tool.memory_atom_search.execute({ keywords: 'SQLite arch' }, makeCtx());
+
+    const searchCall = $.calls.find((c) => c.includes('atom-search'));
+    expect(searchCall).toBeDefined();
+    expect(searchCall).toContain('"keywords":"SQLite arch"');
+    expect(searchCall).not.toContain('"query"');
+  });
+});
+
+// ── memory_workspaces_list tool ───────────────────────────────────────────────
+// spec: openspec/changes/memory-api-explicit-scope-and-keyword-search/specs/workspace-discovery/spec.md
+
+describe('memory_workspaces_list tool', () => {
+  function makeCtx(directory = '/my/workspace') {
+    return {
+      sessionID: 'ses-wsl',
+      messageID: 'msg-wsl',
+      agent: 'engineer',
+      directory,
+      worktree: directory,
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+    };
+  }
+
+  test('memory_workspaces_list is registered in tool export', async () => {
+    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
+    expect(plugin.tool).toHaveProperty('memory_workspaces_list');
+    expect(typeof plugin.tool.memory_workspaces_list.execute).toBe('function');
+  });
+
+  test('formats each workspace row as bullet line with count', async () => {
+    const fakeResponse = JSON.stringify([
+      { workspace: '/repo/a', count: 5 },
+      { workspace: '/repo/b', count: 2 },
+    ]);
+    const $ = makeMockShell({ 'atom-list-workspaces': fakeResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    const result = await plugin.tool.memory_workspaces_list.execute({}, makeCtx());
+
+    expect(result.output).toContain('• /repo/a — 5 atom(s)');
+    expect(result.output).toContain('• /repo/b — 2 atom(s)');
+  });
+
+  test('returns "No workspaces" message when empty', async () => {
+    const $ = makeMockShell({ 'atom-list-workspaces': '[]' });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    const result = await plugin.tool.memory_workspaces_list.execute({}, makeCtx());
+
+    expect(result.output).toContain('No workspaces');
+  });
+
+  test('output ends with usage note when results exist', async () => {
+    const fakeResponse = JSON.stringify([{ workspace: '/repo/a', count: 1 }]);
+    const $ = makeMockShell({ 'atom-list-workspaces': fakeResponse });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    const result = await plugin.tool.memory_workspaces_list.execute({}, makeCtx());
+
+    expect(result.output).toContain('/migrate-workspace-atoms');
+  });
+
+  test('passes includeDeprecated to CLI when true', async () => {
+    const $ = makeMockShell({ 'atom-list-workspaces': '[]' });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+
+    await plugin.tool.memory_workspaces_list.execute({ includeDeprecated: true }, makeCtx());
+
+    const call = $.calls.find((c) => c.includes('atom-list-workspaces'));
+    expect(call).toBeDefined();
+    expect(call).toContain('"includeDeprecated":true');
   });
 });
