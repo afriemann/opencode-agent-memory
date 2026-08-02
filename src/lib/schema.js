@@ -453,10 +453,10 @@ export function hotStateDelete(db, project, sessionId) {
  *            description:string, tags?:string[]|string,
  *            pinned?:boolean, alwaysInclude?:boolean,
  *            sessionId?:string, sessionName?:string,
- *            createdAt?:number }} opts
+ *            createdAt?:number, updatedAt?:number }} opts
  * @returns {{ action: 'created'|'overwritten' }}
  */
-export function atomWrite(db, { scope, project, topic, content, description, tags, pinned, alwaysInclude, sessionId, sessionName, createdAt }) {
+export function atomWrite(db, { scope, project, topic, content, description, tags, pinned, alwaysInclude, sessionId, sessionName, createdAt, updatedAt }) {
   const normTopic = normaliseTopic(topic);
   if (!description || typeof description !== 'string' || !description.trim()) {
     throw new Error('Atom description is required and must be a non-empty string');
@@ -464,7 +464,7 @@ export function atomWrite(db, { scope, project, topic, content, description, tag
   const tagsJson = Array.isArray(tags)
     ? JSON.stringify(tags)
     : (typeof tags === 'string' ? tags : '[]');
-  const now = Date.now();
+  const now = typeof updatedAt === 'number' ? updatedAt : Date.now();
   // Use caller-supplied creation timestamp when provided; ignored on update (ON CONFLICT
   // does not include created_at), so it only affects the initial INSERT row.
   const insertCreatedAt = typeof createdAt === 'number' ? createdAt : now;

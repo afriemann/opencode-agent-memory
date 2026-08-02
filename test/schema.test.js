@@ -2018,16 +2018,35 @@ describe('atomListFull — full content for always_include active atoms', () => 
     expect(topics).not.toContain('ws-only');
   });
 
-  test('results are ordered alphabetically by topic', () => {
+  test('results ordered by updated_at DESC, with topic ASC as alphabetical tiebreaker for equal timestamps', () => {
     const db = openMemory();
     ensureSchema(db);
-    atomWrite(db, { scope: 'project', project: '/p', topic: 'zzz', content: 'z', description: 'd', alwaysInclude: true });
-    atomWrite(db, { scope: 'project', project: '/p', topic: 'aaa', content: 'a', description: 'd', alwaysInclude: true });
-    atomWrite(db, { scope: 'project', project: '/p', topic: 'mmm', content: 'm', description: 'd', alwaysInclude: true });
+    // All three atoms share the same updatedAt so the secondary sort (topic ASC)
+    // applies, producing deterministic alphabetical order.  Pass updatedAt explicitly
+    // through the public API so no raw SQL inserts are needed.
+    const T = 1_000_000;
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'zzz', content: 'z', description: 'd', alwaysInclude: true, updatedAt: T });
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'aaa', content: 'a', description: 'd', alwaysInclude: true, updatedAt: T });
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'mmm', content: 'm', description: 'd', alwaysInclude: true, updatedAt: T });
     const results = atomListFull(db, { scope: 'project', project: '/p' });
     const topics = results.map((r) => r.topic);
     expect(topics.indexOf('aaa')).toBeLessThan(topics.indexOf('mmm'));
     expect(topics.indexOf('mmm')).toBeLessThan(topics.indexOf('zzz'));
+  });
+
+  test('results ordered by updated_at DESC: most recently updated atom appears first', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    // Write three atoms with explicitly different updated_at values so the primary
+    // sort (updated_at DESC) is exercised independently of the tiebreaker.
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'oldest', content: 'a', description: 'd', alwaysInclude: true, updatedAt: 1_000 });
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'middle', content: 'b', description: 'd', alwaysInclude: true, updatedAt: 2_000 });
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'newest', content: 'c', description: 'd', alwaysInclude: true, updatedAt: 3_000 });
+    const results = atomListFull(db, { scope: 'project', project: '/p' });
+    const topics = results.map((r) => r.topic);
+    // Most recently updated must appear first
+    expect(topics.indexOf('newest')).toBeLessThan(topics.indexOf('middle'));
+    expect(topics.indexOf('middle')).toBeLessThan(topics.indexOf('oldest'));
   });
 
   test('returns empty array when no always_include atoms exist', () => {
