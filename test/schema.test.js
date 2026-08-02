@@ -15,6 +15,7 @@ import {
   atomList,
   atomListFull,
   atomDelete,
+  atomListWorkspaces,
   checkFtsIntegrity,
   hotStateCrossProject,
   hotStateDelete,
@@ -324,7 +325,7 @@ describe('atomSearch', () => {
   test('all-workspaces default: returns matches from all scopes', () => {
     const db = setupSearchFixture();
     // 'scope=all' or undefined → all workspaces
-    const results = atomSearch(db, { scope: 'all', project: '/myproj', query: 'SQLite', limit: 10 });
+    const results = atomSearch(db, { scope: 'all', project: '/myproj', keywords: 'SQLite', limit: 10 });
     expect(results.length).toBeGreaterThan(0);
     const topics = results.map((r) => r.topic);
     expect(topics).toContain('arch/database');
@@ -333,7 +334,7 @@ describe('atomSearch', () => {
   test('scope=workspace restriction: excludes /other project', () => {
     const db = setupSearchFixture();
     // Write something searchable to /other project
-    const results = atomSearch(db, { scope: 'workspace', project: '/myproj', query: 'Unrelated', limit: 10 });
+    const results = atomSearch(db, { scope: 'workspace', project: '/myproj', keywords: 'Unrelated', limit: 10 });
     const projs = results.map((r) => r.project);
     expect(projs).not.toContain('/other');
   });
@@ -341,7 +342,7 @@ describe('atomSearch', () => {
   test('scope=project restriction: same behaviour as scope=workspace', () => {
     const db = setupSearchFixture();
     // resolveScope maps workspace → {scope:'project', project:dir}; ensure it restricts correctly
-    const results = atomSearch(db, { scope: 'project', project: '/myproj', query: 'Unrelated', limit: 10 });
+    const results = atomSearch(db, { scope: 'project', project: '/myproj', keywords: 'Unrelated', limit: 10 });
     const projs = results.map((r) => r.project);
     expect(projs).not.toContain('/other');
   });
@@ -358,7 +359,7 @@ describe('atomSearch', () => {
 
     // atomSearch should fall back to LIKE scan without throwing
     expect(() => {
-      const results = atomSearch(db, { scope: 'all', project: '/p', query: 'LIKE scan test value', limit: 10 });
+      const results = atomSearch(db, { scope: 'all', project: '/p', keywords: 'LIKE scan test value', limit: 10 });
       expect(results.length).toBeGreaterThan(0);
     }).not.toThrow();
   });
@@ -368,7 +369,7 @@ describe('atomSearch', () => {
     const db = openMemory();
     ensureSchema(db);
     atomWrite(db, { scope: 'project', project: '/p', topic: 'ts-search', content: 'timestamp search content', description: 'ts desc' });
-    const results = atomSearch(db, { scope: 'all', project: '/p', query: 'timestamp search', limit: 10 });
+    const results = atomSearch(db, { scope: 'all', project: '/p', keywords: 'timestamp search', limit: 10 });
     expect(results.length).toBeGreaterThan(0);
     const r = results[0];
     expect(typeof r.created_at).toBe('number');
@@ -1663,7 +1664,7 @@ describe('atomSearch with status filtering', () => {
     const db = openMemory();
     ensureSchema(db);
     atomWrite(db, { scope: 'project', project: '/p', topic: 'srch-status', content: 'unique content xyz', description: 'd' });
-    const results = atomSearch(db, { scope: 'project', project: '/p', query: 'xyz' });
+    const results = atomSearch(db, { scope: 'project', project: '/p', keywords: 'xyz' });
     expect(results.length).toBeGreaterThan(0);
     expect(results[0]).toHaveProperty('status');
     expect(results[0].status).toBe('active');
@@ -1674,7 +1675,7 @@ describe('atomSearch with status filtering', () => {
     ensureSchema(db);
     seedSearchable(db);
 
-    const results = atomSearch(db, { scope: 'project', project: '/p', query: 'searchable' });
+    const results = atomSearch(db, { scope: 'project', project: '/p', keywords: 'searchable' });
     const topics = results.map((r) => r.topic);
     expect(topics).toContain('find-active');
     expect(topics).toContain('find-resolved');
@@ -1686,7 +1687,7 @@ describe('atomSearch with status filtering', () => {
     ensureSchema(db);
     seedSearchable(db);
 
-    const results = atomSearch(db, { scope: 'project', project: '/p', query: 'searchable', includeDeprecated: true });
+    const results = atomSearch(db, { scope: 'project', project: '/p', keywords: 'searchable', includeDeprecated: true });
     const topics = results.map((r) => r.topic);
     expect(topics).toContain('find-active');
     expect(topics).toContain('find-resolved');
@@ -1698,7 +1699,7 @@ describe('atomSearch with status filtering', () => {
     ensureSchema(db);
     seedSearchable(db);
 
-    const results = atomSearch(db, { scope: 'project', project: '/p', query: 'searchable', status: 'deprecated' });
+    const results = atomSearch(db, { scope: 'project', project: '/p', keywords: 'searchable', status: 'deprecated' });
     const topics = results.map((r) => r.topic);
     expect(topics).toContain('find-deprecated');
     expect(topics).not.toContain('find-active');
@@ -2164,5 +2165,180 @@ describe('hotStateDelete', () => {
     expect(result).toEqual({ deleted: 0 });
     const remaining = db.prepare("SELECT count(*) AS n FROM hot_state WHERE project='/other'").get().n;
     expect(remaining).toBe(1);
+  });
+});
+
+// ── atomListWorkspaces ────────────────────────────────────────────────────────
+// spec: openspec/changes/memory-api-explicit-scope-and-keyword-search/specs/workspace-discovery/spec.md
+
+describe('atomListWorkspaces', () => {
+  let db;
+
+  beforeEach(() => {
+    db = openMemory();
+    ensureSchema(db);
+  });
+
+  afterEach(() => { db.close(); });
+
+  function writeAtom(scope, project, topic, status = 'active') {
+    atomWrite(db, { scope, project, topic, content: 'c', description: 'd' });
+    if (status !== 'active') {
+      atomPatch(db, { scope, project, topic, patch: { status } });
+    }
+  }
+
+  test('returns workspaces with atom counts ordered by count desc', () => {
+    writeAtom('project', '/repo-a', 'a/1');
+    writeAtom('project', '/repo-a', 'a/2');
+    writeAtom('project', '/repo-a', 'a/3');
+    writeAtom('project', '/repo-b', 'b/1');
+
+    const results = atomListWorkspaces(db);
+    expect(results).toHaveLength(2);
+    expect(results[0]).toMatchObject({ workspace: '/repo-a', count: 3 });
+    expect(results[1]).toMatchObject({ workspace: '/repo-b', count: 1 });
+  });
+
+  test('excludes deprecated atoms by default', () => {
+    writeAtom('project', '/repo-a', 'dep/1', 'deprecated');
+    writeAtom('project', '/repo-a', 'active/1', 'active');
+
+    const results = atomListWorkspaces(db);
+    expect(results).toHaveLength(1);
+    expect(results[0].count).toBe(1);
+  });
+
+  test('includeDeprecated: true counts deprecated atoms', () => {
+    writeAtom('project', '/repo-a', 'dep/1', 'deprecated');
+    writeAtom('project', '/repo-a', 'active/1', 'active');
+
+    const results = atomListWorkspaces(db, { includeDeprecated: true });
+    expect(results).toHaveLength(1);
+    expect(results[0].count).toBe(2);
+  });
+
+  test('excludes global atoms (scope=global)', () => {
+    writeAtom('global', '', 'global/fact');
+    writeAtom('project', '/repo-a', 'proj/fact');
+
+    const results = atomListWorkspaces(db);
+    expect(results).toHaveLength(1);
+    expect(results[0].workspace).toBe('/repo-a');
+  });
+
+  test('returns empty array when no project atoms exist', () => {
+    expect(atomListWorkspaces(db)).toEqual([]);
+  });
+});
+
+// ── atomPatch move semantics ──────────────────────────────────────────────────
+// spec: openspec/changes/memory-api-explicit-scope-and-keyword-search/specs/workspace-discovery/spec.md
+
+describe('atomPatch move semantics', () => {
+  let db;
+
+  beforeEach(() => {
+    db = openMemory();
+    ensureSchema(db);
+  });
+
+  afterEach(() => { db.close(); });
+
+  test('moves atom to a new project workspace atomically', () => {
+    atomWrite(db, { scope: 'project', project: '/src', topic: 'arch/db', content: 'body', description: 'desc' });
+
+    const result = atomPatch(db, {
+      source: { scope: 'project', project: '/src' },
+      dest:   { scope: 'project', project: '/dst' },
+      topic: 'arch/db',
+      patch: {},
+    });
+
+    expect(result.moved).toBe(true);
+    expect(result.from).toEqual({ scope: 'project', project: '/src' });
+    expect(result.to).toEqual({ scope: 'project', project: '/dst' });
+
+    // Source must be gone
+    const gone = db.prepare("SELECT id FROM memory_atom WHERE project='/src'").get();
+    expect(gone).toBeUndefined();
+
+    // Destination must exist with correct content
+    const dest = db.prepare("SELECT * FROM memory_atom WHERE project='/dst'").get();
+    expect(dest).toBeDefined();
+    expect(dest.content).toBe('body');
+    expect(dest.description).toBe('desc');
+  });
+
+  test('moves atom to global store', () => {
+    atomWrite(db, { scope: 'project', project: '/src', topic: 'g/fact', content: 'c', description: 'd' });
+
+    atomPatch(db, {
+      source: { scope: 'project', project: '/src' },
+      dest:   { scope: 'global',  project: '' },
+      topic: 'g/fact',
+      patch: {},
+    });
+
+    const gone = db.prepare("SELECT id FROM memory_atom WHERE scope='project'").get();
+    expect(gone).toBeUndefined();
+    const global = db.prepare("SELECT * FROM memory_atom WHERE scope='global'").get();
+    expect(global.topic).toBe('g/fact');
+  });
+
+  test('combined move + metadata: applies patch fields before landing at dest', () => {
+    atomWrite(db, { scope: 'project', project: '/src', topic: 'comb/x', content: 'c', description: 'original desc' });
+
+    atomPatch(db, {
+      source: { scope: 'project', project: '/src' },
+      dest:   { scope: 'project', project: '/dst' },
+      topic: 'comb/x',
+      patch: { description: 'updated desc', status: 'resolved' },
+    });
+
+    const dest = db.prepare("SELECT * FROM memory_atom WHERE project='/dst'").get();
+    expect(dest.description).toBe('updated desc');
+    expect(dest.status).toBe('resolved');
+  });
+
+  test('source == dest treated as in-place patch (no move)', () => {
+    atomWrite(db, { scope: 'project', project: '/same', topic: 'noop/x', content: 'c', description: 'd' });
+
+    const result = atomPatch(db, {
+      source: { scope: 'project', project: '/same' },
+      dest:   { scope: 'project', project: '/same' },
+      topic: 'noop/x',
+      patch: { description: 'patched in place' },
+    });
+
+    expect(result.moved).toBeUndefined();
+
+    const row = db.prepare("SELECT * FROM memory_atom WHERE project='/same'").get();
+    expect(row.description).toBe('patched in place');
+  });
+
+  test('destination conflict → overwrite', () => {
+    atomWrite(db, { scope: 'project', project: '/src', topic: 'conflict/x', content: 'src content', description: 'src' });
+    atomWrite(db, { scope: 'project', project: '/dst', topic: 'conflict/x', content: 'dst content', description: 'dst' });
+
+    atomPatch(db, {
+      source: { scope: 'project', project: '/src' },
+      dest:   { scope: 'project', project: '/dst' },
+      topic: 'conflict/x',
+      patch: {},
+    });
+
+    const rows = db.prepare("SELECT * FROM memory_atom WHERE topic='conflict/x'").all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].content).toBe('src content');
+  });
+
+  test('move of non-existent atom throws', () => {
+    expect(() => atomPatch(db, {
+      source: { scope: 'project', project: '/src' },
+      dest:   { scope: 'project', project: '/dst' },
+      topic: 'missing/x',
+      patch: {},
+    })).toThrow(/does not exist/i);
   });
 });

@@ -534,33 +534,59 @@ export function atomAppend(db, { scope, project, topic, content }) {
 
 /**
  * Partial, content-preserving metadata update for an existing atom.
+ * Also supports an atomic cross-workspace move when `source`/`dest` locators differ.
  *
- * Patches one or more of description, tags, created_at, pinned, always_include, status in-place.
- * - Absent fields are left unchanged.
- * - tags:[] clears tags; omitted tags keeps existing tags.
- * - updated_at is bumped when description, tags, pinned, always_include, or status is present.
- * - created_at-only patch leaves updated_at unchanged.
- * - status must be one of 'active', 'resolved', 'deprecated'.
+ * In-place patch (source == dest or legacy { scope, project } shape):
+ *   Patches one or more of description, tags, created_at, pinned, always_include, status.
+ *   - Absent fields are left unchanged.
+ *   - tags:[] clears tags; omitted tags keeps existing tags.
+ *   - updated_at is bumped when description, tags, pinned, always_include, or status is present.
+ *   - created_at-only patch leaves updated_at unchanged.
+ *   - status must be one of 'active', 'resolved', 'deprecated'.
+ *
+ * Move (source != dest):
+ *   BEGIN IMMEDIATE → SELECT source row → DELETE source → UPSERT at dest → COMMIT.
+ *   Metadata patch fields are applied to the row before landing at destination.
+ *   Destination conflict → overwrite (ON CONFLICT DO UPDATE).
+ *   FTS stays in sync automatically via the DELETE/INSERT triggers.
  *
  * @param {import('node:sqlite').DatabaseSync} db
- * @param {{ scope:string, project:string, topic:string,
+ * @param {{ scope?:string, project?:string, topic:string,
  *            patch: { description?:string, tags?:string[], created_at?:number,
- *                     pinned?:boolean, always_include?:boolean, status?:string } }} opts
- * @returns {{ patched: string[] }}
+ *                     pinned?:boolean, always_include?:boolean, status?:string },
+ *            source?: { scope:string, project:string },
+ *            dest?:   { scope:string, project:string } }} opts
+ * @returns {{ patched: string[], moved?: boolean,
+ *             from?: { scope:string, project:string },
+ *             to?:   { scope:string, project:string } }}
  */
-export function atomPatch(db, { scope, project, topic, patch }) {
+export function atomPatch(db, { scope, project, topic, patch, source, dest }) {
+  // Support both legacy shape { scope, project, topic, patch } and new move shape
+  // { source: {scope,project}, dest: {scope,project}, topic, patch }.
+  const srcScope   = source ? source.scope   : scope;
+  const srcProject = source ? source.project : project;
+  const dstScope   = dest   ? dest.scope     : srcScope;
+  const dstProject = dest   ? dest.project   : srcProject;
+
   const normTopic = normaliseTopic(topic);
   const PATCHABLE = ['description', 'tags', 'created_at', 'pinned', 'always_include', 'status'];
   const present = PATCHABLE.filter((f) => f in patch);
-  if (present.length === 0) {
+
+  // A move with no metadata fields is still valid (move-only); an in-place patch
+  // with no fields is an error.
+  const isMove = (dstScope !== srcScope || dstProject !== srcProject);
+  if (present.length === 0 && !isMove) {
     throw new Error('at least one of description, tags, created_at, pinned, always_include, status is required');
   }
 
   db.exec('BEGIN IMMEDIATE');
   try {
+    // Read the full source row (needed for move to preserve all fields)
     const row = db
-      .prepare('SELECT id, updated_at FROM memory_atom WHERE scope = ? AND project = ? AND topic = ?')
-      .get(scope, project, normTopic);
+      .prepare(`SELECT id, scope, project, topic, description, content, tags, pinned,
+                        always_include, status, session_id, session_name, created_at, updated_at
+                FROM memory_atom WHERE scope = ? AND project = ? AND topic = ?`)
+      .get(srcScope, srcProject, normTopic);
     if (!row) {
       db.exec('ROLLBACK');
       throw new Error(`Atom '${normTopic}' does not exist`);
@@ -582,6 +608,56 @@ export function atomPatch(db, { scope, project, topic, patch }) {
       }
     }
 
+    if (isMove) {
+      // ── Move path: DELETE source, UPSERT at destination ──────────────────
+      // Apply metadata patch fields to the in-memory row before inserting at dest.
+      const now = Date.now();
+      const description   = 'description'    in patch ? patch.description.trim()                    : row.description;
+      const tagsJson      = 'tags'            in patch
+        ? (Array.isArray(patch.tags) ? JSON.stringify(patch.tags) : '[]')
+        : row.tags;
+      const createdAt     = 'created_at'      in patch ? patch.created_at                            : row.created_at;
+      const pinned        = 'pinned'           in patch ? (patch.pinned ? 1 : 0)                     : row.pinned;
+      const alwaysInclude = 'always_include'   in patch ? (patch.always_include ? 1 : 0)             : row.always_include;
+      const status        = 'status'           in patch ? patch.status                               : row.status;
+
+      db.prepare(
+        'DELETE FROM memory_atom WHERE scope = ? AND project = ? AND topic = ?'
+      ).run(srcScope, srcProject, normTopic);
+
+      db.prepare(`
+        INSERT INTO memory_atom
+          (scope, project, topic, description, content, tags, pinned, always_include,
+           status, session_id, session_name, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(scope, project, topic) DO UPDATE SET
+          description    = excluded.description,
+          content        = excluded.content,
+          tags           = excluded.tags,
+          pinned         = excluded.pinned,
+          always_include = excluded.always_include,
+          status         = excluded.status,
+          session_id     = excluded.session_id,
+          session_name   = excluded.session_name,
+          created_at     = excluded.created_at,
+          updated_at     = excluded.updated_at
+      `).run(
+        dstScope, dstProject, normTopic,
+        description, row.content, tagsJson, pinned, alwaysInclude,
+        status, row.session_id, row.session_name,
+        createdAt, now
+      );
+
+      db.exec('COMMIT');
+      return {
+        patched: present,
+        moved: true,
+        from: { scope: srcScope, project: srcProject },
+        to:   { scope: dstScope, project: dstProject },
+      };
+    }
+
+    // ── In-place patch path (no move) ────────────────────────────────────────
     const setClauses = [];
     const values = [];
 
@@ -616,7 +692,7 @@ export function atomPatch(db, { scope, project, topic, patch }) {
       values.push(Date.now());
     }
 
-    values.push(scope, project, normTopic);
+    values.push(srcScope, srcProject, normTopic);
     db.prepare(
       `UPDATE memory_atom SET ${setClauses.join(', ')} WHERE scope = ? AND project = ? AND topic = ?`
     ).run(...values);
@@ -693,11 +769,11 @@ export function atomGet(db, { scope, project, topic }) {
  * default IN ('active','resolved').
  *
  * @param {import('node:sqlite').DatabaseSync} db
- * @param {{ scope:string, project:string, query:string, limit?:number,
+ * @param {{ scope:string, project:string, keywords:string, limit?:number,
  *            status?:string, includeDeprecated?:boolean }} opts
  * @returns {object[]}
  */
-export function atomSearch(db, { scope, project, query, limit = 20, status, includeDeprecated }) {
+export function atomSearch(db, { scope, project, keywords, limit = 20, status, includeDeprecated }) {
   const cap = Math.max(1, Math.min(200, Number(limit) || 20));
 
   const statusArgs = status ? [status] : [];
@@ -734,16 +810,16 @@ export function atomSearch(db, { scope, project, query, limit = 20, status, incl
   try {
     if (scope === 'workspace' || scope === 'project') {
       return db.prepare(buildFtsQuery(`AND ((a.scope = ? AND a.project = ?) OR (a.scope = 'global' AND a.project = ''))`))
-        .all(query, scope, project, ...statusArgs, cap);
+        .all(keywords, scope, project, ...statusArgs, cap);
     } else if (scope === 'global') {
       return db.prepare(buildFtsQuery(`AND a.scope = 'global' AND a.project = ''`))
-        .all(query, ...statusArgs, cap);
+        .all(keywords, ...statusArgs, cap);
     } else {
-      return db.prepare(buildFtsQuery('')).all(query, ...statusArgs, cap);
+      return db.prepare(buildFtsQuery('')).all(keywords, ...statusArgs, cap);
     }
   } catch {
     // FTS5 unavailable or query error — fall back to LIKE scan
-    const likePattern = `%${query}%`;
+    const likePattern = `%${keywords}%`;
     if (scope === 'workspace' || scope === 'project') {
       return db.prepare(buildLikeQuery(
         `AND ((scope = ? AND project = ?) OR (scope = 'global' AND project = ''))`
@@ -876,4 +952,27 @@ export function atomDelete(db, { scope, project, topic }) {
  */
 export function checkFtsIntegrity(db) {
   db.prepare("INSERT INTO memory_atom_fts(memory_atom_fts) VALUES('integrity-check')").run();
+}
+
+// ── atomListWorkspaces ────────────────────────────────────────────────────────
+
+/**
+ * Return all distinct project paths (workspaces) that contain at least one
+ * stored atom, along with per-workspace atom counts. Global atoms are excluded.
+ *
+ * @param {import('node:sqlite').DatabaseSync} db
+ * @param {{ includeDeprecated?: boolean }} [opts]
+ * @returns {Array<{ workspace: string, count: number }>}
+ */
+export function atomListWorkspaces(db, { includeDeprecated = false } = {}) {
+  const deprecatedClause = includeDeprecated ? '' : `AND status != 'deprecated'`;
+  return db.prepare(`
+    SELECT project AS workspace, COUNT(*) AS count
+    FROM memory_atom
+    WHERE scope = 'project'
+      AND project != ''
+      ${deprecatedClause}
+    GROUP BY project
+    ORDER BY count DESC
+  `).all();
 }
