@@ -1253,7 +1253,10 @@ const AgentMemory = async ({ client, $ }) => {
           return { title: 'memory_workspaces_list', output: 'No workspaces with stored atoms.' };
         }
         const lines = results.map((r) => `• ${r.workspace} — ${r.count} atom(s)`);
-        lines.push('\nTo migrate atoms to their git-root paths, run /migrate-workspace-atoms.');
+        lines.push(
+          '\nPass workspace: <path> to target a specific workspace. Paths are git roots. ' +
+          'Global atoms are not listed here — use scope: "global" on read tools to include them.'
+        );
         return { title: 'memory_workspaces_list', output: lines.join('\n') };
       } catch (err) {
         return {

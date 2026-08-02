@@ -3545,7 +3545,8 @@ describe('memory_workspaces_list tool', () => {
 
     const result = await plugin.tool.memory_workspaces_list.execute({}, makeCtx());
 
-    expect(result.output).toContain('/migrate-workspace-atoms');
+    expect(result.output).toContain('Pass workspace:');
+    expect(result.output).toContain('scope: "global"');
   });
 
   test('passes includeDeprecated to CLI when true', async () => {
