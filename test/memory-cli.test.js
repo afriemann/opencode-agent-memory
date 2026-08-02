@@ -540,6 +540,14 @@ describe('memory.js atom-* subcommands (subprocess integration)', () => {
     expect(out[0].topic).toBe('search-target');
   });
 
+  // spec: openspec/changes/memory-api-explicit-scope-and-keyword-search
+  test('atom-search rejects legacy "query" param — keywords is required', () => {
+    // The old parameter name "query" is no longer accepted; "keywords" is required.
+    const result = run(['atom-search', 'project', '/p', JSON.stringify({ query: 'findme' })]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/keywords.*required/i);
+  });
+
   test('atom-delete removes the atom', () => {
     run(['atom-write', '/p',
       JSON.stringify({ workspace: '/p', topic: 'deleteme', content: 'bye', description: 'd' })]);
