@@ -72,11 +72,13 @@ You have persistent memory via the \`memory_atom_*\` and \`memory_state_*\` tool
 - A fact that would take real effort to re-discover: API quirks, undocumented behaviour, environment specifics
 - A reality correction — something that contradicts what documentation or prior assumptions suggest
 
+**Write a summary** (\`summary\` required on \`memory_atom_write\`): a one-sentence digest of what the content contains. Shown in listings so other agents can triage without fetching the full content. Max 280 chars. Distinct from \`description\` (which says what the atom is *for*). May go stale after \`memory_atom_append\` — re-patch when content changes significantly.
+
 **Read before re-investigating**: before exploring a familiar domain, call \`memory_atom_search\` or \`memory_atom_list\` — previous findings may already be recorded. Use \`memory_atom_get\` to retrieve the full content of a specific atom.
 
 **Addressing**: pass \`workspace: "."\` to write to the current project (resolves to its git root), \`workspace: null\` to write globally. Always pass \`workspace\` explicitly — there is no default.
 
-**Update atom metadata** (\`memory_atom_patch\`) when you need to correct description, tags, created_at, or pin state without rewriting content — e.g. re-dating a migrated atom or pinning it. Use \`memory_atom_write\` when content itself changes.
+**Update atom metadata** (\`memory_atom_patch\`) when you need to correct description, summary, tags, created_at, or pin state without rewriting content — e.g. re-dating a migrated atom, pinning it, or adding a summary to an older atom that predates the summary field. Use \`memory_atom_write\` when content itself changes.
 
 **Atom lifecycle** (\`memory_atom_patch\` with \`status\`): use status to manage visibility without deleting:
 - \`active\` (default) — appears in primer, list, and search
@@ -726,11 +728,25 @@ const AgentMemory = async ({ client, $ }) => {
   const memory_atom_write = tool({
     description:
       'Write (upsert) a durable named memory atom. Returns confirmation including the resolved storage location. ' +
+      'The `description` field is required and describes what the atom is for. ' +
+      'The `summary` field is required and must be a one-sentence digest of the atom\'s content (distinct from `description`). ' +
+      'It appears in listings (memory_atom_list, memory_atom_search, and the session primer) so agents can triage without fetching the full content. Max 280 chars. ' +
+      'Optional `pinned: true` marks the atom so it always appears at the top of the session primer regardless of the cap. ' +
+      'Pin state is set on the first insert and is NOT overwritten by subsequent content updates — use memory_atom_patch to change the pin state of an existing atom. ' +
+      'Optional `always_include: true` injects the atom\'s full content into every session primer under ### Standing context — use only for short (≤500-word) content needed before the user\'s first message (project conventions, user preferences). ' +
+      'At most 5 always_include atoms per scope are rendered; excess are named in an overflow note. ' +
+      'always_include is INSERT-only: re-writing an existing atom does not change it — use memory_atom_patch to toggle it. ' +
+      'Status is always `active` for new atoms and is preserved on re-write — use memory_atom_patch to change an atom\'s status. ' +
       'To add content without replacing existing content, use memory_atom_append instead.',
     args: {
       topic: tool.schema.string().describe('Hierarchical key, e.g. "arch/db-layer"'),
       content: tool.schema.string().describe('Full atom content'),
       description: tool.schema.string().describe('What this atom is for (required)'),
+      summary: tool.schema.string().min(1).describe(
+        'One-sentence digest of what this atom\'s content contains (not the same as `description`, which says what the atom is for). ' +
+        'Shown in atom listings instead of a raw content preview, so make it actionable — another agent should be able to decide whether to fetch the full content just from reading this. ' +
+        'Max 280 chars.'
+      ),
       tags: tool.schema.array(tool.schema.string()).optional().describe('Optional tags'),
       workspace: tool.schema.union([tool.schema.string(), tool.schema.null()]).describe(
         'Required. Pass null for the global store, "." for the current project (resolves to its git root), ' +
@@ -755,7 +771,7 @@ const AgentMemory = async ({ client, $ }) => {
         'When omitted, the current time is used.'
       ),
     },
-    async execute({ topic, content, description, tags, workspace, pinned, always_include, created_at }, context) {
+    async execute({ topic, content, description, summary, tags, workspace, pinned, always_include, created_at }, context) {
       const validationError = validateWorkspace(workspace);
       if (validationError) {
         return { title: 'memory_atom_write', output: `Error: ${validationError}` };
@@ -780,7 +796,7 @@ const AgentMemory = async ({ client, $ }) => {
 
       try {
         const out = await spawnMemory($, ['atom-write', context.directory],
-          { workspace, topic, content, description, tags, pinned, alwaysInclude: always_include,
+          { workspace, topic, content, description, summary, tags, pinned, alwaysInclude: always_include,
             sessionId: context.sessionID,
             sessionName: sessionNames.get(context.sessionID) ?? null,
             ...(createdAt !== undefined ? { createdAt } : {}) });
@@ -896,7 +912,8 @@ const AgentMemory = async ({ client, $ }) => {
               ? '[global]'
               : `[workspace: ${a.project}]`;
             const statusLabel = (a.status && a.status !== 'active') ? ` [${a.status}]` : '';
-            lines.push(`• ${location}${statusLabel} ${a.topic} — ${a.description} | ${a.preview || ''} [created: ${createdRel || 'unknown'}, updated: ${updatedRel || 'unknown'}]`);
+            const alsoInContent = a.summary || a.preview || '';
+            lines.push(`• ${location}${statusLabel} ${a.topic} — ${a.description}${alsoInContent ? ` | ${alsoInContent}` : ''} [created: ${createdRel || 'unknown'}, updated: ${updatedRel || 'unknown'}]`);
           }
         }
         return { title: 'memory_atom_get', output: lines.join('\n') };
@@ -958,7 +975,8 @@ const AgentMemory = async ({ client, $ }) => {
           const createdRel = r.created_at ? formatRelativeTime(r.created_at) : 'unknown';
           const updatedRel = r.updated_at ? formatRelativeTime(r.updated_at) : 'unknown';
           const statusPrefix = (r.status && r.status !== 'active') ? `[${r.status}] ` : '';
-          return `• ${statusPrefix}[${r.scope}/${r.project || 'global'}] ${r.topic} — ${r.description} | ${r.preview || ''} [created: ${createdRel}, updated: ${updatedRel}]`;
+          const searchContent = r.summary || r.preview || '';
+          return `• ${statusPrefix}[${r.scope}/${r.project || 'global'}] ${r.topic} — ${r.description}${searchContent ? ` | ${searchContent}` : ''} [created: ${createdRel}, updated: ${updatedRel}]`;
         });
         return { title: 'memory_atom_search', output: lines.join('\n') };
       } catch (err) {
@@ -1029,7 +1047,8 @@ const AgentMemory = async ({ client, $ }) => {
           const pinnedPrefix = r.pinned ? '[pinned] ' : '';
           const alwaysIncludePrefix = r.always_include ? '[always-include] ' : '';
           const statusPrefix = (r.status && r.status !== 'active') ? `[${r.status}] ` : '';
-          return `• ${pinnedPrefix}${alwaysIncludePrefix}${statusPrefix}[${r.scope}/${r.project || 'global'}] ${r.topic} — ${r.description} | ${r.preview || ''} [created: ${createdRel}, updated: ${updatedRel}]`;
+          const listContent = r.summary || r.preview || '';
+          return `• ${pinnedPrefix}${alwaysIncludePrefix}${statusPrefix}[${r.scope}/${r.project || 'global'}] ${r.topic} — ${r.description}${listContent ? ` | ${listContent}` : ''} [created: ${createdRel}, updated: ${updatedRel}]`;
         });
         return { title: 'memory_atom_list', output: lines.join('\n') };
       } catch (err) {
@@ -1046,7 +1065,7 @@ const AgentMemory = async ({ client, $ }) => {
    */
   const memory_atom_patch = tool({
     description:
-      'Patch atom metadata (description, tags, created_at, pinned, always_include, status) without rewriting its content. ' +
+      'Patch atom metadata (description, tags, created_at, pinned, always_include, status, summary) without rewriting its content. ' +
       'Also supports an atomic workspace move: supply patch.workspace to relocate the atom to a different workspace ' +
       'in one transaction (delete from source, re-insert at destination). ' +
       'Supply a `patch` object containing the fields to change; absent fields are left unchanged. ' +
@@ -1057,6 +1076,8 @@ const AgentMemory = async ({ client, $ }) => {
       '`patch.status` changes the atom\'s lifecycle visibility: "active" (default, all surfaces), ' +
       '"resolved" (hidden from primer; visible in list/search by default), or ' +
       '"deprecated" (hidden from all surfaces by default; retrieve with includeDeprecated: true). ' +
+      '`patch.summary` updates the one-sentence content digest shown in listings. Max 280 chars. ' +
+      'Use to retroactively add a summary to older atoms that predate the summary field, or to correct a stale summary after significant content appends. ' +
       'Use memory_atom_write when you need to change the atom\'s content.',
     args: {
       topic: tool.schema.string().describe('Topic key of the atom to patch'),
@@ -1070,6 +1091,10 @@ const AgentMemory = async ({ client, $ }) => {
       ),
       patch: tool.schema.object({
         description: tool.schema.string().optional().describe('New description (must be non-empty if supplied)'),
+        summary: tool.schema.string().optional().describe(
+          'Replacement one-sentence digest of the atom\'s content. Max 280 chars. ' +
+          'Use to retroactively add summaries to older atoms, or to correct a stale summary after memory_atom_append.'
+        ),
         tags: tool.schema.array(tool.schema.string()).optional().describe('Replacement tags array; [] clears all tags'),
         created_at: tool.schema.union([tool.schema.string(), tool.schema.number()]).optional().describe(
           'Replacement creation timestamp. Accepts ISO 8601 string or epoch-ms number.'
@@ -1103,7 +1128,7 @@ const AgentMemory = async ({ client, $ }) => {
         return { title: 'memory_atom_patch', output: `Error: ${sourceValidationError}` };
       }
 
-      const { description, tags, created_at, pinned, always_include, status, workspace: destWorkspace } = patch;
+      const { description, summary, tags, created_at, pinned, always_include, status, workspace: destWorkspace } = patch;
 
       // Validate destination workspace when a move is requested
       if (destWorkspace !== undefined) {
@@ -1114,12 +1139,15 @@ const AgentMemory = async ({ client, $ }) => {
       }
 
       // Collect patchable metadata fields (exclude workspace — that's a move trigger, not metadata)
-      const PATCHABLE = ['description', 'tags', 'created_at', 'pinned', 'always_include', 'status'];
+      // tool.schema (Zod) .optional() produces T | undefined — null is rejected at
+      // schema validation before execute is called, so `!== undefined` is sufficient
+      // to distinguish "caller supplied tags: []" (clear) from "caller omitted tags" (keep).
+      const PATCHABLE = ['description', 'summary', 'tags', 'created_at', 'pinned', 'always_include', 'status'];
       const present = PATCHABLE.filter((f) => patch[f] !== undefined);
       const isMove = destWorkspace !== undefined;
 
       if (present.length === 0 && !isMove) {
-        return { title: 'memory_atom_patch', output: 'Error: at least one of description, tags, created_at, pinned, always_include, status is required in `patch`.' };
+        return { title: 'memory_atom_patch', output: 'Error: at least one of description, summary, tags, created_at, pinned, always_include, status is required in `patch`.' };
       }
 
       // Validate status enum at the tool layer (before passing to CLI)
@@ -1154,6 +1182,7 @@ const AgentMemory = async ({ client, $ }) => {
       // patch.workspace becomes targetWorkspace in the CLI payload (move trigger)
       const patchPayload = { topic, workspace };
       if (description !== undefined) patchPayload.description = description;
+      if (summary !== undefined) patchPayload.summary = summary;
       if (tags !== undefined) patchPayload.tags = tags;
       if (normCreatedAt !== undefined) patchPayload.created_at = normCreatedAt;
       if (pinned !== undefined) patchPayload.pinned = pinned;

@@ -32,6 +32,14 @@
 //     When 1, the atom's full content is injected into the session primer's
 //     Standing context section instead of appearing as a compact directory line.
 //   - PRAGMA user_version = 6 marks migration complete.
+//
+// Schema version 7 changes:
+//   - memory_atom: new column summary TEXT NOT NULL DEFAULT ''.
+//     Author-written one-sentence digest of the atom's content (max 280 chars).
+//     Shown in listings instead of the raw 80-char content preview.
+//     summary is NOT FTS-indexed (content is already indexed; the marginal gain
+//     does not justify the drop/recreate/rebuild of the FTS5 virtual table).
+//   - PRAGMA user_version = 7 marks migration complete.
 
 // ── Topic normalisation ───────────────────────────────────────────────────────
 
@@ -195,6 +203,7 @@ export function ensureSchema(db) {
       project        TEXT    NOT NULL DEFAULT '',
       topic          TEXT    NOT NULL,
       description    TEXT    NOT NULL DEFAULT '',
+      summary        TEXT    NOT NULL DEFAULT '',
       content        TEXT    NOT NULL DEFAULT '',
       tags           TEXT    NOT NULL DEFAULT '[]',
       pinned         INTEGER NOT NULL DEFAULT 0,
@@ -371,6 +380,31 @@ export function ensureSchema(db) {
       db.exec('PRAGMA user_version = 6');
     }
   }
+
+  // ── Phase 7: migration to schema version 7 ───────────────────────────────
+  //   Gate: PRAGMA user_version < 7 AND summary column absent (shape probe)
+  //   summary is NOT FTS-indexed — adding it to the FTS5 virtual table would
+  //   require DROP TRIGGER ×3 + DROP TABLE + rebuild under the existing
+  //   FTS5-may-be-absent try/catch, which is the highest-risk mutation in this
+  //   codebase for marginal search-recall gain (content is already indexed).
+  const versionAfterV6 = db.prepare('PRAGMA user_version').get()?.user_version ?? 0;
+  if (versionAfterV6 < 7) {
+    const atomCols7 = db.prepare("PRAGMA table_info(memory_atom)").all().map((c) => c.name);
+    if (!atomCols7.includes('summary')) {
+      db.exec('BEGIN');
+      try {
+        db.exec("ALTER TABLE memory_atom ADD COLUMN summary TEXT NOT NULL DEFAULT ''");
+        db.exec('PRAGMA user_version = 7');
+        db.exec('COMMIT');
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
+      }
+    } else {
+      // summary already present — just bump the version marker
+      db.exec('PRAGMA user_version = 7');
+    }
+  }
 }
 
 // ── pruneHotState ─────────────────────────────────────────────────────────────
@@ -450,16 +484,26 @@ export function hotStateDelete(db, project, sessionId) {
  *
  * @param {import('node:sqlite').DatabaseSync} db
  * @param {{ scope:string, project:string, topic:string, content:string,
- *            description:string, tags?:string[]|string,
+ *            description:string, summary?:string,
+ *            tags?:string[]|string,
  *            pinned?:boolean, alwaysInclude?:boolean,
  *            sessionId?:string, sessionName?:string,
  *            createdAt?:number, updatedAt?:number }} opts
  * @returns {{ action: 'created'|'overwritten' }}
  */
-export function atomWrite(db, { scope, project, topic, content, description, tags, pinned, alwaysInclude, sessionId, sessionName, createdAt, updatedAt }) {
+export function atomWrite(db, { scope, project, topic, content, description, summary, tags, pinned, alwaysInclude, sessionId, sessionName, createdAt, updatedAt }) {
   const normTopic = normaliseTopic(topic);
   if (!description || typeof description !== 'string' || !description.trim()) {
     throw new Error('Atom description is required and must be a non-empty string');
+  }
+  const trimmedSummary = typeof summary === 'string' ? summary.trim() : '';
+  // Reject an explicitly-provided empty summary ('' or whitespace-only).
+  // An omitted summary (undefined → '') is allowed; the caller signals intent via the type check.
+  if (typeof summary === 'string' && !trimmedSummary) {
+    throw new Error('Atom summary must be a non-empty string when provided');
+  }
+  if (trimmedSummary.length > 280) {
+    throw new Error('Atom summary must be 280 characters or fewer');
   }
   const tagsJson = Array.isArray(tags)
     ? JSON.stringify(tags)
@@ -481,17 +525,18 @@ export function atomWrite(db, { scope, project, topic, content, description, tag
 
   db.prepare(`
     INSERT INTO memory_atom
-      (scope, project, topic, description, content, tags, pinned, always_include, session_id, session_name, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (scope, project, topic, description, summary, content, tags, pinned, always_include, session_id, session_name, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(scope, project, topic) DO UPDATE SET
       description  = excluded.description,
+      summary      = excluded.summary,
       content      = excluded.content,
       tags         = excluded.tags,
       session_id   = excluded.session_id,
       session_name = excluded.session_name,
       updated_at   = excluded.updated_at
   `).run(
-    scope, project, normTopic, description.trim(), content, tagsJson, pinnedValue, alwaysIncludeValue,
+    scope, project, normTopic, description.trim(), trimmedSummary, content, tagsJson, pinnedValue, alwaysIncludeValue,
     sessionId ?? null, sessionName ?? null,
     insertCreatedAt,
     now
@@ -537,12 +582,13 @@ export function atomAppend(db, { scope, project, topic, content }) {
  * Also supports an atomic cross-workspace move when `source`/`dest` locators differ.
  *
  * In-place patch (source == dest or legacy { scope, project } shape):
- *   Patches one or more of description, tags, created_at, pinned, always_include, status.
+ *   Patches one or more of description, summary, tags, created_at, pinned, always_include, status.
  *   - Absent fields are left unchanged.
  *   - tags:[] clears tags; omitted tags keeps existing tags.
- *   - updated_at is bumped when description, tags, pinned, always_include, or status is present.
+ *   - updated_at is bumped when description, summary, tags, pinned, always_include, or status is present.
  *   - created_at-only patch leaves updated_at unchanged.
  *   - status must be one of 'active', 'resolved', 'deprecated'.
+ *   - summary must be a non-empty string of 280 characters or fewer when provided.
  *
  * Move (source != dest):
  *   BEGIN IMMEDIATE → SELECT source row → DELETE source → UPSERT at dest → COMMIT.
@@ -552,7 +598,7 @@ export function atomAppend(db, { scope, project, topic, content }) {
  *
  * @param {import('node:sqlite').DatabaseSync} db
  * @param {{ scope?:string, project?:string, topic:string,
- *            patch: { description?:string, tags?:string[], created_at?:number,
+ *            patch: { description?:string, summary?:string, tags?:string[], created_at?:number,
  *                     pinned?:boolean, always_include?:boolean, status?:string },
  *            source?: { scope:string, project:string },
  *            dest?:   { scope:string, project:string } }} opts
@@ -569,14 +615,13 @@ export function atomPatch(db, { scope, project, topic, patch, source, dest }) {
   const dstProject = dest   ? dest.project   : srcProject;
 
   const normTopic = normaliseTopic(topic);
-  const PATCHABLE = ['description', 'tags', 'created_at', 'pinned', 'always_include', 'status'];
+  const PATCHABLE = ['description', 'summary', 'tags', 'created_at', 'pinned', 'always_include', 'status'];
   const present = PATCHABLE.filter((f) => f in patch);
-
   // A move with no metadata fields is still valid (move-only); an in-place patch
   // with no fields is an error.
   const isMove = (dstScope !== srcScope || dstProject !== srcProject);
   if (present.length === 0 && !isMove) {
-    throw new Error('at least one of description, tags, created_at, pinned, always_include, status is required');
+    throw new Error('at least one of description, summary, tags, created_at, pinned, always_include, status is required');
   }
 
   db.exec('BEGIN IMMEDIATE');
@@ -597,6 +642,18 @@ export function atomPatch(db, { scope, project, topic, patch, source, dest }) {
       if (!trimmed) {
         db.exec('ROLLBACK');
         throw new Error('Atom description must be a non-empty string');
+      }
+    }
+
+    if ('summary' in patch) {
+      const trimmedSummary = typeof patch.summary === 'string' ? patch.summary.trim() : '';
+      if (!trimmedSummary) {
+        db.exec('ROLLBACK');
+        throw new Error('Atom summary must be a non-empty string');
+      }
+      if (trimmedSummary.length > 280) {
+        db.exec('ROLLBACK');
+        throw new Error('Atom summary must be 280 characters or fewer');
       }
     }
 
@@ -665,6 +722,10 @@ export function atomPatch(db, { scope, project, topic, patch, source, dest }) {
       setClauses.push('description = ?');
       values.push(patch.description.trim());
     }
+    if ('summary' in patch) {
+      setClauses.push('summary = ?');
+      values.push(patch.summary.trim());
+    }
     if ('tags' in patch) {
       setClauses.push('tags = ?');
       values.push(Array.isArray(patch.tags) ? JSON.stringify(patch.tags) : '[]');
@@ -686,7 +747,7 @@ export function atomPatch(db, { scope, project, topic, patch, source, dest }) {
       values.push(patch.status);
     }
 
-    const bumpUpdatedAt = ('description' in patch) || ('tags' in patch) || ('pinned' in patch) || ('always_include' in patch) || ('status' in patch);
+    const bumpUpdatedAt = ('description' in patch) || ('summary' in patch) || ('tags' in patch) || ('pinned' in patch) || ('always_include' in patch) || ('status' in patch);
     if (bumpUpdatedAt) {
       setClauses.push('updated_at = ?');
       values.push(Date.now());
@@ -739,7 +800,7 @@ export function atomGet(db, { scope, project, topic }) {
   // Other-workspace atoms with the same topic (not the matched one)
   let alsoIn = db
     .prepare(
-      `SELECT scope, project, topic, description, substr(content, 1, 80) AS preview, status, created_at, updated_at
+      `SELECT scope, project, topic, description, summary, substr(content, 1, 80) AS preview, status, created_at, updated_at
        FROM memory_atom
        WHERE topic = ?
          AND NOT (scope = ? AND project = ?)
@@ -785,7 +846,7 @@ export function atomSearch(db, { scope, project, keywords, limit = 20, status, i
     : includeDeprecated ? '' : `AND status IN ('active', 'resolved')`;
 
   const buildFtsQuery = (whereClause) => `
-    SELECT a.scope, a.project, a.topic, a.description,
+    SELECT a.scope, a.project, a.topic, a.description, a.summary,
            substr(a.content, 1, 80) AS preview, a.status, a.created_at, a.updated_at
     FROM memory_atom a
     JOIN memory_atom_fts fts ON fts.rowid = a.id
@@ -797,7 +858,7 @@ export function atomSearch(db, { scope, project, keywords, limit = 20, status, i
   `;
 
   const buildLikeQuery = (whereClause) => `
-    SELECT scope, project, topic, description,
+    SELECT scope, project, topic, description, summary,
            substr(content, 1, 80) AS preview, status, created_at, updated_at
     FROM memory_atom
     WHERE (topic LIKE ? OR description LIKE ? OR content LIKE ?)
@@ -857,7 +918,7 @@ export function atomList(db, { scope, project, prefix, status, includeDeprecated
 
   if (scope === 'all') {
     return db.prepare(`
-      SELECT scope, project, topic, description,
+      SELECT scope, project, topic, description, summary,
              substr(content, 1, 80) AS preview, pinned, always_include, status, created_at, updated_at
       FROM memory_atom
       WHERE topic LIKE ?
@@ -868,7 +929,7 @@ export function atomList(db, { scope, project, prefix, status, includeDeprecated
 
   // Default: current workspace + global
   return db.prepare(`
-    SELECT scope, project, topic, description,
+    SELECT scope, project, topic, description, summary,
            substr(content, 1, 80) AS preview, pinned, always_include, status, created_at, updated_at
     FROM memory_atom
     WHERE topic LIKE ?

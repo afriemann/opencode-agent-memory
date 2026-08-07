@@ -1221,3 +1221,77 @@ describe('assemblePrimer — atom preview newline stripping', () => {
     expect(backticks % 2).toBe(0);
   });
 });
+
+// ── assemblePrimer — summary field display ─────────────────────────────────────
+// spec: openspec/changes/atom-summary-field/specs/memory-atom-tools/spec.md
+
+describe('assemblePrimer — summary field display', () => {
+  const PROJECT = '/home/user/repos/my/project';
+  const NOW = Date.now();
+  const STALENESS = { status: '0 commit(s) since this note' };
+
+  test('summary is shown instead of preview when atom has a non-empty summary', () => {
+    const atom = {
+      topic: 'arch/db',
+      description: 'DB design',
+      summary: 'Stores persistent data in SQLite using WAL mode.',
+      preview: '# Old noisy markdown heading that should not appear',
+      updated_at: NOW - 60_000,
+    };
+    const result = assemblePrimer({
+      rows: [], projectAtoms: [atom], globalAtoms: [],
+      agent: 'engineer', project: PROJECT, staleness: STALENESS,
+    });
+    expect(result).toContain('Stores persistent data in SQLite using WAL mode.');
+    expect(result).not.toContain('Old noisy markdown heading');
+  });
+
+  test('preview is shown as fallback when atom has no summary', () => {
+    const atom = {
+      topic: 'arch/api',
+      description: 'API design',
+      summary: '',
+      preview: 'REST endpoints use JSON',
+      updated_at: NOW - 60_000,
+    };
+    const result = assemblePrimer({
+      rows: [], projectAtoms: [atom], globalAtoms: [],
+      agent: 'engineer', project: PROJECT, staleness: STALENESS,
+    });
+    expect(result).toContain('REST endpoints use JSON');
+  });
+
+  test('preview is shown as fallback when atom has no summary property at all', () => {
+    const atom = {
+      topic: 'arch/legacy',
+      description: 'Legacy design',
+      preview: 'Legacy content here',
+      updated_at: NOW - 60_000,
+    };
+    const result = assemblePrimer({
+      rows: [], projectAtoms: [atom], globalAtoms: [],
+      agent: 'engineer', project: PROJECT, staleness: STALENESS,
+    });
+    expect(result).toContain('Legacy content here');
+  });
+
+  test('summary line does not have trailing ellipsis (unlike preview fallback)', () => {
+    const atom = {
+      topic: 'arch/clean',
+      description: 'Clean design',
+      summary: 'A complete sentence with no ellipsis.',
+      preview: '',
+      updated_at: NOW - 60_000,
+    };
+    const result = assemblePrimer({
+      rows: [], projectAtoms: [atom], globalAtoms: [],
+      agent: 'engineer', project: PROJECT, staleness: STALENESS,
+    });
+    const lines = result.split('\n');
+    const atomLine = lines.find((l) => l.includes('arch/clean'));
+    expect(atomLine).toBeDefined();
+    // Summary should not end with '…'
+    expect(atomLine).not.toMatch(/…$/);
+    expect(atomLine).toContain('A complete sentence with no ellipsis.');
+  });
+});

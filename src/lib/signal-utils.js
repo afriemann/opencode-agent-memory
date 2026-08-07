@@ -59,19 +59,28 @@ export function lastTwoSegments(absPath) {
 /**
  * Render a single atom directory entry line.
  *
- * @param {object} atom — atom row with topic, description, preview, updated_at
+ * Displays the atom's summary when available (summary is author-controlled and
+ * already bounded at 280 chars, so no truncation or backtick-repair is needed).
+ * Falls back to the raw 80-char content preview for older atoms without a summary.
+ *
+ * @param {object} atom — atom row with topic, description, summary, preview, updated_at
  * @param {number} now — reference epoch ms
  * @param {{ pinned?: boolean }} [opts]
  * @returns {string}
  */
 function renderAtomLine(atom, now, { pinned = false } = {}) {
+  const relTime = atom.updated_at ? formatRelativeTime(atom.updated_at, now) : '';
+  const prefix = pinned ? '[pinned] ' : '';
+  const digest = atom.summary || '';
+  if (digest) {
+    return `${prefix}${atom.topic} [${relTime}] — "${atom.description}" — ${digest}`;
+  }
+  // Fallback: use the raw 80-char preview for atoms without a summary.
   const rawPreview = atom.preview ? String(atom.preview).replace(/[\r\n]+/g, ' ') : '';
   let preview = rawPreview.slice(0, 80);
   // Close any unclosed inline-code span so truncation doesn't corrupt downstream markdown.
   if ((preview.match(/`/g) ?? []).length % 2 !== 0) preview += '`';
-  const relTime = atom.updated_at ? formatRelativeTime(atom.updated_at, now) : '';
   const contentPart = preview ? ` — ${preview}…` : '';
-  const prefix = pinned ? '[pinned] ' : '';
   return `${prefix}${atom.topic} [${relTime}] — "${atom.description}"${contentPart}`;
 }
 

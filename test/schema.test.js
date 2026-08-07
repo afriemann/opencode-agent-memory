@@ -49,7 +49,7 @@ describe('ensureSchema — fresh DB', () => {
     ensureSchema(db);
 
     const cols = db.prepare("PRAGMA table_info(memory_atom)").all().map((c) => c.name);
-    for (const col of ['id', 'scope', 'project', 'topic', 'description', 'content', 'tags',
+    for (const col of ['id', 'scope', 'project', 'topic', 'description', 'summary', 'content', 'tags',
                        'pinned', 'always_include', 'status', 'session_id', 'session_name', 'created_at', 'updated_at']) {
       expect(cols).toContain(col);
     }
@@ -106,11 +106,11 @@ describe('ensureSchema — fresh DB', () => {
     expect(() => ensureSchema(db)).not.toThrow();
   });
 
-  test('user_version is set to 6 after first ensureSchema', () => {
+  test('user_version is set to 7 after first ensureSchema', () => {
     const db = openMemory();
     ensureSchema(db);
     const v = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v).toBe(6);
+    expect(v).toBe(7);
   });
 });
 
@@ -548,7 +548,7 @@ describe('migration — populated old-schema DB', () => {
     const db = buildOldSchemaDb();
     ensureSchema(db);
     const v = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v).toBe(6);
+    expect(v).toBe(7);
   });
 
   test('legacy summaries are migrated to work/migrated-summary atom', () => {
@@ -693,7 +693,7 @@ describe('migration failure rolls back entirely and retries cleanly', () => {
     // Second ensureSchema call must complete migration successfully
     expect(() => ensureSchema(db)).not.toThrow();
     const v2 = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v2).toBe(6);
+    expect(v2).toBe(7);
 
     // hot_state row preserved after migration
     const migratedRow = db.prepare(
@@ -980,7 +980,7 @@ describe('migration — v2 to v3 (pinned column)', () => {
     const db = buildV2SchemaDb();
     ensureSchema(db);
     const v = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v).toBe(6);
+    expect(v).toBe(7);
   });
 
   test('v3 migration is idempotent — calling ensureSchema twice does not throw', () => {
@@ -994,7 +994,7 @@ describe('migration — v2 to v3 (pinned column)', () => {
     db.exec('ALTER TABLE memory_atom ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0');
     expect(() => ensureSchema(db)).not.toThrow();
     const v = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v).toBe(6);
+    expect(v).toBe(7);
   });
 
   test('fresh and migrated databases have identical pinned column definition', () => {
@@ -1276,7 +1276,7 @@ describe('migration — v3 to v4 (status column)', () => {
     const db = buildV3SchemaDb();
     ensureSchema(db);
     const v = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v).toBe(6);
+    expect(v).toBe(7);
   });
 
   test('v4 migration is idempotent — calling ensureSchema twice does not throw', () => {
@@ -1290,7 +1290,7 @@ describe('migration — v3 to v4 (status column)', () => {
     db.exec(`ALTER TABLE memory_atom ADD COLUMN status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'resolved', 'deprecated'))`);
     expect(() => ensureSchema(db)).not.toThrow();
     const v = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v).toBe(6);
+    expect(v).toBe(7);
   });
 
   test('fresh and migrated databases have identical status column definition', () => {
@@ -1383,7 +1383,7 @@ describe('migration — v4 to v5 (distil cost columns on hot_state)', () => {
     const db = buildV4SchemaDb();
     ensureSchema(db);
     const v = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v).toBe(6);
+    expect(v).toBe(7);
   });
 
   test('v5 migration is idempotent — calling ensureSchema twice does not throw', () => {
@@ -1400,7 +1400,7 @@ describe('migration — v4 to v5 (distil cost columns on hot_state)', () => {
     db.exec('ALTER TABLE hot_state ADD COLUMN distil_tokens_out INTEGER');
     expect(() => ensureSchema(db)).not.toThrow();
     const v = db.prepare('PRAGMA user_version').get().user_version;
-    expect(v).toBe(6);
+    expect(v).toBe(7);
   });
 
   test('existing hot_state rows are preserved after v5 migration', () => {
@@ -1764,7 +1764,7 @@ describe('always_include — schema baseline and v6 migration', () => {
   test('user_version is 6 after fresh ensureSchema (v6 sentinel)', () => {
     const db = openMemory();
     ensureSchema(db);
-    expect(db.prepare('PRAGMA user_version').get().user_version).toBe(6);
+    expect(db.prepare('PRAGMA user_version').get().user_version).toBe(7);
   });
 
   // 10.2 — v5→v6 migration adds always_include to existing DB
@@ -1797,7 +1797,7 @@ describe('always_include — schema baseline and v6 migration', () => {
 
     const cols = db.prepare("PRAGMA table_info(memory_atom)").all().map((c) => c.name);
     expect(cols).toContain('always_include');
-    expect(db.prepare('PRAGMA user_version').get().user_version).toBe(6);
+    expect(db.prepare('PRAGMA user_version').get().user_version).toBe(7);
 
     // Pre-existing row now has always_include = 0 (default)
     const row = db.prepare("SELECT always_include FROM memory_atom WHERE topic='pre-existing'").get();
@@ -1808,7 +1808,7 @@ describe('always_include — schema baseline and v6 migration', () => {
     const db = openMemory();
     ensureSchema(db);
     expect(() => ensureSchema(db)).not.toThrow();
-    expect(db.prepare('PRAGMA user_version').get().user_version).toBe(6);
+    expect(db.prepare('PRAGMA user_version').get().user_version).toBe(7);
   });
 
   test('fresh and v5-migrated databases converge: both have always_include = 0 for new rows', () => {
@@ -2359,5 +2359,325 @@ describe('atomPatch move semantics', () => {
       topic: 'missing/x',
       patch: {},
     })).toThrow(/does not exist/i);
+  });
+});
+
+// ── migration — v6 to v7 (summary column) ─────────────────────────────────────
+// spec: openspec/changes/atom-summary-field/specs/memory-atom/spec.md
+
+describe('migration — v6 to v7 (summary column)', () => {
+  function buildV6SchemaDb() {
+    const db = new DatabaseSync(':memory:');
+    db.exec('PRAGMA busy_timeout = 5000;');
+    db.exec(`
+      CREATE TABLE hot_state (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        scope               TEXT    NOT NULL DEFAULT 'project',
+        agent               TEXT    NOT NULL,
+        project             TEXT    NOT NULL,
+        session_id          TEXT    NOT NULL DEFAULT '',
+        session_name        TEXT,
+        last_worked_summary TEXT,
+        next_action         TEXT,
+        open_questions      TEXT,
+        anchored_git_sha    TEXT,
+        schema_version      INTEGER NOT NULL DEFAULT 2,
+        distil_cost_usd     REAL,
+        distil_tokens_in    INTEGER,
+        distil_tokens_out   INTEGER,
+        updated_at          INTEGER NOT NULL,
+        UNIQUE (scope, agent, project, session_id)
+      );
+      CREATE TABLE memory_signal (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id  TEXT    NOT NULL,
+        scope       TEXT    NOT NULL DEFAULT 'project',
+        agent       TEXT    NOT NULL,
+        project     TEXT    NOT NULL,
+        kind        TEXT    NOT NULL,
+        payload     TEXT    NOT NULL,
+        created_at  INTEGER NOT NULL
+      );
+      CREATE TABLE distil_watermark (
+        session_id     TEXT    PRIMARY KEY,
+        last_signal_ms INTEGER NOT NULL DEFAULT 0,
+        last_distil_ms INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE memory_atom (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        scope          TEXT    NOT NULL DEFAULT 'project',
+        project        TEXT    NOT NULL DEFAULT '',
+        topic          TEXT    NOT NULL,
+        description    TEXT    NOT NULL DEFAULT '',
+        content        TEXT    NOT NULL DEFAULT '',
+        tags           TEXT    NOT NULL DEFAULT '[]',
+        pinned         INTEGER NOT NULL DEFAULT 0,
+        always_include INTEGER NOT NULL DEFAULT 0,
+        status         TEXT    NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'resolved', 'deprecated')),
+        session_id     TEXT,
+        session_name   TEXT,
+        created_at     INTEGER NOT NULL,
+        updated_at     INTEGER NOT NULL,
+        UNIQUE (scope, project, topic)
+      );
+      PRAGMA user_version = 6;
+    `);
+    db.prepare(`
+      INSERT INTO memory_atom (scope, project, topic, description, content, tags, created_at, updated_at)
+      VALUES ('project', '/p', 'existing-atom', 'existing atom', 'body', '[]', 100, 200)
+    `).run();
+    return db;
+  }
+
+  test('FTS virtual table is unchanged — summary is not added to the FTS index', () => {
+    const db = buildV6SchemaDb();
+    ensureSchema(db);
+    const ftsTable = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='memory_atom_fts'").get();
+    if (!ftsTable) return; // FTS5 unavailable — skip
+    const ftsSchema = db.prepare("SELECT sql FROM sqlite_master WHERE name='memory_atom_fts'").get().sql;
+    expect(ftsSchema).not.toMatch(/summary/);
+    expect(ftsSchema).toMatch(/content/);
+  });
+
+  test('adds summary column to existing memory_atom table', () => {
+    const db = buildV6SchemaDb();
+    ensureSchema(db);
+    const cols = db.prepare('PRAGMA table_info(memory_atom)').all().map((c) => c.name);
+    expect(cols).toContain('summary');
+  });
+
+  test('existing rows get summary = "" after migration', () => {
+    const db = buildV6SchemaDb();
+    ensureSchema(db);
+    const row = db.prepare("SELECT summary FROM memory_atom WHERE topic = 'existing-atom'").get();
+    expect(row).toBeDefined();
+    expect(row.summary).toBe('');
+  });
+
+  test('user_version is 7 after v6 to v7 migration', () => {
+    const db = buildV6SchemaDb();
+    ensureSchema(db);
+    const v = db.prepare('PRAGMA user_version').get().user_version;
+    expect(v).toBe(7);
+  });
+
+  test('v7 migration is idempotent — calling ensureSchema twice does not throw', () => {
+    const db = buildV6SchemaDb();
+    ensureSchema(db);
+    expect(() => ensureSchema(db)).not.toThrow();
+  });
+
+  test('v7 migration is idempotent when summary already present (user_version < 7)', () => {
+    const db = buildV6SchemaDb();
+    db.exec("ALTER TABLE memory_atom ADD COLUMN summary TEXT NOT NULL DEFAULT ''");
+    expect(() => ensureSchema(db)).not.toThrow();
+    const v = db.prepare('PRAGMA user_version').get().user_version;
+    expect(v).toBe(7);
+  });
+
+  test('fresh and migrated databases have identical summary column definition', () => {
+    const fresh = openMemory();
+    ensureSchema(fresh);
+    const migrated = buildV6SchemaDb();
+    ensureSchema(migrated);
+
+    const summaryCol = (db) => db.prepare('PRAGMA table_info(memory_atom)').all().find((c) => c.name === 'summary');
+    const f = summaryCol(fresh);
+    const m = summaryCol(migrated);
+    expect(f).toBeDefined();
+    expect(m).toBeDefined();
+    expect(f.type).toBe(m.type);
+    expect(f.dflt_value).toBe(m.dflt_value);
+    expect(f.notnull).toBe(m.notnull);
+  });
+});
+
+// ── atomWrite with summary ─────────────────────────────────────────────────────
+// spec: openspec/changes/atom-summary-field/specs/memory-atom/spec.md
+
+describe('atomWrite with summary', () => {
+  test('rejects explicitly-empty summary string', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    expect(() =>
+      atomWrite(db, { scope: 'project', project: '/p', topic: 'empty-sum', content: 'body', description: 'd', summary: '' })
+    ).toThrow(/non-empty/);
+    // No row must have been written
+    const row = db.prepare("SELECT id FROM memory_atom WHERE topic='empty-sum'").get();
+    expect(row).toBeUndefined();
+  });
+
+  test('rejects whitespace-only summary string', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    expect(() =>
+      atomWrite(db, { scope: 'project', project: '/p', topic: 'ws-sum', content: 'body', description: 'd', summary: '   ' })
+    ).toThrow(/non-empty/);
+  });
+
+  test('stores provided summary in the DB', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'sumtest', content: 'body', description: 'd', summary: 'A one-sentence digest.' });
+    const row = db.prepare("SELECT summary FROM memory_atom WHERE topic='sumtest'").get();
+    expect(row.summary).toBe('A one-sentence digest.');
+  });
+
+  test('summary defaults to empty string when omitted', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'nosummary', content: 'body', description: 'd' });
+    const row = db.prepare("SELECT summary FROM memory_atom WHERE topic='nosummary'").get();
+    expect(row.summary).toBe('');
+  });
+
+  test('rejects summary longer than 280 characters', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    const longSummary = 'x'.repeat(281);
+    expect(() =>
+      atomWrite(db, { scope: 'project', project: '/p', topic: 'toolong', content: 'body', description: 'd', summary: longSummary })
+    ).toThrow(/280/);
+  });
+
+  test('summary of exactly 280 characters is accepted', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    const exactSummary = 'x'.repeat(280);
+    expect(() =>
+      atomWrite(db, { scope: 'project', project: '/p', topic: 'exact280', content: 'body', description: 'd', summary: exactSummary })
+    ).not.toThrow();
+  });
+
+  test('summary is updated on re-write (in ON CONFLICT DO UPDATE SET)', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'sum-update', content: 'v1', description: 'd', summary: 'original summary.' });
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'sum-update', content: 'v2', description: 'd', summary: 'updated summary.' });
+    const row = db.prepare("SELECT summary FROM memory_atom WHERE topic='sum-update'").get();
+    expect(row.summary).toBe('updated summary.');
+  });
+});
+
+// ── atomPatch with summary ─────────────────────────────────────────────────────
+// spec: openspec/changes/atom-summary-field/specs/memory-atom/spec.md
+
+describe('atomPatch with summary', () => {
+  test('atomPatch rejects empty summary string', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    db.prepare(`
+      INSERT INTO memory_atom (scope, project, topic, description, summary, content, tags, created_at, updated_at)
+      VALUES ('project', '/p', 'empty-patch-sum', 'desc', 'original.', 'body', '[]', 1000, 2000)
+    `).run();
+    expect(() =>
+      atomPatch(db, { scope: 'project', project: '/p', topic: 'empty-patch-sum', patch: { summary: '' } })
+    ).toThrow(/non-empty/);
+    // Summary must be unchanged
+    const row = db.prepare("SELECT summary FROM memory_atom WHERE topic='empty-patch-sum'").get();
+    expect(row.summary).toBe('original.');
+  });
+
+  test('atomPatch with summary updates the field and bumps updated_at', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    db.prepare(`
+      INSERT INTO memory_atom (scope, project, topic, description, summary, content, tags, created_at, updated_at)
+      VALUES ('project', '/p', 'patch-sum', 'desc', '', 'body', '[]', 1000, 2000)
+    `).run();
+
+    atomPatch(db, { scope: 'project', project: '/p', topic: 'patch-sum', patch: { summary: 'A patched summary.' } });
+
+    const row = db.prepare("SELECT summary, updated_at FROM memory_atom WHERE topic='patch-sum'").get();
+    expect(row.summary).toBe('A patched summary.');
+    expect(row.updated_at).toBeGreaterThan(2000);
+  });
+
+  test('atomPatch with summary alone is accepted (single-field patch)', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    db.prepare(`
+      INSERT INTO memory_atom (scope, project, topic, description, summary, content, tags, created_at, updated_at)
+      VALUES ('project', '/p', 'sum-solo', 'desc', '', 'body', '[]', 1000, 2000)
+    `).run();
+
+    const result = atomPatch(db, { scope: 'project', project: '/p', topic: 'sum-solo', patch: { summary: 'Solo.' } });
+    expect(result.patched).toContain('summary');
+  });
+
+  test('atomPatch with summary longer than 280 chars is rejected', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    db.prepare(`
+      INSERT INTO memory_atom (scope, project, topic, description, summary, content, tags, created_at, updated_at)
+      VALUES ('project', '/p', 'sum-toolong', 'desc', '', 'body', '[]', 1000, 2000)
+    `).run();
+
+    const longSummary = 'x'.repeat(281);
+    expect(() =>
+      atomPatch(db, { scope: 'project', project: '/p', topic: 'sum-toolong', patch: { summary: longSummary } })
+    ).toThrow(/280/);
+  });
+
+  test('atomPatch without summary field leaves existing summary unchanged', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    db.prepare(`
+      INSERT INTO memory_atom (scope, project, topic, description, summary, content, tags, created_at, updated_at)
+      VALUES ('project', '/p', 'sum-preserve', 'desc', 'keep me.', 'body', '[]', 1000, 2000)
+    `).run();
+
+    atomPatch(db, { scope: 'project', project: '/p', topic: 'sum-preserve', patch: { description: 'updated' } });
+
+    const row = db.prepare("SELECT summary FROM memory_atom WHERE topic='sum-preserve'").get();
+    expect(row.summary).toBe('keep me.');
+  });
+});
+
+// ── atomList, atomSearch, atomGet include summary field ───────────────────────
+// spec: openspec/changes/atom-summary-field/specs/memory-atom/spec.md
+
+describe('read queries include summary field', () => {
+  test('atomList rows include summary', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'list-sum', content: 'x', description: 'd', summary: 'My digest.' });
+    const results = atomList(db, { scope: 'project', project: '/p' });
+    const row = results.find((r) => r.topic === 'list-sum');
+    expect(row).toBeDefined();
+    expect(row.summary).toBe('My digest.');
+  });
+
+  test('atomList rows include preview as fallback for atoms without summary', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    db.prepare(`
+      INSERT INTO memory_atom (scope, project, topic, description, summary, content, tags, created_at, updated_at)
+      VALUES ('project', '/p', 'no-sum', 'desc', '', 'preview content', '[]', 1000, 2000)
+    `).run();
+    const results = atomList(db, { scope: 'project', project: '/p' });
+    const row = results.find((r) => r.topic === 'no-sum');
+    expect(row).toBeDefined();
+    expect(row.summary).toBe('');
+    expect(row.preview).toBeDefined(); // fallback available for display layer
+  });
+
+  test('atomSearch results include summary', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/p', topic: 'search-sum', content: 'searchable text here', description: 'd', summary: 'Search digest.' });
+    const results = atomSearch(db, { scope: 'all', project: '/p', keywords: 'searchable text', limit: 10 });
+    const row = results.find((r) => r.topic === 'search-sum');
+    expect(row).toBeDefined();
+    expect(row.summary).toBe('Search digest.');
+  });
+
+  test('atomGet alsoIn rows include summary', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, { scope: 'project', project: '/other', topic: 'cross', content: 'foreign', description: 'd', summary: 'Foreign digest.' });
+    const { alsoIn } = atomGet(db, { scope: 'project', project: '/p', topic: 'cross' });
+    expect(alsoIn.length).toBeGreaterThan(0);
+    expect(alsoIn[0].summary).toBe('Foreign digest.');
   });
 });

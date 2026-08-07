@@ -34,7 +34,7 @@
 //     Upserts a skeleton row when absent (cold-start safe).
 //
 //   atom-write <contextDirectory> <json>
-//     json: { workspace, topic, content, description, tags?, sessionId?, sessionName? }
+//     json: { workspace, topic, content, description, summary, tags?, sessionId?, sessionName? }
 //     workspace: null | "." | absolute path (resolved to git root)
 //
 //   atom-append <contextDirectory> <json>
@@ -481,7 +481,7 @@ function cmdAtomWrite(contextDirectory, jsonArg) {
     process.exit(1);
   }
 
-  const { workspace, topic, content, description, tags, pinned, alwaysInclude, sessionId, sessionName, createdAt } = data;
+  const { workspace, topic, content, description, summary, tags, pinned, alwaysInclude, sessionId, sessionName, createdAt } = data;
   if (!topic) {
     process.stderr.write('[agent-memory/atom-write] topic is required\n');
     process.exit(1);
@@ -501,7 +501,7 @@ function cmdAtomWrite(contextDirectory, jsonArg) {
     const normTopic = normaliseTopic(topic);
     const result = atomWrite(db, {
       scope, project, topic: normTopic, content: content ?? '',
-      description, tags, pinned, alwaysInclude, sessionId, sessionName, createdAt
+      description, summary, tags, pinned, alwaysInclude, sessionId, sessionName, createdAt
     });
     db.close();
     const msg = result.action === 'created'
@@ -610,7 +610,7 @@ function cmdAtomPatch(contextDirectory, jsonArg) {
     process.exit(1);
   }
 
-  const { workspace, targetWorkspace, topic, description, tags, created_at: createdAt, pinned, always_include: alwaysInclude, status } = data;
+  const { workspace, targetWorkspace, topic, description, summary, tags, created_at: createdAt, pinned, always_include: alwaysInclude, status } = data;
   if (!topic) {
     process.stderr.write('[agent-memory/atom-patch] topic is required\n');
     process.exit(1);
@@ -637,6 +637,7 @@ function cmdAtomPatch(contextDirectory, jsonArg) {
 
   const patch = {};
   if ('description' in data) patch.description = description;
+  if ('summary' in data) patch.summary = summary;
   if ('tags' in data) patch.tags = tags;
   if ('created_at' in data) patch.created_at = createdAt;
   if ('pinned' in data) patch.pinned = pinned;
