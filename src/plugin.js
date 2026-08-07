@@ -25,6 +25,7 @@ import {
   parseDistilReply,
 } from './lib/distil-prompt.js';
 import { gitRevParse, gitStaleness } from './lib/git-helper.js';
+import { findGitRootOrNull } from './lib/workspace.js';
 import {
   assemblePrimer,
   reduceSignals,
@@ -76,7 +77,7 @@ You have persistent memory via the \`memory_atom_*\` and \`memory_state_*\` tool
 
 **Read before re-investigating**: before exploring a familiar domain, call \`memory_atom_search\` or \`memory_atom_list\` — previous findings may already be recorded. Use \`memory_atom_get\` to retrieve the full content of a specific atom.
 
-**Addressing**: pass \`workspace: "."\` to write to the current project (resolves to its git root), \`workspace: null\` to write globally. Always pass \`workspace\` explicitly — there is no default.
+**Addressing**: \`workspace\` is optional. When omitted, the system auto-detects: in a git repo it writes to that project; outside any git repo it writes to the shared store. Pass \`workspace: "."\` to explicitly target the current project, \`workspace: null\` to explicitly target the shared store, or an absolute path for a cross-project write.
 
 **Update atom metadata** (\`memory_atom_patch\`) when you need to correct description, summary, tags, created_at, or pin state without rewriting content — e.g. re-dating a migrated atom, pinning it, or adding a summary to an older atom that predates the summary field. Use \`memory_atom_write\` when content itself changes.
 
@@ -87,7 +88,9 @@ You have persistent memory via the \`memory_atom_*\` and \`memory_state_*\` tool
 
 Prefer \`status="deprecated"\` or \`status="resolved"\` over \`memory_atom_delete\` — it preserves history. \`memory_atom_list\` and \`memory_atom_search\` exclude deprecated atoms by default.
 
-**Standing context** (\`always_include\`): set \`always_include: true\` on an atom to inject its **full content** into every session primer under \`### Standing context\` — the agent reads it without a \`memory_atom_get\` call. Use only for short (≤500-word) content that must be available before the user's first message: persistent project conventions, user preferences, or global coding rules. Do NOT mark long documents, spec files, or code samples as \`always_include\`. Limit: at most 5 always_include atoms per scope (workspace and global independently) are rendered; excess atoms are named in an overflow note. The \`always_include\` flag is INSERT-only on \`memory_atom_write\`; toggle it via \`memory_atom_patch\` with \`patch: { always_include: true/false }\`. Distinguish from \`pinned\`: \`pinned\` keeps the atom at the top of the compact directory listing (one line); \`always_include\` injects the full body and removes the atom from the compact directory entirely.
+**Standing context** (\`always_include\`): set \`always_include: true\` on an atom to inject its **full content** into every session primer under \`### Standing context\` — the agent reads it without a \`memory_atom_get\` call. Use only for short (≤500-word) content that must be available before the user's first message: persistent project conventions, user preferences, or global coding rules. Do NOT mark long documents, spec files, or code samples as \`always_include\`. Limit: at most 5 always_include atoms per scope (workspace and shared independently) are rendered; excess atoms are named in an overflow note. The \`always_include\` flag is INSERT-only on \`memory_atom_write\`; toggle it via \`memory_atom_patch\` with \`patch: { always_include: true/false }\`. Distinguish from \`pinned\`: \`pinned\` keeps the atom at the top of the compact directory listing (one line); \`always_include\` injects the full body and removes the atom from the compact directory entirely.
+
+**Scope** (\`scope\` on read tools): \`scope: "workspace"\` (default) — current project atoms and shared atoms together. \`scope: "global"\` — entire space, all projects and shared atoms. To read only shared atoms, combine \`workspace: null\` with \`scope: "workspace"\`.
 
 **Searching**: \`memory_atom_search\` uses BM25 keyword matching — NOT semantic search. Use exact terms.
 
@@ -175,14 +178,26 @@ function validateWorkspace(workspace) {
 }
 
 /**
+ * Resolve a directory path to the canonical project key used in hot_state and
+ * atom storage. In a git repo the key is the repo root; outside any git repo
+ * the key is '' (the shared-store bucket).
+ *
+ * @param {string} directory — absolute path (typically session.directory)
+ * @returns {string}
+ */
+function projectKeyFor(directory) {
+  return findGitRootOrNull(directory) ?? '';
+}
+
+/**
  * Format the resolved storage location for confirmation output.
  *
  * @param {string} scope — 'global' | 'project'
- * @param {string} project — the git-root path (empty string when global)
+ * @param {string} project — the git-root path (empty string when shared)
  * @returns {string}
  */
 function formatLocation(scope, project) {
-  return scope === 'global' ? '[global]' : `[workspace: ${project}]`;
+  return scope === 'global' ? '[shared]' : `[workspace: ${project}]`;
 }
 
 // ── Scope resolution (read-only tools only) ───────────────────────────────────
@@ -192,13 +207,19 @@ function formatLocation(scope, project) {
  * Used by read-only tools (atom-get, atom-list, atom-search) that still use
  * the legacy <scope> <project> positional CLI shape.
  *
+ * Scope semantics:
+ *   'workspace' (default) — current project atoms + shared atoms (atomSearch unions them)
+ *   'global'              — entire space, across ALL projects (repurposed from "shared-only")
+ *   'all'                 — alias for 'global' (backwards compatibility)
+ *   undefined / other     — same as 'workspace'
+ *
  * @param {string|undefined} scope — 'workspace' | 'global' | 'all' | undefined
- * @param {string} directory — session working directory
+ * @param {string} directory — session working directory (already normalised to git root or '')
  * @returns {{ scope: string, project: string }}
  */
 function resolveScope(scope, directory) {
-  if (scope === 'global') return { scope: 'global', project: '' };
-  if (scope === 'all')    return { scope: 'all',    project: '' };
+  if (scope === 'global') return { scope: 'all', project: '' };
+  if (scope === 'all')    return { scope: 'all', project: '' };
   return { scope: 'project', project: directory };
 }
 
@@ -288,9 +309,9 @@ const AgentMemory = async ({ client, $ }) => {
 
       const rows = state.recent ?? [];
 
-      // Fetch atom directory: current workspace + global, and standing atoms
+      // Fetch atom directory: current workspace + shared, and standing atoms
       let projectAtoms = [];
-      let globalAtoms = [];
+      let sharedAtoms = [];
       let standingAtoms = [];
       let crossProjectRows = [];
       try {
@@ -300,7 +321,7 @@ const AgentMemory = async ({ client, $ }) => {
           spawnMemory($, ['atom-list-full', 'project', project]),
         ]);
         projectAtoms = JSON.parse(wOut.trim());
-        globalAtoms = JSON.parse(gOut.trim());
+        sharedAtoms = JSON.parse(gOut.trim());
         standingAtoms = JSON.parse(sOut.trim());
       } catch (err) {
         log(`inject: atom-list failed for ${sessionId}`, err);
@@ -317,14 +338,14 @@ const AgentMemory = async ({ client, $ }) => {
       }
 
       // Cold start: no prior memory, no atoms, no cross-project activity → no primer
-      if (rows.length === 0 && projectAtoms.length === 0 && globalAtoms.length === 0 && standingAtoms.length === 0 && crossProjectRows.length === 0) return;
+      if (rows.length === 0 && projectAtoms.length === 0 && sharedAtoms.length === 0 && standingAtoms.length === 0 && crossProjectRows.length === 0) return;
 
       const storedSha = rows.length > 0 ? (rows[0].anchored_git_sha ?? null) : null;
       const staleness = await gitStaleness($, project, storedSha);
       const primer = assemblePrimer({
         rows,
         projectAtoms,
-        globalAtoms,
+        sharedAtoms,
         standingAtoms,
         crossProjectRows,
         agent,
@@ -336,7 +357,7 @@ const AgentMemory = async ({ client, $ }) => {
 
       if (primer) {
         primers.set(sessionId, primer);
-        log(`inject: primer ready for ${sessionId} (${rows.length} sessions, ${projectAtoms.length} workspace atoms, ${globalAtoms.length} global atoms, ${standingAtoms.length} standing, ${crossProjectRows.length} cross-project)`);
+        log(`inject: primer ready for ${sessionId} (${rows.length} sessions, ${projectAtoms.length} workspace atoms, ${sharedAtoms.length} shared atoms, ${standingAtoms.length} standing, ${crossProjectRows.length} cross-project)`);
       } else {
         log(`inject: cold start for ${sessionId} — no prior memory or atoms, no primer`);
       }
@@ -381,14 +402,16 @@ const AgentMemory = async ({ client, $ }) => {
     }
 
     const agent = session && session.agent;
-    const project = session && session.directory;
+    const rawDir = session && session.directory;
+    // Normalise to git root for git-backed sessions; '' for non-git sessions (shared store).
+    const project = rawDir ? projectKeyFor(rawDir) : rawDir;
     // Refresh the session name so the primer always shows the final title,
     // not the "New session - <timestamp>" default from session.created.
     const freshTitle = session && session.title;
     if (freshTitle != null) sessionNames.set(sessionId, freshTitle);
 
     if (!agent || !TARGET_AGENTS.has(agent)) return;
-    if (!project) return;
+    if (!rawDir) return;
 
     sessionAgents.set(sessionId, agent);
 
@@ -748,11 +771,12 @@ const AgentMemory = async ({ client, $ }) => {
         'Max 280 chars.'
       ),
       tags: tool.schema.array(tool.schema.string()).optional().describe('Optional tags'),
-      workspace: tool.schema.union([tool.schema.string(), tool.schema.null()]).describe(
-        'Required. Pass null for the global store, "." for the current project (resolves to its git root), ' +
+      workspace: tool.schema.union([tool.schema.string(), tool.schema.null()]).optional().describe(
+        'Optional. Pass null for the shared store, "." for the current project (resolves to its git root), ' +
         'or an absolute path for a foreign project (also resolved to its git root). ' +
+        'When omitted, auto-detects: writes to the current project when in a git repo, or to the shared store otherwise. ' +
         'Paths are normalised to the nearest .git directory walking upward; .git files (worktree pointers) are skipped ' +
-        'so all worktrees resolve to the main repo root. If no .git directory is found, the path is used as-is. ' +
+        'so all worktrees resolve to the main repo root. ' +
         '"." is always safe for the current project regardless of which subdirectory opencode was launched from.'
       ),
       pinned: tool.schema.boolean().optional().describe(
@@ -829,11 +853,12 @@ const AgentMemory = async ({ client, $ }) => {
     args: {
       topic: tool.schema.string().describe('Topic key of the atom to append to'),
       content: tool.schema.string().describe('Content to append'),
-      workspace: tool.schema.union([tool.schema.string(), tool.schema.null()]).describe(
-        'Required. Pass null for the global store, "." for the current project (resolves to its git root), ' +
+      workspace: tool.schema.union([tool.schema.string(), tool.schema.null()]).optional().describe(
+        'Optional. Pass null for the shared store, "." for the current project (resolves to its git root), ' +
         'or an absolute path for a foreign project (also resolved to its git root). ' +
+        'When omitted, auto-detects: writes to the current project when in a git repo, or to the shared store otherwise. ' +
         'Paths are normalised to the nearest .git directory walking upward; .git files (worktree pointers) are skipped ' +
-        'so all worktrees resolve to the main repo root. If no .git directory is found, the path is used as-is. ' +
+        'so all worktrees resolve to the main repo root. ' +
         '"." is always safe for the current project regardless of which subdirectory opencode was launched from.'
       ),
     },
@@ -867,12 +892,12 @@ const AgentMemory = async ({ client, $ }) => {
       'To fetch full content of an atom from a non-current workspace, supply its directory path ' +
       'as `workspace` — the value shown inside `[workspace: <path>]` in an `alsoIn` entry. ' +
       'With `workspace` set, that path becomes the resolution directory and the atom there is ' +
-      'returned as the primary match. `scope="global"` overrides `workspace` when both are set.\n\n' +
+      'returned as the primary match. `scope="all"` overrides `workspace` when both are set.\n\n' +
       'The output always includes `status:` so you can determine whether the atom needs lifecycle management.',
     args: {
       topic: tool.schema.string().describe('Topic key to look up'),
       scope: tool.schema.string().optional().describe(
-        '"workspace" (default), "global". scope="global" overrides the workspace parameter when both are set.'
+        '"workspace" (default), "all". scope="all" overrides the workspace parameter when both are set — returns best match across all projects and shared store.'
       ),
       workspace: tool.schema.string().optional().describe(
         'Directory path of a foreign workspace (from an alsoIn listing). ' +
@@ -909,7 +934,7 @@ const AgentMemory = async ({ client, $ }) => {
             const createdRel = a.created_at ? formatRelativeTime(a.created_at) : '';
             const updatedRel = a.updated_at ? formatRelativeTime(a.updated_at) : '';
             const location = (a.scope === 'global' || !a.project)
-              ? '[global]'
+              ? '[shared]'
               : `[workspace: ${a.project}]`;
             const statusLabel = (a.status && a.status !== 'active') ? ` [${a.status}]` : '';
             const alsoInContent = a.summary || a.preview || '';
@@ -945,8 +970,8 @@ const AgentMemory = async ({ client, $ }) => {
       ),
       limit: tool.schema.number().optional().describe('Max results (default 20)'),
       scope: tool.schema.string().optional().describe(
-        '"all" (default — searches all workspaces); note this default differs from memory_atom_list ' +
-        'which defaults to "workspace". Use "workspace" to restrict to current workspace + global, or "global" for global only.'
+        '"all" (default — searches all workspaces including shared atoms); note this default differs from memory_atom_list ' +
+        'which defaults to "workspace". Use "workspace" to restrict to current project + shared atoms. Use "global" as an alias for "all".'
       ),
       status: tool.schema.string().optional().describe(
         'Exact-match status filter. One of: "active", "resolved", "deprecated". ' +
@@ -976,7 +1001,8 @@ const AgentMemory = async ({ client, $ }) => {
           const updatedRel = r.updated_at ? formatRelativeTime(r.updated_at) : 'unknown';
           const statusPrefix = (r.status && r.status !== 'active') ? `[${r.status}] ` : '';
           const searchContent = r.summary || r.preview || '';
-          return `• ${statusPrefix}[${r.scope}/${r.project || 'global'}] ${r.topic} — ${r.description}${searchContent ? ` | ${searchContent}` : ''} [created: ${createdRel}, updated: ${updatedRel}]`;
+          const locationLabel = (r.scope === 'global' || !r.project) ? '[shared]' : `[workspace: ${r.project}]`;
+          return `• ${statusPrefix}${locationLabel} ${r.topic} — ${r.description}${searchContent ? ` | ${searchContent}` : ''} [created: ${createdRel}, updated: ${updatedRel}]`;
         });
         return { title: 'memory_atom_search', output: lines.join('\n') };
       } catch (err) {
@@ -994,7 +1020,7 @@ const AgentMemory = async ({ client, $ }) => {
   const memory_atom_list = tool({
     description:
       'List memory atoms by topic prefix. ' +
-      'Defaults to current workspace + global. ' +
+      'Defaults to current workspace + shared atoms. ' +
       'Use scope="all" to include all workspaces. ' +
       'Pinned atoms are listed first with a `[pinned]` prefix. ' +
       'By default, returns active and resolved atoms (deprecated excluded). ' +
@@ -1005,7 +1031,7 @@ const AgentMemory = async ({ client, $ }) => {
     args: {
       prefix: tool.schema.string().optional().describe('Topic prefix filter (e.g. "arch/")'),
       scope: tool.schema.string().optional().describe(
-        '"workspace" (default — current project + global atoms); "global" (global only); "all" (all workspaces including other projects).'
+        '"workspace" (default — current project + shared atoms); "global" (entire space — all workspaces including other projects and shared atoms); "all" (alias for "global").'
       ),
       status: tool.schema.string().optional().describe(
         'Exact-match status filter. One of: "active", "resolved", "deprecated". ' +
@@ -1048,7 +1074,8 @@ const AgentMemory = async ({ client, $ }) => {
           const alwaysIncludePrefix = r.always_include ? '[always-include] ' : '';
           const statusPrefix = (r.status && r.status !== 'active') ? `[${r.status}] ` : '';
           const listContent = r.summary || r.preview || '';
-          return `• ${pinnedPrefix}${alwaysIncludePrefix}${statusPrefix}[${r.scope}/${r.project || 'global'}] ${r.topic} — ${r.description}${listContent ? ` | ${listContent}` : ''} [created: ${createdRel}, updated: ${updatedRel}]`;
+          const locationLabel = (r.scope === 'global' || !r.project) ? '[shared]' : `[workspace: ${r.project}]`;
+          return `• ${pinnedPrefix}${alwaysIncludePrefix}${statusPrefix}${locationLabel} ${r.topic} — ${r.description}${listContent ? ` | ${listContent}` : ''} [created: ${createdRel}, updated: ${updatedRel}]`;
         });
         return { title: 'memory_atom_list', output: lines.join('\n') };
       } catch (err) {
@@ -1081,11 +1108,12 @@ const AgentMemory = async ({ client, $ }) => {
       'Use memory_atom_write when you need to change the atom\'s content.',
     args: {
       topic: tool.schema.string().describe('Topic key of the atom to patch'),
-      workspace: tool.schema.union([tool.schema.string(), tool.schema.null()]).describe(
-        'Required. Pass null for the global store, "." for the current project (resolves to its git root), ' +
+      workspace: tool.schema.union([tool.schema.string(), tool.schema.null()]).optional().describe(
+        'Optional. Pass null for the shared store, "." for the current project (resolves to its git root), ' +
         'or an absolute path for a foreign project (also resolved to its git root). ' +
+        'When omitted, auto-detects: patches the atom in the current project when in a git repo, or in the shared store otherwise. ' +
         'Paths are normalised to the nearest .git directory walking upward; .git files (worktree pointers) are skipped ' +
-        'so all worktrees resolve to the main repo root. If no .git directory is found, the path is used as-is. ' +
+        'so all worktrees resolve to the main repo root. ' +
         '"." is always safe for the current project regardless of which subdirectory opencode was launched from. ' +
         'This is the source — where the atom currently lives. To move the atom, supply patch.workspace.'
       ),
@@ -1228,11 +1256,12 @@ const AgentMemory = async ({ client, $ }) => {
       'Use delete only when the atom must be permanently removed (e.g. it contains secrets or was created in error).',
     args: {
       topic: tool.schema.string().describe('Topic key of the atom to delete'),
-      workspace: tool.schema.union([tool.schema.string(), tool.schema.null()]).describe(
-        'Required. Pass null for the global store, "." for the current project (resolves to its git root), ' +
+      workspace: tool.schema.union([tool.schema.string(), tool.schema.null()]).optional().describe(
+        'Optional. Pass null for the shared store, "." for the current project (resolves to its git root), ' +
         'or an absolute path for a foreign project (also resolved to its git root). ' +
+        'When omitted, auto-detects: deletes from the current project when in a git repo, or from the shared store otherwise. ' +
         'Paths are normalised to the nearest .git directory walking upward; .git files (worktree pointers) are skipped ' +
-        'so all worktrees resolve to the main repo root. If no .git directory is found, the path is used as-is. ' +
+        'so all worktrees resolve to the main repo root. ' +
         '"." is always safe for the current project regardless of which subdirectory opencode was launched from.'
       ),
     },
@@ -1261,7 +1290,7 @@ const AgentMemory = async ({ client, $ }) => {
   const memory_workspaces_list = tool({
     description:
       'List all workspace git-root paths that contain at least one stored atom, with per-workspace atom counts. ' +
-      'Global atoms are NOT listed here — use memory_atom_list with scope="global" for those. ' +
+      'Shared atoms (not attached to any project) are NOT listed here — to list shared atoms use memory_atom_list with workspace: null. ' +
       'Output: one line per workspace — "• /path — N atom(s)"; ends with a usage note. ' +
       'Pass includeDeprecated: true to count deprecated atoms alongside active and resolved ones.',
     args: {
@@ -1284,7 +1313,7 @@ const AgentMemory = async ({ client, $ }) => {
         const lines = results.map((r) => `• ${r.workspace} — ${r.count} atom(s)`);
         lines.push(
           '\nPass workspace: <path> to target a specific workspace. Paths are git roots. ' +
-          'Global atoms are not listed here — use scope: "global" on read tools to include them.'
+          'Shared atoms are not listed here — use scope: "global" on read tools to search the entire space including shared atoms.'
         );
         return { title: 'memory_workspaces_list', output: lines.join('\n') };
       } catch (err) {
@@ -1325,22 +1354,24 @@ const AgentMemory = async ({ client, $ }) => {
             sessionNames.set(sessionId, title);
 
             let agent = info?.agent;
-            let project = info?.directory;
+            let rawDir = info?.directory;
 
-            if (!agent || !project) {
+            if (!agent || !rawDir) {
               try {
                 const got = await client.session.get({ path: { id: sessionId } });
                 const data = got && got.data;
                 if (!agent) agent = data && data.agent;
-                if (!project) project = data && data.directory;
+                if (!rawDir) rawDir = data && data.directory;
               } catch (err) {
                 log(`session.created: session.get fallback failed for ${sessionId}`, err);
               }
             }
 
             if (!agent || !TARGET_AGENTS.has(agent)) return;
-            if (!project) return;
+            if (!rawDir) return;
 
+            // Normalise to git root for git-backed sessions; '' for non-git sessions.
+            const project = projectKeyFor(rawDir);
             sessionAgents.set(sessionId, agent);
             await loadMemoryForSession(sessionId, agent, project);
             break;
@@ -1437,8 +1468,9 @@ const AgentMemory = async ({ client, $ }) => {
                 const got = await client.session.get({ path: { id: sessionId } });
                 const data = got && got.data;
                 const agent = data && data.agent;
-                const project = data && data.directory;
-                if (agent && TARGET_AGENTS.has(agent) && project) {
+                const rawDir = data && data.directory;
+                if (agent && TARGET_AGENTS.has(agent) && rawDir) {
+                  const project = projectKeyFor(rawDir);
                   sessionAgents.set(sessionId, agent);
                   await loadMemoryForSession(sessionId, agent, project);
                 }

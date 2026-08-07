@@ -2132,6 +2132,17 @@ describe('hotStateCrossProject', () => {
     expect(rows[0].agent).toBe('engineer');
   });
 
+  test('excludes rows with project="" (shared/non-git bucket)', () => {
+    // spec: openspec/changes/git-workspace-and-shared-atoms/specs/plugin-lifecycle/spec.md
+    const sinceMs = Date.now() - 24 * 60 * 60 * 1000;
+    insertHotStateRow(db, { project: '',       sessionId: 'shared-ses', updatedAt: sinceMs + 60_000 });
+    insertHotStateRow(db, { project: '/other', sessionId: 'other-ses',  updatedAt: sinceMs + 60_000 });
+    const rows = hotStateCrossProject(db, '/current', sinceMs);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].project).toBe('/other');
+    expect(rows.every((r) => r.project !== '')).toBe(true);
+  });
+
   test('returns rows ordered by updated_at DESC', () => {
     const sinceMs = Date.now() - 24 * 60 * 60 * 1000;
     insertHotStateRow(db, { project: '/older', sessionId: 'ses1', updatedAt: sinceMs + 60_000 });

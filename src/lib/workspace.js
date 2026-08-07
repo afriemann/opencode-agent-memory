@@ -14,15 +14,17 @@ import { dirname, join, resolve } from 'node:path';
  * Walk up the filesystem from `start` looking for a `.git` *directory*.
  * Skips `.git` *files* (worktree pointers) — all worktrees nested inside the
  * main tree collapse to the main repo root. A worktree checked out outside
- * the main tree walks to the filesystem root and falls back to `start`.
+ * the main tree walks to the filesystem root and returns `null`.
  *
- * Returns `start` unchanged when no `.git` directory ancestor is found
- * (graceful fallback for non-git projects or non-existent paths).
+ * Returns `null` when no `.git` directory ancestor is found (honest result
+ * for non-git directories, as opposed to `findGitRoot` which falls back to
+ * `start`). Use this function when the caller needs to distinguish a git repo
+ * from a non-git path.
  *
  * @param {string} start — absolute path to begin the walk from
- * @returns {string}
+ * @returns {string|null}
  */
-export function findGitRoot(start) {
+export function findGitRootOrNull(start) {
   let dir = start;
   while (true) {
     const gitPath = join(dir, '.git');
@@ -38,32 +40,60 @@ export function findGitRoot(start) {
 
     const parent = dirname(dir);
     if (parent === dir) {
-      // Reached filesystem root — no .git directory found; return input path
-      return start;
+      // Reached filesystem root — no .git directory found
+      return null;
     }
     dir = parent;
   }
 }
 
 /**
+ * Walk up the filesystem from `start` looking for a `.git` *directory*.
+ * Skips `.git` *files* (worktree pointers) — all worktrees nested inside the
+ * main tree collapse to the main repo root. A worktree checked out outside
+ * the main tree walks to the filesystem root and falls back to `start`.
+ *
+ * Returns `start` unchanged when no `.git` directory ancestor is found
+ * (graceful fallback for non-git projects or non-existent paths).
+ * When you need to distinguish a git repo from a non-git path, use
+ * `findGitRootOrNull` instead.
+ *
+ * @param {string} start — absolute path to begin the walk from
+ * @returns {string}
+ */
+export function findGitRoot(start) {
+  return findGitRootOrNull(start) ?? start;
+}
+
+/**
  * Resolve a workspace locator to `{ scope, project }`.
  *
  * Accepted forms:
- *   null / undefined  → `{ scope: 'global', project: '' }`
+ *   undefined         → auto-detect: git root of `contextDirectory` when in a
+ *                       git repo, or `{ scope: 'global', project: '' }` (shared)
+ *                       when not in any git repo.
+ *   null              → explicit shared store: `{ scope: 'global', project: '' }`
  *   "."               → git root of `contextDirectory` (expanded first)
  *   "/abs/path"       → git root of `/abs/path`
  *   other relative    → throws a validation error (only "." is accepted as relative)
  *
  * "." is always expanded to `contextDirectory` BEFORE being passed to
- * `findGitRoot` — it must never reach the git-root walk as a literal character.
+ * `findGitRootOrNull` — it must never reach the git-root walk as a literal character.
  *
  * @param {string|null|undefined} workspace
  * @param {string} contextDirectory — absolute path to expand `"."` against
  * @returns {{ scope: string, project: string }}
  */
 export function resolveWorkspace(workspace, contextDirectory) {
-  if (workspace === null || workspace === undefined) {
+  if (workspace === null) {
+    // Explicit shared store — always shared regardless of directory
     return { scope: 'global', project: '' };
+  }
+
+  if (workspace === undefined) {
+    // Auto-detect: project if in a git repo, shared if not
+    const root = findGitRootOrNull(resolve(contextDirectory));
+    return root ? { scope: 'project', project: root } : { scope: 'global', project: '' };
   }
 
   if (typeof workspace !== 'string') {
@@ -83,6 +113,10 @@ export function resolveWorkspace(workspace, contextDirectory) {
     );
   }
 
-  const root = findGitRoot(expanded);
-  return { scope: 'project', project: root };
+  const root = findGitRootOrNull(expanded);
+  if (root) return { scope: 'project', project: root };
+  // No git root found for an explicit absolute path — keep the path as-is.
+  // Explicit paths are deliberate cross-project overrides and retain scope='project'
+  // even when not in a git repo; the "no git → shared" rule governs only auto-detect.
+  return { scope: 'project', project: expanded };
 }

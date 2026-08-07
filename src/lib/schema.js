@@ -451,7 +451,7 @@ export function hotStateCrossProject(db, currentProject, sinceMs) {
   return db.prepare(`
     SELECT project, agent, MAX(updated_at) AS updated_at
     FROM hot_state
-    WHERE project != ? AND updated_at >= ?
+    WHERE project != ? AND project != '' AND updated_at >= ?
     GROUP BY project
     ORDER BY updated_at DESC
   `).all(currentProject, sinceMs);

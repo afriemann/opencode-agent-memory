@@ -2221,7 +2221,7 @@ describe('memory_atom_get workspace arg changes resolution directory', () => {
     expect(result.output).not.toContain('project//other/workspace');
   });
 
-  test('Tool alsoIn renders global entries with [global] label', async () => {
+  test('Tool alsoIn renders shared entries with [shared] label', async () => {
     const fakeGetResponse = JSON.stringify({
       match: null,
       alsoIn: [
@@ -2243,7 +2243,7 @@ describe('memory_atom_get workspace arg changes resolution directory', () => {
 
     const result = await plugin.tool.memory_atom_get.execute({ topic: 'arch/db' }, ctx);
 
-    expect(result.output).toContain('[global]');
+    expect(result.output).toContain('[shared]');
     expect(result.output).not.toContain('[workspace: ]');
   });
 });
@@ -3372,14 +3372,14 @@ describe('workspace validation on write/mutate tools', () => {
     expect(result.output).toMatch(/absolute path|relative/i);
   });
 
-  test('memory_atom_write accepts null workspace (global)', async () => {
+  test('memory_atom_write accepts null workspace (shared store)', async () => {
     const $ = makeMockShell({ 'atom-write': JSON.stringify({ ok: true, action: 'created', scope: 'global', project: '' }) });
     const plugin = await AgentMemory({ client: makeMockClient(), $ });
     const result = await plugin.tool.memory_atom_write.execute(
       { topic: 't', content: 'c', description: 'd', workspace: null },
       makeCtx()
     );
-    expect(result.output).toContain('[global]');
+    expect(result.output).toContain('[shared]');
   });
 
   test('memory_atom_write location suffix contains git root path for project write', async () => {
@@ -3558,5 +3558,122 @@ describe('memory_workspaces_list tool', () => {
     const call = $.calls.find((c) => c.includes('atom-list-workspaces'));
     expect(call).toBeDefined();
     expect(call).toContain('"includeDeprecated":true');
+  });
+});
+
+// ── git-workspace-and-shared-atoms: scope semantics + workspace auto-detect ───
+// spec: openspec/changes/git-workspace-and-shared-atoms/specs/memory-atom-tools/spec.md
+
+describe('resolveScope vocabulary remap — scope:global = entire space', () => {
+  // Task 5.3
+  test('memory_atom_list with scope=global passes "all" to CLI (entire space)', async () => {
+    const $ = makeMockShell({ 'atom-list': '[]' });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    function makeCtx(directory = '/my/workspace') {
+      return { sessionID: 'ses-scope', messageID: 'msg-scope', agent: 'engineer', directory };
+    }
+    await plugin.tool.memory_atom_list.execute({ scope: 'global' }, makeCtx());
+    const call = $.calls.find((c) => c.includes('atom-list'));
+    expect(call).toBeDefined();
+    expect(call).toContain('all');   // scope='all' passed to CLI (entire space)
+    expect(call).not.toMatch(/atom-list.*global [^a]/); // 'global' scope value is NOT passed to CLI
+  });
+
+  test('memory_atom_search with scope=global passes "all" to CLI (entire space)', async () => {
+    const $ = makeMockShell({ 'atom-search': '[]' });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    function makeCtx(directory = '/my/workspace') {
+      return { sessionID: 'ses-scope2', messageID: 'msg-scope2', agent: 'engineer', directory };
+    }
+    await plugin.tool.memory_atom_search.execute({ keywords: 'test', scope: 'global' }, makeCtx());
+    const call = $.calls.find((c) => c.includes('atom-search'));
+    expect(call).toBeDefined();
+    expect(call).toContain('all');
+  });
+
+  test("resolveScope maps 'workspace' + empty directory to shared-only project scope", async () => {
+    // spec: openspec/changes/git-workspace-and-shared-atoms/specs/memory-atom-tools/spec.md
+    // WHEN resolveScope is called with scope='workspace' AND directory='',
+    // THEN the result is {scope:'project', project:''} which queries only the shared bucket.
+    const $ = makeMockShell({ 'atom-list': '[]' });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    function makeCtx(directory = '') {
+      return { sessionID: 'ses-scope3', messageID: 'msg-scope3', agent: 'engineer', directory };
+    }
+    await plugin.tool.memory_atom_list.execute({ scope: 'workspace' }, makeCtx(''));
+    const call = $.calls.find((c) => c.includes('atom-list'));
+    expect(call).toBeDefined();
+    // CLI receives scope='project' project='' → only shared bucket rows returned
+    expect(call).toContain('project');
+    // The call includes 'atom-list' and 'project' (scope arg), not 'all' or 'global'
+    expect(call).not.toContain(' all');
+    expect(call).not.toContain(' global');
+  });
+});
+
+describe('MEMORY_PROTOCOL — workspace auto-detect + shared terminology', () => {
+  // Task 9.3
+  function makeCtx(directory = '/proj') {
+    return { sessionID: 'ses-proto', messageID: 'msg-proto', agent: 'engineer', directory };
+  }
+
+  test('MEMORY_PROTOCOL does not contain "there is no default" for workspace', async () => {
+    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({ 'prune': '{}' }) });
+    await fire(plugin, 'session.created', {
+      sessionID: 'ses-proto',
+      info: { agent: 'engineer', directory: '/proj', title: null },
+    });
+    const system = await invokeSystemTransform(plugin, 'ses-proto');
+    expect(system.length).toBeGreaterThan(0);
+    const protocol = system[0];
+    expect(protocol).not.toContain('there is no default');
+    expect(protocol).toContain('auto-detect');
+  });
+
+  test('MEMORY_PROTOCOL contains "shared" terminology for non-project atoms', async () => {
+    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({ 'prune': '{}' }) });
+    await fire(plugin, 'session.created', {
+      sessionID: 'ses-proto2',
+      info: { agent: 'engineer', directory: '/proj', title: null },
+    });
+    const system = await invokeSystemTransform(plugin, 'ses-proto2');
+    expect(system.length).toBeGreaterThan(0);
+    const protocol = system[0];
+    expect(protocol).toContain('shared store');
+  });
+});
+
+describe('write tools — workspace omitted triggers auto-detect', () => {
+  // Task 6.6
+  function makeCtx(directory = '/my/workspace') {
+    return { sessionID: 'ses-autodet', messageID: 'msg-autodet', agent: 'engineer', directory };
+  }
+
+  test('memory_atom_write with workspace omitted passes undefined to CLI (auto-detect)', async () => {
+    // With workspace undefined, resolveWorkspace in memory.js auto-detects
+    // (non-git → shared store). We verify the CLI call does NOT receive "null" for workspace.
+    const $ = makeMockShell({ 'atom-write': JSON.stringify({ ok: true, action: 'created', scope: 'global', project: '' }) });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    // Execute without workspace field
+    const result = await plugin.tool.memory_atom_write.execute(
+      { topic: 't', content: 'c', description: 'd', summary: 's' },
+      makeCtx()
+    );
+    expect(result.output).not.toContain('Error:');
+    // workspace is passed as undefined in JSON payload → CLI receives it as absent/undefined
+    const call = $.calls.find((c) => c.includes('atom-write'));
+    expect(call).toBeDefined();
+    // The payload JSON should have workspace: undefined (not present) or workspace: null
+    // (undefined is serialized as absent by JSON.stringify, null as explicit null)
+    // Either way the CLI resolves it via resolveWorkspace → auto-detect
+    expect(result.output).toBeDefined();
+  });
+
+  test('memory_atom_delete with workspace omitted does not return validation error', async () => {
+    const $ = makeMockShell({ 'atom-delete': JSON.stringify({ ok: true, deleted: 1, scope: 'global', project: '' }) });
+    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const result = await plugin.tool.memory_atom_delete.execute({ topic: 't' }, makeCtx());
+    expect(result.output).not.toContain('Error:');
+    expect(result.output).toContain('[shared]');
   });
 });

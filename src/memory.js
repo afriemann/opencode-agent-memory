@@ -5,6 +5,14 @@
 // plugin (src/plugin.js) spawns it via $ and never touches the DB directly.
 // All subcommands are idempotent or safe to retry on failure.
 //
+// Project key convention for hot_state and memory_signal:
+//   project = '/abs/git/root'   — a git-backed session (scope='project')
+//   project = ''                — a non-git/shared session (scope='project')
+//                                 Use "" (empty string) for sessions launched
+//                                 outside any git repository. Distinct from
+//                                 memory_atom rows where scope='global' and
+//                                 project='' denotes the shared atom store.
+//
 // Subcommands:
 //   init
 //     Create the schema (idempotent). Safe to run at any time.
@@ -771,7 +779,7 @@ switch (cmd) {
 
   case 'accrue': {
     const [sessionId, agent, project, jsonArg] = rest;
-    if (!sessionId || !agent || !project || !jsonArg) {
+    if (!sessionId || !agent || project === undefined || !jsonArg) {
       process.stderr.write('Usage: memory.js accrue <sessionId> <agent> <project> <jsonData>\n');
       process.exit(1);
     }
@@ -781,7 +789,7 @@ switch (cmd) {
 
   case 'read': {
     const [sessionId, agent, project] = rest;
-    if (!sessionId || !agent || !project) {
+    if (!sessionId || !agent || project === undefined) {
       process.stderr.write('Usage: memory.js read <sessionId> <agent> <project>\n');
       process.exit(1);
     }
@@ -791,7 +799,7 @@ switch (cmd) {
 
   case 'inspect': {
     const [agent, project] = rest;
-    if (!agent || !project) {
+    if (!agent || project === undefined) {
       process.stderr.write('Usage: memory.js inspect <agent> <project>\n');
       process.exit(1);
     }
@@ -801,7 +809,7 @@ switch (cmd) {
 
   case 'distil-write': {
     const [agent, project, jsonArg] = rest;
-    if (!agent || !project || !jsonArg) {
+    if (!agent || project === undefined || !jsonArg) {
       process.stderr.write('Usage: memory.js distil-write <agent> <project> <jsonData>\n');
       process.exit(1);
     }
@@ -815,7 +823,7 @@ switch (cmd) {
 
   case 'correct': {
     const [agent, project, sessionId, patchJsonArg] = rest;
-    if (!agent || !project || !sessionId || !patchJsonArg) {
+    if (!agent || project === undefined || !sessionId || !patchJsonArg) {
       process.stderr.write('Usage: memory.js correct <agent> <project> <sessionId> <patchJson>\n');
       process.exit(1);
     }

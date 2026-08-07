@@ -4,7 +4,49 @@
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { findGitRoot, resolveWorkspace } from '../src/lib/workspace.js';
+import { findGitRoot, findGitRootOrNull, resolveWorkspace } from '../src/lib/workspace.js';
+
+// ── findGitRootOrNull ─────────────────────────────────────────────────────────
+// spec: openspec/changes/git-workspace-and-shared-atoms/specs/memory-atom-tools/spec.md
+
+describe('findGitRootOrNull', () => {
+  let tmp;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'workspace-test-null-'));
+  });
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  test('returns git root directory when .git directory is found', () => {
+    mkdirSync(join(tmp, '.git'));
+    expect(findGitRootOrNull(tmp)).toBe(tmp);
+  });
+
+  test('walks up and stops at .git directory', () => {
+    mkdirSync(join(tmp, '.git'));
+    const sub = join(tmp, 'src', 'lib');
+    mkdirSync(sub, { recursive: true });
+    expect(findGitRootOrNull(sub)).toBe(tmp);
+  });
+
+  test('returns null when no .git directory ancestor exists', () => {
+    // tmp has no .git directory — walk reaches root and returns null (honest)
+    expect(findGitRootOrNull(tmp)).toBeNull();
+  });
+
+  test('skips .git file (worktree pointer) and continues walking to .git directory', () => {
+    const repoRoot = join(tmp, 'repo');
+    mkdirSync(repoRoot);
+    mkdirSync(join(repoRoot, '.git'));
+    const worktree = join(repoRoot, 'worktrees', 'feat');
+    mkdirSync(worktree, { recursive: true });
+    writeFileSync(join(worktree, '.git'), 'gitdir: ../../.git/worktrees/feat\n');
+    expect(findGitRootOrNull(worktree)).toBe(repoRoot);
+  });
+});
 
 // ── findGitRoot ───────────────────────────────────────────────────────────────
 
@@ -73,12 +115,21 @@ describe('resolveWorkspace', () => {
     rmSync(tmp, { recursive: true, force: true });
   });
 
-  test('null → { scope: "global", project: "" }', () => {
+  test('null → { scope: "global", project: "" } (explicit shared store)', () => {
     expect(resolveWorkspace(null, '/any/dir')).toEqual({ scope: 'global', project: '' });
   });
 
-  test('undefined → { scope: "global", project: "" }', () => {
+  test('undefined auto-detects non-git contextDirectory → shared store', () => {
+    // '/any/dir' does not exist → findGitRootOrNull returns null → shared
     expect(resolveWorkspace(undefined, '/any/dir')).toEqual({ scope: 'global', project: '' });
+  });
+
+  test('undefined auto-detects git root of contextDirectory when in a git repo', () => {
+    mkdirSync(join(tmp, '.git'));
+    const sub = join(tmp, 'src');
+    mkdirSync(sub);
+    const result = resolveWorkspace(undefined, sub);
+    expect(result).toEqual({ scope: 'project', project: tmp });
   });
 
   test('"." is expanded to contextDirectory then git-root resolved', () => {
@@ -107,8 +158,9 @@ describe('resolveWorkspace', () => {
     expect(result).toEqual({ scope: 'project', project: repoRoot });
   });
 
-  test('absolute non-git path → scope=project, project=path as-is', () => {
-    // tmp has no .git → findGitRoot returns it as-is
+  test('absolute non-git path → scope=project, project=path as-is (graceful fallback for explicit cross-project override)', () => {
+    // Explicit absolute paths keep scope='project' regardless of git presence.
+    // Only auto-detect (undefined workspace) falls back to shared when not in a git repo.
     const result = resolveWorkspace(tmp, '/irrelevant');
     expect(result).toEqual({ scope: 'project', project: tmp });
   });

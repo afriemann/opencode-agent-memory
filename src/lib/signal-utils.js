@@ -93,7 +93,7 @@ function renderAtomLine(atom, now, { pinned = false } = {}) {
  * @param {object} opts
  * @param {object[]|null} opts.rows — hot_state rows for recent sessions (may be null/empty)
  * @param {object[]} opts.projectAtoms — atom directory for current workspace (may be empty)
- * @param {object[]} opts.globalAtoms — atom directory for global scope (may be empty)
+ * @param {object[]} opts.sharedAtoms — atom directory for shared (unattached) scope (may be empty)
  * @param {object[]} [opts.standingAtoms] — atoms with always_include=1; full content injected
  * @param {object[]} [opts.crossProjectRows] — other projects active in last 24h (may be empty)
  * @param {string} opts.agent — e.g. 'engineer'
@@ -103,18 +103,18 @@ function renderAtomLine(atom, now, { pinned = false } = {}) {
  * @param {number} [opts.cap] — max atoms per compact directory section (default 40)
  * @returns {string|null} — null when both rows and all atoms are empty
  */
-export function assemblePrimer({ rows, projectAtoms, globalAtoms, standingAtoms = [], crossProjectRows = [], agent, project, homeDir = null, staleness, cap = 40 }) {
+export function assemblePrimer({ rows, projectAtoms, sharedAtoms, standingAtoms = [], crossProjectRows = [], agent, project, homeDir = null, staleness, cap = 40 }) {
   const displayProject = lastTwoSegments(project);
   const hasRows = Array.isArray(rows) && rows.length > 0;
 
   // Active-only filter applied once here; all section rendering uses these filtered arrays.
-  // Project section: exclude global atoms (scope='global') so they only appear in the Global section.
-  // Global atoms are included in the atomList(scope='project') query by design (workspace+global),
+  // Project section: exclude shared atoms (scope='global') so they only appear in the Shared section.
+  // Shared atoms are included in the atomList(scope='project') query by design (workspace+shared),
   // but the primer must keep them separated to avoid duplication and mislabelling.
   const activeProjectAtoms = (Array.isArray(projectAtoms) ? projectAtoms : [])
     .filter((a) => a.scope !== 'global')
     .filter((a) => !a.status || a.status === 'active');
-  const activeGlobalAtoms = (Array.isArray(globalAtoms) ? globalAtoms : []).filter((a) => !a.status || a.status === 'active');
+  const activeSharedAtoms = (Array.isArray(sharedAtoms) ? sharedAtoms : []).filter((a) => !a.status || a.status === 'active');
 
   // Partition standing atoms into workspace and global buckets (already active-filtered by query).
   // always_include atoms are excluded from the compact directory entirely.
@@ -127,24 +127,29 @@ export function assemblePrimer({ rows, projectAtoms, globalAtoms, standingAtoms 
   const compactProjectAtoms = activeProjectAtoms.filter(
     (a) => !standingTopics.has(`${a.scope}:${a.project ?? ''}:${a.topic}`)
   );
-  const compactGlobalAtoms = activeGlobalAtoms.filter(
+  const compactSharedAtoms = activeSharedAtoms.filter(
     (a) => !standingTopics.has(`${a.scope}:${a.project ?? ''}:${a.topic}`)
   );
 
-  // Split standing atoms into workspace vs global for section ordering (workspace first).
+  // Split standing atoms into workspace vs shared for section ordering (workspace first).
   const standingWorkspace = sortedStanding.filter((a) => a.scope !== 'global');
-  const standingGlobal = sortedStanding.filter((a) => a.scope === 'global');
+  const standingShared = sortedStanding.filter((a) => a.scope === 'global');
 
   const hasStanding = sortedStanding.length > 0;
   const hasCrossProject = Array.isArray(crossProjectRows) && crossProjectRows.length > 0;
 
-  if (!hasRows && compactProjectAtoms.length === 0 && compactGlobalAtoms.length === 0 && !hasStanding && !hasCrossProject) return null;
+  if (!hasRows && compactProjectAtoms.length === 0 && compactSharedAtoms.length === 0 && !hasStanding && !hasCrossProject) return null;
 
   const now = Date.now();
   const stalenessLine = renderStaleness(staleness);
 
+  // Non-git sessions (project === '') use "Shared memory" heading; git-backed sessions use project path.
+  const headerLine = project === ''
+    ? '## Shared memory — (background context — no action required)'
+    : `## Project memory — ${displayProject} (background context — no action required)`;
+
   const lines = [
-    `## Project memory — ${displayProject} (background context — no action required)`,
+    headerLine,
     '',
     "This is a snapshot from your last session. Wait for the user's request before taking any action.",
     '',
@@ -236,10 +241,10 @@ export function assemblePrimer({ rows, projectAtoms, globalAtoms, standingAtoms 
       }
     }
 
-    if (standingGlobal.length > 0) {
-      const overflow = renderStandingBucket(standingGlobal);
+    if (standingShared.length > 0) {
+      const overflow = renderStandingBucket(standingShared);
       if (overflow > 0) {
-        const extras = standingGlobal
+        const extras = standingShared
           .slice(MAX_STANDING_ATOMS)
           .slice()
           .sort((a, b) => a.topic.localeCompare(b.topic))
@@ -274,30 +279,30 @@ export function assemblePrimer({ rows, projectAtoms, globalAtoms, standingAtoms 
   }
   lines.push('');
 
-  // ── Global atom directory ───────────────────────────────────────────────────
-  lines.push('### Global atoms');
+  // ── Shared atom directory ───────────────────────────────────────────────────
+  lines.push('### Shared atoms');
   lines.push('');
-  if (compactGlobalAtoms.length > 0) {
+  if (compactSharedAtoms.length > 0) {
     lines.push('Fetch atoms on demand when relevant — do not pre-fetch at session start.');
     lines.push('');
-    const pinnedGlobal = compactGlobalAtoms.filter((a) => a.pinned).sort((a, b) => a.topic.localeCompare(b.topic));
-    const regularGlobal = compactGlobalAtoms.filter((a) => !a.pinned);
-    const visibleGlobal = regularGlobal.slice(0, cap);
-    for (const atom of pinnedGlobal) {
+    const pinnedShared = compactSharedAtoms.filter((a) => a.pinned).sort((a, b) => a.topic.localeCompare(b.topic));
+    const regularShared = compactSharedAtoms.filter((a) => !a.pinned);
+    const visibleShared = regularShared.slice(0, cap);
+    for (const atom of pinnedShared) {
       lines.push(renderAtomLine(atom, now, { pinned: true }));
     }
-    for (const atom of visibleGlobal) {
+    for (const atom of visibleShared) {
       lines.push(renderAtomLine(atom, now));
     }
-    if (regularGlobal.length > cap) {
-      lines.push(`(+${regularGlobal.length - cap} more — call memory_atom_list to see all)`);
+    if (regularShared.length > cap) {
+      lines.push(`(+${regularShared.length - cap} more — call memory_atom_list to see all)`);
     }
   } else {
-    lines.push('No global atoms yet.');
+    lines.push('No shared atoms yet.');
   }
   lines.push('');
 
-  if (stalenessLine !== null) {
+  if (stalenessLine !== null && project !== '') {
     lines.push(`Staleness: ${stalenessLine}`);
   }
 

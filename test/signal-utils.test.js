@@ -75,7 +75,7 @@ describe('assemblePrimer', () => {
 
   test('returns null when rows and all atoms are empty', () => {
     const result = assemblePrimer({
-      rows: [], projectAtoms: [], globalAtoms: [],
+      rows: [], projectAtoms: [], sharedAtoms: [],
       agent: 'engineer', project: PROJECT, staleness: STALENESS,
     });
     expect(result).toBeNull();
@@ -83,7 +83,7 @@ describe('assemblePrimer', () => {
 
   test('returns null for null/undefined rows with no atoms', () => {
     const result = assemblePrimer({
-      rows: null, projectAtoms: [], globalAtoms: [],
+      rows: null, projectAtoms: [], sharedAtoms: [],
       agent: 'engineer', project: PROJECT, staleness: STALENESS,
     });
     expect(result).toBeNull();
@@ -93,7 +93,7 @@ describe('assemblePrimer', () => {
     const result = assemblePrimer({
       rows: [WARM_ROW],
       projectAtoms: [],
-      globalAtoms: [],
+      sharedAtoms: [],
       agent: 'engineer',
       project: PROJECT,
       staleness: STALENESS,
@@ -111,7 +111,7 @@ describe('assemblePrimer', () => {
     const result = assemblePrimer({
       rows: [],
       projectAtoms: [PROJECT_ATOM],
-      globalAtoms: [],
+      sharedAtoms: [],
       agent: 'engineer',
       project: PROJECT,
       staleness: STALENESS,
@@ -124,7 +124,7 @@ describe('assemblePrimer', () => {
     const result = assemblePrimer({
       rows: [],
       projectAtoms: [PROJECT_ATOM],
-      globalAtoms: [],
+      sharedAtoms: [],
       agent: 'engineer',
       project: PROJECT,
       staleness: STALENESS,
@@ -139,7 +139,7 @@ describe('assemblePrimer', () => {
     const result = assemblePrimer({
       rows: [],
       projectAtoms: [PROJECT_ATOM],
-      globalAtoms: [],
+      sharedAtoms: [],
       agent: 'engineer',
       project: PROJECT,
       staleness: STALENESS,
@@ -157,7 +157,7 @@ describe('assemblePrimer', () => {
     const result = assemblePrimer({
       rows: [],
       projectAtoms: manyAtoms,
-      globalAtoms: [],
+      sharedAtoms: [],
       agent: 'engineer',
       project: PROJECT,
       staleness: STALENESS,
@@ -166,44 +166,44 @@ describe('assemblePrimer', () => {
     expect(result).toContain('(+2 more — call memory_atom_list to see all)');
   });
 
-  test('global atom directory section is rendered', () => {
+  test('shared atom directory section is rendered', () => {
     const result = assemblePrimer({
       rows: [],
       projectAtoms: [],
-      globalAtoms: [GLOBAL_ATOM],
+      sharedAtoms: [GLOBAL_ATOM],
       agent: 'engineer',
       project: PROJECT,
       staleness: STALENESS,
     });
-    expect(result).toContain('### Global atoms');
+    expect(result).toContain('### Shared atoms');
     expect(result).toContain('conventions');
     expect(result).toContain('Code style guide');
   });
 
-  test('global section shows placeholder when empty', () => {
+  test('shared section shows placeholder when empty', () => {
     const result = assemblePrimer({
       rows: [],
       projectAtoms: [PROJECT_ATOM],
-      globalAtoms: [],
+      sharedAtoms: [],
       agent: 'engineer',
       project: PROJECT,
       staleness: STALENESS,
     });
-    expect(result).toContain('### Global atoms');
-    expect(result).toContain('No global atoms yet.');
+    expect(result).toContain('### Shared atoms');
+    expect(result).toContain('No shared atoms yet.');
   });
 
-  test('cold-start with global atoms only returns non-null primer', () => {
+  test('cold-start with shared atoms only returns non-null primer', () => {
     const result = assemblePrimer({
       rows: [],
       projectAtoms: [],
-      globalAtoms: [GLOBAL_ATOM],
+      sharedAtoms: [GLOBAL_ATOM],
       agent: 'engineer',
       project: PROJECT,
       staleness: STALENESS,
     });
     expect(result).not.toBeNull();
-    expect(result).toContain('### Global atoms');
+    expect(result).toContain('### Shared atoms');
     expect(result).toContain('conventions');
   });
 
@@ -211,7 +211,7 @@ describe('assemblePrimer', () => {
     const result = assemblePrimer({
       rows: null,
       projectAtoms: [],
-      globalAtoms: [],
+      sharedAtoms: [],
       agent: 'engineer',
       project: PROJECT,
       staleness: STALENESS,
@@ -223,7 +223,7 @@ describe('assemblePrimer', () => {
     const result = assemblePrimer({
       rows: [WARM_ROW],
       projectAtoms: [PROJECT_ATOM],
-      globalAtoms: [],
+      sharedAtoms: [],
       agent: 'engineer',
       project: PROJECT,
       staleness: STALENESS,
@@ -237,12 +237,55 @@ describe('assemblePrimer', () => {
     const result = assemblePrimer({
       rows: [WARM_ROW],
       projectAtoms: [],
-      globalAtoms: [],
+      sharedAtoms: [],
       agent: 'engineer',
       project: PROJECT,
       staleness: STALENESS,
     });
     expect(result).toContain('Staleness:');
+  });
+
+  test('uses ## Project memory — heading for git-backed project', () => {
+    // spec: openspec/changes/git-workspace-and-shared-atoms/specs/signal-processing/spec.md
+    const result = assemblePrimer({
+      rows: [WARM_ROW],
+      projectAtoms: [],
+      sharedAtoms: [],
+      agent: 'engineer',
+      project: PROJECT,
+      staleness: STALENESS,
+    });
+    expect(result).toContain('## Project memory —');
+    expect(result).not.toContain('## Shared memory —');
+  });
+
+  test('uses ## Shared memory — heading when project is empty (non-git session)', () => {
+    // spec: openspec/changes/git-workspace-and-shared-atoms/specs/signal-processing/spec.md
+    const result = assemblePrimer({
+      rows: [WARM_ROW],
+      projectAtoms: [],
+      sharedAtoms: [],
+      agent: 'engineer',
+      project: '',
+      staleness: STALENESS,
+    });
+    expect(result).not.toBeNull();
+    expect(result).toContain('## Shared memory —');
+    expect(result).not.toContain('## Project memory —');
+  });
+
+  test('omits staleness line when project is empty (non-git session has no git staleness)', () => {
+    // spec: openspec/changes/git-workspace-and-shared-atoms/specs/signal-processing/spec.md
+    const result = assemblePrimer({
+      rows: [WARM_ROW],
+      projectAtoms: [],
+      sharedAtoms: [],
+      agent: 'engineer',
+      project: '',
+      staleness: STALENESS,
+    });
+    expect(result).not.toBeNull();
+    expect(result).not.toContain('Staleness:');
   });
 });
 
@@ -259,7 +302,7 @@ describe('assemblePrimer — pinned atom rendering', () => {
       { topic: 'zzz-normal', description: 'normal atom', preview: 'content', pinned: 0, updated_at: NOW },
       { topic: 'aaa-pinned', description: 'pinned atom', preview: 'pinned', pinned: 1, updated_at: NOW },
     ];
-    const result = assemblePrimer({ rows: [], projectAtoms: atoms, globalAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    const result = assemblePrimer({ rows: [], projectAtoms: atoms, sharedAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
     const pinnedIdx = result.indexOf('aaa-pinned');
     const normalIdx = result.indexOf('zzz-normal');
     expect(pinnedIdx).toBeGreaterThanOrEqual(0);
@@ -269,13 +312,13 @@ describe('assemblePrimer — pinned atom rendering', () => {
 
   test('pinned project atom has [pinned] prefix in primer', () => {
     const atoms = [{ topic: 'key-fact', description: 'a pinned fact', preview: 'fact body', pinned: 1, updated_at: NOW }];
-    const result = assemblePrimer({ rows: [], projectAtoms: atoms, globalAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    const result = assemblePrimer({ rows: [], projectAtoms: atoms, sharedAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
     expect(result).toContain('[pinned] key-fact');
   });
 
   test('non-pinned project atom does not have [pinned] prefix', () => {
     const atoms = [{ topic: 'regular', description: 'regular atom', preview: 'body', pinned: 0, updated_at: NOW }];
-    const result = assemblePrimer({ rows: [], projectAtoms: atoms, globalAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    const result = assemblePrimer({ rows: [], projectAtoms: atoms, sharedAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
     expect(result).not.toContain('[pinned] regular');
     expect(result).toContain('regular');
   });
@@ -288,7 +331,7 @@ describe('assemblePrimer — pinned atom rendering', () => {
       topic: `regular/${i}`, description: `regular ${i}`, preview: '', pinned: 0, updated_at: NOW,
     }));
     const result = assemblePrimer({
-      rows: [], projectAtoms: [...pinned, ...regular], globalAtoms: [],
+      rows: [], projectAtoms: [...pinned, ...regular], sharedAtoms: [],
       agent: 'engineer', project: PROJECT, staleness: STALENESS, cap: 2,
     });
     for (const a of pinned) {
@@ -303,26 +346,26 @@ describe('assemblePrimer — pinned atom rendering', () => {
       topic: `reg/${i}`, description: `reg`, preview: '', pinned: 0, updated_at: NOW,
     }));
     const result = assemblePrimer({
-      rows: [], projectAtoms: [...pinned, ...regular], globalAtoms: [],
+      rows: [], projectAtoms: [...pinned, ...regular], sharedAtoms: [],
       agent: 'engineer', project: PROJECT, staleness: STALENESS, cap: 2,
     });
     expect(result).toContain('(+2 more — call memory_atom_list to see all)');
   });
 
-  test('pinned global atom appears before non-pinned globals in primer', () => {
+  test('pinned shared atom appears before non-pinned shared atoms in primer', () => {
     const globals = [
       { topic: 'zzz-global', description: 'normal global', preview: '', pinned: 0, updated_at: NOW },
       { topic: 'aaa-global-pinned', description: 'pinned global', preview: '', pinned: 1, updated_at: NOW },
     ];
-    const result = assemblePrimer({ rows: [], projectAtoms: [], globalAtoms: globals, agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    const result = assemblePrimer({ rows: [], projectAtoms: [], sharedAtoms: globals, agent: 'engineer', project: PROJECT, staleness: STALENESS });
     const pinnedIdx = result.indexOf('aaa-global-pinned');
     const normalIdx = result.indexOf('zzz-global');
     expect(pinnedIdx).toBeLessThan(normalIdx);
   });
 
-  test('pinned global atom has [pinned] prefix in primer', () => {
+  test('pinned shared atom has [pinned] prefix in primer', () => {
     const globals = [{ topic: 'must-know', description: 'critical global', preview: '', pinned: 1, updated_at: NOW }];
-    const result = assemblePrimer({ rows: [], projectAtoms: [], globalAtoms: globals, agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    const result = assemblePrimer({ rows: [], projectAtoms: [], sharedAtoms: globals, agent: 'engineer', project: PROJECT, staleness: STALENESS });
     expect(result).toContain('[pinned] must-know');
   });
 
@@ -332,7 +375,7 @@ describe('assemblePrimer — pinned atom rendering', () => {
       { topic: 'aaa/first',  description: 'a', preview: '', pinned: 1, updated_at: NOW },
       { topic: 'mmm/middle', description: 'm', preview: '', pinned: 1, updated_at: NOW },
     ];
-    const result = assemblePrimer({ rows: [], projectAtoms: atoms, globalAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    const result = assemblePrimer({ rows: [], projectAtoms: atoms, sharedAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
     const positions = ['aaa/first', 'mmm/middle', 'zzz/last'].map((t) => result.indexOf(t));
     expect(positions[0]).toBeLessThan(positions[1]);
     expect(positions[1]).toBeLessThan(positions[2]);
@@ -340,7 +383,7 @@ describe('assemblePrimer — pinned atom rendering', () => {
 
   test('pinned atom appears exactly once in the primer section (no duplication)', () => {
     const atoms = [{ topic: 'arch/db', description: 'DB', preview: '', pinned: 1, updated_at: NOW }];
-    const result = assemblePrimer({ rows: [], projectAtoms: atoms, globalAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    const result = assemblePrimer({ rows: [], projectAtoms: atoms, sharedAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
     const occurrences = result.split('\n').filter((l) => l.includes('[pinned] arch/db'));
     expect(occurrences).toHaveLength(1);
   });
@@ -359,7 +402,7 @@ describe('assemblePrimer — active-only status filter', () => {
       { topic: 'arch/active', description: 'active', preview: '', pinned: 0, status: 'active', updated_at: NOW },
       { topic: 'arch/resolved', description: 'resolved', preview: '', pinned: 0, status: 'resolved', updated_at: NOW },
     ];
-    const result = assemblePrimer({ rows: [], projectAtoms: atoms, globalAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    const result = assemblePrimer({ rows: [], projectAtoms: atoms, sharedAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
     expect(result).toContain('arch/active');
     expect(result).not.toContain('arch/resolved');
   });
@@ -369,7 +412,7 @@ describe('assemblePrimer — active-only status filter', () => {
       { topic: 'arch/active', description: 'active', preview: '', pinned: 0, status: 'active', updated_at: NOW },
       { topic: 'arch/deprecated', description: 'deprecated', preview: '', pinned: 0, status: 'deprecated', updated_at: NOW },
     ];
-    const result = assemblePrimer({ rows: [], projectAtoms: atoms, globalAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    const result = assemblePrimer({ rows: [], projectAtoms: atoms, sharedAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
     expect(result).toContain('arch/active');
     expect(result).not.toContain('arch/deprecated');
   });
@@ -380,7 +423,7 @@ describe('assemblePrimer — active-only status filter', () => {
       { topic: 'a/resolved',   description: 'resolved',   preview: '', pinned: 0, status: 'resolved',   updated_at: NOW },
       { topic: 'a/deprecated', description: 'deprecated', preview: '', pinned: 0, status: 'deprecated', updated_at: NOW },
     ];
-    const result = assemblePrimer({ rows: [], projectAtoms: atoms, globalAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    const result = assemblePrimer({ rows: [], projectAtoms: atoms, sharedAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
     expect(result).toContain('a/active');
     expect(result).not.toContain('a/resolved');
     expect(result).not.toContain('a/deprecated');
@@ -390,7 +433,7 @@ describe('assemblePrimer — active-only status filter', () => {
     const atoms = [
       { topic: 'no-status', description: 'no status field', preview: '', pinned: 0, updated_at: NOW },
     ];
-    const result = assemblePrimer({ rows: [], projectAtoms: atoms, globalAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    const result = assemblePrimer({ rows: [], projectAtoms: atoms, sharedAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
     expect(result).toContain('no-status');
   });
 
@@ -399,7 +442,7 @@ describe('assemblePrimer — active-only status filter', () => {
       { topic: 'global/active',   description: 'active',   preview: '', pinned: 0, status: 'active',   updated_at: NOW },
       { topic: 'global/resolved', description: 'resolved', preview: '', pinned: 0, status: 'resolved', updated_at: NOW },
     ];
-    const result = assemblePrimer({ rows: [], projectAtoms: [], globalAtoms: globals, agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    const result = assemblePrimer({ rows: [], projectAtoms: [], sharedAtoms: globals, agent: 'engineer', project: PROJECT, staleness: STALENESS });
     expect(result).toContain('global/active');
     expect(result).not.toContain('global/resolved');
   });
@@ -412,7 +455,7 @@ describe('assemblePrimer — active-only status filter', () => {
       { topic: 'resolved/x', description: 'rx', preview: '', pinned: 0, status: 'resolved', updated_at: NOW },
     ];
     const result = assemblePrimer({
-      rows: [], projectAtoms: atoms, globalAtoms: [],
+      rows: [], projectAtoms: atoms, sharedAtoms: [],
       agent: 'engineer', project: PROJECT, staleness: STALENESS, cap: 2,
     });
     // Only 3 active atoms, cap=2 → 1 overflow
@@ -425,7 +468,7 @@ describe('assemblePrimer — active-only status filter', () => {
       { topic: 'pinned/resolved', description: 'pinned but resolved', preview: '', pinned: 1, status: 'resolved', updated_at: NOW },
       { topic: 'active/unpinned', description: 'active unpinned', preview: '', pinned: 0, status: 'active', updated_at: NOW },
     ];
-    const result = assemblePrimer({ rows: [], projectAtoms: atoms, globalAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    const result = assemblePrimer({ rows: [], projectAtoms: atoms, sharedAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
     expect(result).not.toContain('pinned/resolved');
     expect(result).not.toContain('[pinned] pinned');
     expect(result).toContain('active/unpinned');
@@ -439,7 +482,7 @@ describe('assemblePrimer — active-only status filter', () => {
       { topic: 'resolved/one',     description: 'resolved 1',       preview: '', pinned: 0, status: 'resolved', updated_at: NOW },
       { topic: 'resolved/two',     description: 'resolved 2',       preview: '', pinned: 0, status: 'resolved', updated_at: NOW },
     ];
-    const result = assemblePrimer({ rows: [], projectAtoms: atoms, globalAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    const result = assemblePrimer({ rows: [], projectAtoms: atoms, sharedAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
     // Active atoms present, resolved absent
     expect(result).toContain('pinned/active');
     expect(result).toContain('regular/active-1');
@@ -455,42 +498,42 @@ describe('assemblePrimer — active-only status filter', () => {
   });
 });
 
-// ── assemblePrimer — global atom deduplication ────────────────────────────────
-// Global atoms included in the atomList(scope='project') query must not appear
-// in the "Project atoms" section; they belong only in the "Global atoms" section.
+// ── assemblePrimer — shared atom deduplication ───────────────────────────────
+// Shared atoms included in the atomList(scope='project') query must not appear
+// in the "Project atoms" section; they belong only in the "Shared atoms" section.
 
-describe('assemblePrimer — global atoms not duplicated in project section', () => {
+describe('assemblePrimer — shared atoms not duplicated in project section', () => {
   const PROJECT = '/home/user/repos/my/project';
   const NOW = Date.now();
   const STALENESS = { status: '0 commit(s) since this note' };
 
-  test('global atom in projectAtoms is NOT rendered in the project section', () => {
+  test('shared atom in projectAtoms is NOT rendered in the project section', () => {
     const projectAtoms = [
       { scope: 'project', topic: 'arch/db', description: 'DB design', preview: '', pinned: 0, updated_at: NOW },
       { scope: 'global',  topic: 'global/fact', description: 'global fact', preview: '', pinned: 0, updated_at: NOW },
     ];
-    const globalAtoms = [
+    const sharedAtoms = [
       { scope: 'global', topic: 'global/fact', description: 'global fact', preview: '', pinned: 0, updated_at: NOW },
     ];
-    const result = assemblePrimer({ rows: [], projectAtoms, globalAtoms, agent: 'engineer', project: PROJECT, staleness: STALENESS });
-    // global/fact should appear exactly once (in the Global atoms section)
+    const result = assemblePrimer({ rows: [], projectAtoms, sharedAtoms, agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    // global/fact should appear exactly once (in the Shared atoms section)
     const occurrences = result.split('\n').filter((l) => l.includes('global/fact'));
     expect(occurrences).toHaveLength(1);
     // arch/db should appear in the project section
     expect(result).toContain('arch/db');
   });
 
-  test('project section shows "No project atoms yet." when projectAtoms contains only global atoms', () => {
+  test('project section shows "No project atoms yet." when projectAtoms contains only shared atoms', () => {
     const projectAtoms = [
       { scope: 'global', topic: 'global/only', description: 'global only', preview: '', pinned: 0, updated_at: NOW },
     ];
-    const globalAtoms = [
+    const sharedAtoms = [
       { scope: 'global', topic: 'global/only', description: 'global only', preview: '', pinned: 0, updated_at: NOW },
     ];
-    const result = assemblePrimer({ rows: [], projectAtoms, globalAtoms, agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    const result = assemblePrimer({ rows: [], projectAtoms, sharedAtoms, agent: 'engineer', project: PROJECT, staleness: STALENESS });
     expect(result).not.toBeNull();
     expect(result).toContain('No project atoms yet.');
-    // global atom renders in the global section
+    // shared atom renders in the shared section
     expect(result).toContain('global/only');
   });
 });
@@ -519,7 +562,7 @@ describe('assemblePrimer — Standing context section', () => {
   test('renders ### Standing context section when standingAtoms is non-empty', () => {
     const standing = [makeStandingAtom('conventions/style')];
     const result = assemblePrimer({
-      rows: [], projectAtoms: [], globalAtoms: [], standingAtoms: standing,
+      rows: [], projectAtoms: [], sharedAtoms: [], standingAtoms: standing,
       agent: 'engineer', project: PROJECT, staleness: STALENESS,
     });
     expect(result).not.toBeNull();
@@ -531,7 +574,7 @@ describe('assemblePrimer — Standing context section', () => {
     const rows = [{ session_name: 'mysession', session_id: 'abc', updated_at: NOW_REF, last_worked_summary: 'did stuff', next_action: '', open_questions: [] }];
     const standing = [makeStandingAtom('proj-convention')];
     const result = assemblePrimer({
-      rows, projectAtoms: [], globalAtoms: [], standingAtoms: standing,
+      rows, projectAtoms: [], sharedAtoms: [], standingAtoms: standing,
       agent: 'engineer', project: PROJECT, staleness: STALENESS,
     });
     const recentIdx = result.indexOf('### Recent sessions');
@@ -545,7 +588,7 @@ describe('assemblePrimer — Standing context section', () => {
   test('renders full content block with #### heading, description, and content', () => {
     const standing = [makeStandingAtom('my/convention')];
     const result = assemblePrimer({
-      rows: [], projectAtoms: [], globalAtoms: [], standingAtoms: standing,
+      rows: [], projectAtoms: [], sharedAtoms: [], standingAtoms: standing,
       agent: 'engineer', project: PROJECT, staleness: STALENESS,
     });
     expect(result).toContain('#### my/convention');
@@ -559,7 +602,7 @@ describe('assemblePrimer — Standing context section', () => {
       makeStandingAtom(`topic-${String(i + 1).padStart(2, '0')}`)
     );
     const result = assemblePrimer({
-      rows: [], projectAtoms: [], globalAtoms: [], standingAtoms: standing,
+      rows: [], projectAtoms: [], sharedAtoms: [], standingAtoms: standing,
       agent: 'engineer', project: PROJECT, staleness: STALENESS,
     });
     // 5 atoms rendered
@@ -590,7 +633,7 @@ describe('assemblePrimer — Standing context section', () => {
       makeStandingAtom('zzz', { updated_at: newer }),
     ];
     const result = assemblePrimer({
-      rows: [], projectAtoms: [], globalAtoms: [], standingAtoms: standing,
+      rows: [], projectAtoms: [], sharedAtoms: [], standingAtoms: standing,
       agent: 'engineer', project: PROJECT, staleness: STALENESS,
     });
     // 5 newest (vvv,www,xxx,yyy,zzz) must be rendered
@@ -615,7 +658,7 @@ describe('assemblePrimer — Standing context section', () => {
       makeStandingAtom('m/middle', { updated_at: NOW_REF }),
     ];
     const result = assemblePrimer({
-      rows: [], projectAtoms: [], globalAtoms: [], standingAtoms: standing,
+      rows: [], projectAtoms: [], sharedAtoms: [], standingAtoms: standing,
       agent: 'engineer', project: PROJECT, staleness: STALENESS,
     });
     const firstIdx = result.indexOf('a/first');
@@ -629,12 +672,12 @@ describe('assemblePrimer — Standing context section', () => {
     expect(MAX_STANDING_ATOMS).toBe(5);
   });
 
-  // 10.10 — global standing atoms rendered separately, capped independently
-  test('renders global standing atoms in separate bucket', () => {
+  // 10.10 — shared standing atoms rendered separately, capped independently
+  test('renders shared standing atoms in separate bucket', () => {
     const globalStanding = [makeStandingAtom('global/prefs', { scope: 'global', project: '' })];
     const wsStanding = [makeStandingAtom('ws/rules')];
     const result = assemblePrimer({
-      rows: [], projectAtoms: [], globalAtoms: [], standingAtoms: [...wsStanding, ...globalStanding],
+      rows: [], projectAtoms: [], sharedAtoms: [], standingAtoms: [...wsStanding, ...globalStanding],
       agent: 'engineer', project: PROJECT, staleness: STALENESS,
     });
     expect(result).toContain('Full content of ws/rules');
@@ -651,7 +694,7 @@ describe('assemblePrimer — Standing context section', () => {
       { scope: 'project', project: '/p', topic: 'standing-atom', description: 'desc', content: 'Full standing content', updated_at: NOW_REF },
     ];
     const result = assemblePrimer({
-      rows: [], projectAtoms, globalAtoms: [], standingAtoms: standing,
+      rows: [], projectAtoms, sharedAtoms: [], standingAtoms: standing,
       agent: 'engineer', project: PROJECT, staleness: STALENESS,
     });
     // standing-atom appears in Standing context section with full content
@@ -663,8 +706,8 @@ describe('assemblePrimer — Standing context section', () => {
     expect(occurrences.length).toBe(0);
   });
 
-  test('always_include global atoms excluded from compact global directory', () => {
-    const globalAtoms = [
+  test('always_include shared atoms excluded from compact shared directory', () => {
+    const sharedAtoms = [
       { scope: 'global', project: '', topic: 'global-standing', description: 'desc', preview: 'p', pinned: 0, status: 'active', updated_at: NOW_REF },
       { scope: 'global', project: '', topic: 'global-regular', description: 'desc', preview: 'p', pinned: 0, status: 'active', updated_at: NOW_REF },
     ];
@@ -672,7 +715,7 @@ describe('assemblePrimer — Standing context section', () => {
       { scope: 'global', project: '', topic: 'global-standing', description: 'desc', content: 'Full global content', updated_at: NOW_REF },
     ];
     const result = assemblePrimer({
-      rows: [], projectAtoms: [], globalAtoms, standingAtoms: standing,
+      rows: [], projectAtoms: [], sharedAtoms, standingAtoms: standing,
       agent: 'engineer', project: PROJECT, staleness: STALENESS,
     });
     expect(result).toContain('Full global content');
@@ -686,7 +729,7 @@ describe('assemblePrimer — Standing context section', () => {
   test('omits Standing context section when standingAtoms is empty', () => {
     const projectAtoms = [{ scope: 'project', project: '/p', topic: 'atom', description: 'desc', preview: 'p', pinned: 0, status: 'active', updated_at: NOW_REF }];
     const result = assemblePrimer({
-      rows: [], projectAtoms, globalAtoms: [], standingAtoms: [],
+      rows: [], projectAtoms, sharedAtoms: [], standingAtoms: [],
       agent: 'engineer', project: PROJECT, staleness: STALENESS,
     });
     expect(result).not.toContain('### Standing context');
@@ -695,7 +738,7 @@ describe('assemblePrimer — Standing context section', () => {
   test('omits Standing context section when standingAtoms param is absent (default)', () => {
     const projectAtoms = [{ scope: 'project', project: '/p', topic: 'atom', description: 'desc', preview: 'p', pinned: 0, status: 'active', updated_at: NOW_REF }];
     const result = assemblePrimer({
-      rows: [], projectAtoms, globalAtoms: [],
+      rows: [], projectAtoms, sharedAtoms: [],
       agent: 'engineer', project: PROJECT, staleness: STALENESS,
     });
     expect(result).not.toContain('### Standing context');
@@ -705,7 +748,7 @@ describe('assemblePrimer — Standing context section', () => {
   test('cold-start with only standingAtoms returns non-null primer', () => {
     const standing = [makeStandingAtom('always-available')];
     const result = assemblePrimer({
-      rows: [], projectAtoms: [], globalAtoms: [], standingAtoms: standing,
+      rows: [], projectAtoms: [], sharedAtoms: [], standingAtoms: standing,
       agent: 'engineer', project: PROJECT, staleness: STALENESS,
     });
     expect(result).not.toBeNull();
@@ -715,7 +758,7 @@ describe('assemblePrimer — Standing context section', () => {
 
   test('cold-start with empty rows, atoms, and no standingAtoms returns null', () => {
     const result = assemblePrimer({
-      rows: [], projectAtoms: [], globalAtoms: [], standingAtoms: [],
+      rows: [], projectAtoms: [], sharedAtoms: [], standingAtoms: [],
       agent: 'engineer', project: PROJECT, staleness: STALENESS,
     });
     expect(result).toBeNull();
@@ -733,7 +776,7 @@ describe('assemblePrimer — additional Standing context scenarios', () => {
       { scope: 'project', project: '/p', topic: 'both-flags', description: 'desc', content: 'Full content of both-flags', updated_at: NOW_REF },
     ];
     const result = assemblePrimer({
-      rows: [], projectAtoms, globalAtoms: [], standingAtoms: standing,
+      rows: [], projectAtoms, sharedAtoms: [], standingAtoms: standing,
       agent: 'engineer', project: PROJECT, staleness: STALENESS,
     });
     // Appears in Standing context as full block
@@ -757,7 +800,7 @@ describe('assemblePrimer — additional Standing context scenarios', () => {
       makeStandingAtom('standing-2'),
     ];
     const result = assemblePrimer({
-      rows: [], projectAtoms, globalAtoms: [], standingAtoms: standing,
+      rows: [], projectAtoms, sharedAtoms: [], standingAtoms: standing,
       agent: 'engineer', project: PROJECT, staleness: STALENESS,
     });
     // Compact directory overflow note shows 2 (42 regular - 40 cap)
@@ -773,7 +816,7 @@ describe('assemblePrimer — additional Standing context scenarios', () => {
       makeStandingAtom(`gl/atom-${String(i + 1).padStart(2, '0')}`, { scope: 'global', project: '' })
     );
     const result = assemblePrimer({
-      rows: [], projectAtoms: [], globalAtoms: [], standingAtoms: [...wsStanding, ...globalStanding],
+      rows: [], projectAtoms: [], sharedAtoms: [], standingAtoms: [...wsStanding, ...globalStanding],
       agent: 'engineer', project: PROJECT, staleness: STALENESS,
     });
     // 5 ws atoms rendered, 1 overflow
@@ -810,7 +853,7 @@ describe('assemblePrimer — session label fallback', () => {
     const result = assemblePrimer({
       rows: [row],
       projectAtoms: [],
-      globalAtoms: [],
+      sharedAtoms: [],
       agent: 'engineer',
       project: PROJECT,
       staleness: STALENESS,
@@ -834,7 +877,7 @@ describe('assemblePrimer — session label fallback', () => {
     const result = assemblePrimer({
       rows: [row],
       projectAtoms: [],
-      globalAtoms: [],
+      sharedAtoms: [],
       agent: 'engineer',
       project: PROJECT,
       staleness: STALENESS,
@@ -856,7 +899,7 @@ describe('assemblePrimer — session label fallback', () => {
     const result = assemblePrimer({
       rows: [row],
       projectAtoms: [],
-      globalAtoms: [],
+      sharedAtoms: [],
       agent: 'engineer',
       project: PROJECT,
       staleness: STALENESS,
@@ -881,7 +924,7 @@ describe('assemblePrimer — session_id bracket in thread header', () => {
       open_questions: [],
       updated_at: Date.now() - 60_000,
     };
-    const result = assemblePrimer({ rows: [row], projectAtoms: [], globalAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    const result = assemblePrimer({ rows: [row], projectAtoms: [], sharedAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
     expect(result).not.toBeNull();
     const headerLine = result.split('\n').find((l) => l.startsWith('▸'));
     expect(headerLine).toBeDefined();
@@ -897,7 +940,7 @@ describe('assemblePrimer — session_id bracket in thread header', () => {
       open_questions: [],
       updated_at: Date.now() - 60_000,
     };
-    const result = assemblePrimer({ rows: [row], projectAtoms: [], globalAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    const result = assemblePrimer({ rows: [row], projectAtoms: [], sharedAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
     expect(result).not.toBeNull();
     const headerLine = result.split('\n').find((l) => l.startsWith('▸'));
     expect(headerLine).toBeDefined();
@@ -913,7 +956,7 @@ describe('assemblePrimer — session_id bracket in thread header', () => {
       open_questions: [],
       updated_at: Date.now() - 60_000,
     };
-    const result = assemblePrimer({ rows: [row], projectAtoms: [], globalAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
+    const result = assemblePrimer({ rows: [row], projectAtoms: [], sharedAtoms: [], agent: 'engineer', project: PROJECT, staleness: STALENESS });
     const headerLine = result.split('\n').find((l) => l.startsWith('▸'));
     expect(headerLine).not.toContain('[');
   });
@@ -937,7 +980,7 @@ describe('assemblePrimer — staleness improvements', () => {
     const result = assemblePrimer({
       rows: [WARM_ROW],
       projectAtoms: [],
-      globalAtoms: [],
+      sharedAtoms: [],
       agent: 'engineer',
       project: PROJECT,
       staleness: { status: 'no-anchor' },
@@ -949,7 +992,7 @@ describe('assemblePrimer — staleness improvements', () => {
     const result = assemblePrimer({
       rows: [WARM_ROW],
       projectAtoms: [],
-      globalAtoms: [],
+      sharedAtoms: [],
       agent: 'engineer',
       project: PROJECT,
       staleness: { status: 'no-git' },
@@ -971,7 +1014,7 @@ describe('assemblePrimer — cross-project activity section', () => {
     const result = assemblePrimer({
       rows: [],
       projectAtoms: [],
-      globalAtoms: [],
+      sharedAtoms: [],
       agent: 'engineer',
       project: PROJECT,
       staleness: STALENESS,
@@ -989,7 +1032,7 @@ describe('assemblePrimer — cross-project activity section', () => {
     const result = assemblePrimer({
       rows: [],
       projectAtoms,
-      globalAtoms: [],
+      sharedAtoms: [],
       agent: 'engineer',
       project: PROJECT,
       staleness: STALENESS,
@@ -1003,7 +1046,7 @@ describe('assemblePrimer — cross-project activity section', () => {
     const result = assemblePrimer({
       rows: [],
       projectAtoms: [],
-      globalAtoms: [],
+      sharedAtoms: [],
       agent: 'engineer',
       project: PROJECT,
       staleness: STALENESS,
@@ -1024,7 +1067,7 @@ describe('assemblePrimer — cross-project activity section', () => {
     const result = assemblePrimer({
       rows: recentRows,
       projectAtoms: [],
-      globalAtoms: [],
+      sharedAtoms: [],
       agent: 'engineer',
       project: PROJECT,
       staleness: STALENESS,
@@ -1042,7 +1085,7 @@ describe('assemblePrimer — cross-project activity section', () => {
     const result = assemblePrimer({
       rows: [],
       projectAtoms: [],
-      globalAtoms: [],
+      sharedAtoms: [],
       agent: 'engineer',
       project: PROJECT,
       staleness: STALENESS,
@@ -1084,7 +1127,7 @@ describe('assemblePrimer — empty distil row handling', () => {
     const result = assemblePrimer({
       rows: [EMPTY_ROW],
       projectAtoms: [],
-      globalAtoms: [],
+      sharedAtoms: [],
       agent: 'engineer',
       project: PROJECT,
       staleness: STALENESS,
@@ -1098,7 +1141,7 @@ describe('assemblePrimer — empty distil row handling', () => {
     const result = assemblePrimer({
       rows: [EMPTY_ROW],
       projectAtoms: [],
-      globalAtoms: [],
+      sharedAtoms: [],
       agent: 'engineer',
       project: PROJECT,
       staleness: STALENESS,
@@ -1111,7 +1154,7 @@ describe('assemblePrimer — empty distil row handling', () => {
     const result = assemblePrimer({
       rows: [CONTENTFUL_ROW, EMPTY_ROW],
       projectAtoms: [],
-      globalAtoms: [],
+      sharedAtoms: [],
       agent: 'engineer',
       project: PROJECT,
       staleness: STALENESS,
@@ -1127,7 +1170,7 @@ describe('assemblePrimer — empty distil row handling', () => {
     const result = assemblePrimer({
       rows: [nullRow],
       projectAtoms: [],
-      globalAtoms: [],
+      sharedAtoms: [],
       agent: 'engineer',
       project: PROJECT,
       staleness: STALENESS,
@@ -1156,7 +1199,7 @@ describe('assemblePrimer — atom preview newline stripping', () => {
     const result = assemblePrimer({
       rows: [],
       projectAtoms: [atom],
-      globalAtoms: [],
+      sharedAtoms: [],
       agent: 'engineer',
       project: PROJECT,
       staleness: STALENESS,
@@ -1179,7 +1222,7 @@ describe('assemblePrimer — atom preview newline stripping', () => {
     const result = assemblePrimer({
       rows: [],
       projectAtoms: [atom],
-      globalAtoms: [],
+      sharedAtoms: [],
       agent: 'engineer',
       project: PROJECT,
       staleness: STALENESS,
@@ -1207,7 +1250,7 @@ describe('assemblePrimer — atom preview newline stripping', () => {
     const result = assemblePrimer({
       rows: [],
       projectAtoms: [atom],
-      globalAtoms: [],
+      sharedAtoms: [],
       agent: 'engineer',
       project: PROJECT,
       staleness: STALENESS,
@@ -1239,7 +1282,7 @@ describe('assemblePrimer — summary field display', () => {
       updated_at: NOW - 60_000,
     };
     const result = assemblePrimer({
-      rows: [], projectAtoms: [atom], globalAtoms: [],
+      rows: [], projectAtoms: [atom], sharedAtoms: [],
       agent: 'engineer', project: PROJECT, staleness: STALENESS,
     });
     expect(result).toContain('Stores persistent data in SQLite using WAL mode.');
@@ -1255,7 +1298,7 @@ describe('assemblePrimer — summary field display', () => {
       updated_at: NOW - 60_000,
     };
     const result = assemblePrimer({
-      rows: [], projectAtoms: [atom], globalAtoms: [],
+      rows: [], projectAtoms: [atom], sharedAtoms: [],
       agent: 'engineer', project: PROJECT, staleness: STALENESS,
     });
     expect(result).toContain('REST endpoints use JSON');
@@ -1269,7 +1312,7 @@ describe('assemblePrimer — summary field display', () => {
       updated_at: NOW - 60_000,
     };
     const result = assemblePrimer({
-      rows: [], projectAtoms: [atom], globalAtoms: [],
+      rows: [], projectAtoms: [atom], sharedAtoms: [],
       agent: 'engineer', project: PROJECT, staleness: STALENESS,
     });
     expect(result).toContain('Legacy content here');
@@ -1284,7 +1327,7 @@ describe('assemblePrimer — summary field display', () => {
       updated_at: NOW - 60_000,
     };
     const result = assemblePrimer({
-      rows: [], projectAtoms: [atom], globalAtoms: [],
+      rows: [], projectAtoms: [atom], sharedAtoms: [],
       agent: 'engineer', project: PROJECT, staleness: STALENESS,
     });
     const lines = result.split('\n');

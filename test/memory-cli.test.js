@@ -664,6 +664,86 @@ describe('prune SQL transaction', () => {
 
 // ── error boundary ────────────────────────────────────────────────────────────
 
+describe('memory.js — non-git (empty-string project) subcommands', () => {
+  // spec: openspec/changes/git-workspace-and-shared-atoms/specs/plugin-lifecycle/spec.md
+  // Task 3.3 — distil-write and read accept empty-string project (shared/non-git bucket)
+  let tmpDb;
+  beforeEach(() => {
+    tmpDb = `/tmp/test-shared-db-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+  });
+  afterEach(() => {
+    try { unlinkSync(tmpDb); } catch {}
+  });
+  function run(args) {
+    return spawnSync(process.execPath, [MEMORY_JS, ...args], {
+      env: { ...process.env, AGENT_MEMORY_DB: tmpDb },
+      encoding: 'utf8',
+    });
+  }
+
+  test('read accepts empty-string project (non-git session)', () => {
+    run(['init']);
+    const result = run(['read', 'ses_shared', 'engineer', '']);
+    expect(result.status).toBe(0);
+    const out = JSON.parse(result.stdout.trim());
+    expect(out).toHaveProperty('prior');
+    expect(out.prior).toBeNull();
+  });
+
+  test('distil-write accepts empty-string project (non-git session)', () => {
+    run(['init']);
+    const payload = JSON.stringify({
+      distilled: { last_worked_summary: 'shared work', next_action: '', open_questions: [] },
+      anchoredSha: null,
+      lastSignalMs: 0,
+      sessionId: 'ses_shared_distil',
+    });
+    const result = run(['distil-write', 'engineer', '', payload]);
+    expect(result.status).toBe(0);
+  });
+
+  test('accrue accepts empty-string project (non-git session)', () => {
+    run(['init']);
+    const signalPayload = JSON.stringify({ files: ['/some/file.js'], todos: [], messages: [], agentMessages: [] });
+    const result = run(['accrue', 'ses_shared_accrue', 'engineer', '', signalPayload]);
+    expect(result.status).toBe(0);
+  });
+
+  test('inspect accepts empty-string project (non-git session)', () => {
+    run(['init']);
+    const result = run(['inspect', 'engineer', '']);
+    expect(result.status).toBe(0);
+    const out = JSON.parse(result.stdout.trim());
+    expect(out).toHaveProperty('prior');
+    expect(out).toHaveProperty('rows');
+  });
+
+  test('correct accepts empty-string project (non-git session)', () => {
+    run(['init']);
+    const patch = JSON.stringify({ last_worked_summary: 'corrected summary', next_action: '', open_questions: [] });
+    const result = run(['correct', 'engineer', '', 'ses_shared_correct', patch]);
+    expect(result.status).toBe(0);
+  });
+
+  test('read returns distilled row for empty-string project after distil-write', () => {
+    run(['init']);
+    const payload = JSON.stringify({
+      distilled: { last_worked_summary: 'shared summary', next_action: '', open_questions: [] },
+      anchoredSha: null,
+      lastSignalMs: 0,
+      sessionId: 'ses_shared_round',
+    });
+    run(['distil-write', 'engineer', '', payload]);
+    const result = run(['read', 'ses_shared_round', 'engineer', '']);
+    expect(result.status).toBe(0);
+    const out = JSON.parse(result.stdout.trim());
+    const matching = out.recent.find((r) => r.last_worked_summary === 'shared summary');
+    expect(matching).toBeTruthy();
+  });
+});
+
+// ── error boundary ────────────────────────────────────────────────────────────
+
 describe('memory.js dispatch error boundary', () => {
   test('formats uncaught internal error as [memory.js] <cmd> failed: on stderr', () => {
     const tmpDb2 = `/tmp/invalid-sqlite-${Date.now()}.db`;
