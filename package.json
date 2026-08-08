@@ -4,7 +4,7 @@
   "description": "Persistent agent memory plugin for opencode — captures work signals during a session, distils on idle, and auto-injects a context primer at resume time.",
   "type": "module",
   "engines": {
-    "node": ">=22.5"
+    "node": ">=24"
   },
   "peerDependencies": {
     "@opencode-ai/plugin": ">=1.15.0"
