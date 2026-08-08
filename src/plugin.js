@@ -917,9 +917,9 @@ const AgentMemory = async ({ client, $ }) => {
       ),
       workspace: tool.schema.string().optional().describe(
         'Directory path of a foreign workspace (from an alsoIn listing). ' +
-        'When set, resolves the atom against this path instead of the current session directory. ' +
-        'Does NOT move the atom. Note: workspace targeting on get is not yet git-root normalised — ' +
-        'pass the exact path shown inside [workspace: <path>] in an alsoIn entry.'
+        'When set, the path is used as-is — no git-root normalization — so it correctly targets atoms ' +
+        'stored at legacy sub-paths (ghost atoms). Pass the exact path shown inside [workspace: <path>] ' +
+        'in an alsoIn entry. Does NOT move the atom.'
       ),
     },
     async execute({ topic, scope, workspace }, context) {
