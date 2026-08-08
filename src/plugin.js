@@ -100,7 +100,7 @@ Prefer \`status="deprecated"\` or \`status="resolved"\` over \`memory_atom_delet
 If atoms were written before git-root normalisation (e.g. from a subdirectory), run this procedure:
 1. Call \`memory_workspaces_list\` to enumerate every stored workspace path.
 2. For each path, run \`git -C <path> rev-parse --show-toplevel\`. If it fails (non-git), skip.
-3. If path ≠ git root: for each atom in that workspace (via \`memory_atom_list\`), call \`memory_atom_patch\` with \`workspace: <old-path>\` (source) and \`patch: { workspace: <git-root> }\` (destination) to move it. This is idempotent — atoms already at the git root are skipped.`;
+3. If path ≠ git root: for each atom in that workspace (via \`memory_atom_list\` with \`scope: "all"\`, filtering by the \`[workspace: <path>]\` label), call \`memory_atom_patch\` with \`workspace: <old-path>\`, \`normalize_workspace: false\` (source — required to target the legacy sub-path without git-root normalization), and \`patch: { workspace: <git-root> }\` (destination) to move it. This is idempotent — atoms already at the git root are skipped.`;
 
 const MAX_IN_FLIGHT = 5000;
 
@@ -777,7 +777,8 @@ const AgentMemory = async ({ client, $ }) => {
         'When omitted, auto-detects: writes to the current project when in a git repo, or to the shared store otherwise. ' +
         'Paths are normalised to the nearest .git directory walking upward; .git files (worktree pointers) are skipped ' +
         'so all worktrees resolve to the main repo root. ' +
-        '"." is always safe for the current project regardless of which subdirectory opencode was launched from.'
+        '"." is always safe for the current project regardless of which subdirectory opencode was launched from. ' +
+        'Pass normalize_workspace: false to use the exact path without normalization.'
       ),
       pinned: tool.schema.boolean().optional().describe(
         'Pin this atom so it always appears in the session primer. ' +
@@ -865,7 +866,8 @@ const AgentMemory = async ({ client, $ }) => {
         'When omitted, auto-detects: writes to the current project when in a git repo, or to the shared store otherwise. ' +
         'Paths are normalised to the nearest .git directory walking upward; .git files (worktree pointers) are skipped ' +
         'so all worktrees resolve to the main repo root. ' +
-        '"." is always safe for the current project regardless of which subdirectory opencode was launched from.'
+        '"." is always safe for the current project regardless of which subdirectory opencode was launched from. ' +
+        'Pass normalize_workspace: false to use the exact path without normalization.'
       ),
       normalize_workspace: tool.schema.boolean().optional().describe(
         'When false, the workspace path is used exactly as given — the git-root walk is skipped. ' +
@@ -1126,10 +1128,11 @@ const AgentMemory = async ({ client, $ }) => {
         'Optional. Pass null for the shared store, "." for the current project (resolves to its git root), ' +
         'or an absolute path for a foreign project (also resolved to its git root). ' +
         'When omitted, auto-detects: patches the atom in the current project when in a git repo, or in the shared store otherwise. ' +
-        'Paths are normalised to the nearest .git directory walking upward; .git files (worktree pointers) are skipped ' +
-        'so all worktrees resolve to the main repo root. ' +
-        '"." is always safe for the current project regardless of which subdirectory opencode was launched from. ' +
-        'This is the source — where the atom currently lives. To move the atom, supply patch.workspace.'
+         'Paths are normalised to the nearest .git directory walking upward; .git files (worktree pointers) are skipped ' +
+         'so all worktrees resolve to the main repo root. ' +
+         '"." is always safe for the current project regardless of which subdirectory opencode was launched from. ' +
+         'Pass normalize_workspace: false to use the exact path without normalization — required when targeting a ghost atom at a legacy sub-path. ' +
+         'This is the source — where the atom currently lives. To move the atom, supply patch.workspace.'
       ),
       normalize_workspace: tool.schema.boolean().optional().describe(
         'When false, the workspace path is used exactly as given — the git-root walk is skipped. ' +
@@ -1283,7 +1286,8 @@ const AgentMemory = async ({ client, $ }) => {
         'When omitted, auto-detects: deletes from the current project when in a git repo, or from the shared store otherwise. ' +
         'Paths are normalised to the nearest .git directory walking upward; .git files (worktree pointers) are skipped ' +
         'so all worktrees resolve to the main repo root. ' +
-        '"." is always safe for the current project regardless of which subdirectory opencode was launched from.'
+        '"." is always safe for the current project regardless of which subdirectory opencode was launched from. ' +
+        'Pass normalize_workspace: false to use the exact path without normalization — required when deleting a ghost atom at a legacy sub-path.'
       ),
       normalize_workspace: tool.schema.boolean().optional().describe(
         'When false, the workspace path is used exactly as given — the git-root walk is skipped. ' +
