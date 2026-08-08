@@ -8,9 +8,10 @@
 
 import { DatabaseSync } from 'node:sqlite';
 import { spawnSync } from 'node:child_process';
-import { writeFileSync, unlinkSync } from 'node:fs';
+import { writeFileSync, unlinkSync, mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
+import { tmpdir } from 'node:os';
 import { ensureSchema, pruneHotState } from '../src/lib/schema.js';
 import { readDistilWatermark, advanceDistilWatermark } from '../src/lib/watermark.js';
 
@@ -567,6 +568,109 @@ describe('memory.js atom-* subcommands (subprocess integration)', () => {
     const result = run(['atom-delete', '/p', JSON.stringify({ workspace: '/p', topic: 'ghost' })]);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('ghost');
+  });
+
+  test('atom-delete with normalize_workspace:false targets exact sub-path not git root', () => {
+    // Simulate a ghost atom: a row stored at a legacy sub-path inside a git repo.
+    // We cannot create it via atom-write (which also normalizes), so insert directly.
+    const repoRoot = mkdtempSync(join(tmpdir(), 'ghost-delete-'));
+    mkdirSync(join(repoRoot, '.git'));
+    const subPath = join(repoRoot, '.config', 'opencode');
+    mkdirSync(subPath, { recursive: true });
+    try {
+      // Seed: write the canonical atom at the git root via normal atom-write
+      run(['atom-write', repoRoot,
+        JSON.stringify({ workspace: repoRoot, topic: 'canonical', content: 'keep me', description: 'canonical' })]);
+      // Seed: insert a ghost row at the sub-path directly into the DB
+      const db = new DatabaseSync(tmpDb);
+      db.prepare(
+        `INSERT INTO memory_atom (scope, project, topic, content, description, summary, tags, status, created_at, updated_at)
+         VALUES ('project', ?, 'canonical', 'ghost content', 'ghost', '', '[]', 'active', unixepoch('now') * 1000, unixepoch('now') * 1000)`
+      ).run(subPath);
+      db.close();
+
+      // Delete the ghost using normalize_workspace:false — must NOT touch the canonical atom
+      const del = run(['atom-delete', repoRoot,
+        JSON.stringify({ workspace: subPath, normalize_workspace: false, topic: 'canonical' })]);
+      expect(del.status).toBe(0);
+      const delOut = JSON.parse(del.stdout.trim());
+      expect(delOut.deleted).toBe(1);
+      expect(delOut.project).toBe(subPath);  // confirmed it targeted the sub-path
+
+      // Canonical atom at git root is still intact
+      const get = run(['atom-get', 'project', repoRoot, 'canonical']);
+      const getOut = JSON.parse(get.stdout.trim());
+      expect(getOut.match).not.toBeNull();
+      expect(getOut.match.content).toBe('keep me');
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('atom-write with normalize_workspace:false stores at exact sub-path', () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), 'ghost-write-'));
+    mkdirSync(join(repoRoot, '.git'));
+    const subPath = join(repoRoot, '.config', 'opencode');
+    mkdirSync(subPath, { recursive: true });
+    try {
+      const result = run(['atom-write', repoRoot,
+        JSON.stringify({ workspace: subPath, normalize_workspace: false, topic: 'sub-atom', content: 'hello', description: 'd' })]);
+      expect(result.status).toBe(0);
+      const out = JSON.parse(result.stdout.trim());
+      expect(out.project).toBe(subPath);  // stored at sub-path, not git root
+
+      // Not visible at the git root
+      const get = run(['atom-get', 'project', repoRoot, 'sub-atom']);
+      const getOut = JSON.parse(get.stdout.trim());
+      expect(getOut.match).toBeNull();
+
+      // Visible at the exact sub-path
+      const getExact = run(['atom-get', 'project', subPath, 'sub-atom']);
+      const getExactOut = JSON.parse(getExact.stdout.trim());
+      expect(getExactOut.match).not.toBeNull();
+      expect(getExactOut.match.content).toBe('hello');
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('atom-patch with normalize_workspace:false can move a ghost atom to the canonical location', () => {
+    const repoRoot = mkdtempSync(join(tmpdir(), 'ghost-patch-'));
+    mkdirSync(join(repoRoot, '.git'));
+    const subPath = join(repoRoot, '.config', 'opencode');
+    mkdirSync(subPath, { recursive: true });
+    try {
+      // Insert ghost directly
+      run(['init']);
+      const db = new DatabaseSync(tmpDb);
+      db.prepare(
+        `INSERT INTO memory_atom (scope, project, topic, content, description, summary, tags, status, created_at, updated_at)
+         VALUES ('project', ?, 'migrateme', 'ghost content', 'ghost', '', '[]', 'active', unixepoch('now') * 1000, unixepoch('now') * 1000)`
+      ).run(subPath);
+      db.close();
+
+      // Move ghost to canonical git root via patch workspace move
+      const patch = run(['atom-patch', repoRoot,
+        JSON.stringify({
+          workspace: subPath, normalize_workspace: false,
+          topic: 'migrateme',
+          targetWorkspace: repoRoot,  // destination: the git root (normalized)
+          description: 'migrated',
+        })]);
+      expect(patch.status).toBe(0);
+      const patchOut = JSON.parse(patch.stdout.trim());
+      expect(patchOut.moved).toBe(true);
+      expect(patchOut.from.project).toBe(subPath);
+      expect(patchOut.to.project).toBe(repoRoot);
+
+      // Now visible at the canonical git root
+      const get = run(['atom-get', 'project', repoRoot, 'migrateme']);
+      const getOut = JSON.parse(get.stdout.trim());
+      expect(getOut.match).not.toBeNull();
+      expect(getOut.match.content).toBe('ghost content');
+    } finally {
+      rmSync(repoRoot, { recursive: true, force: true });
+    }
   });
 
   // spec: openspec/specs/memory-atom/spec.md

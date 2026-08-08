@@ -489,7 +489,7 @@ function cmdAtomWrite(contextDirectory, jsonArg) {
     process.exit(1);
   }
 
-  const { workspace, topic, content, description, summary, tags, pinned, alwaysInclude, sessionId, sessionName, createdAt } = data;
+  const { workspace, normalize_workspace, topic, content, description, summary, tags, pinned, alwaysInclude, sessionId, sessionName, createdAt } = data;
   if (!topic) {
     process.stderr.write('[agent-memory/atom-write] topic is required\n');
     process.exit(1);
@@ -497,7 +497,7 @@ function cmdAtomWrite(contextDirectory, jsonArg) {
 
   let resolved;
   try {
-    resolved = resolveWorkspace(workspace, contextDirectory);
+    resolved = resolveWorkspace(workspace, contextDirectory, { normalize: normalize_workspace !== false });
   } catch (err) {
     process.stderr.write(`[agent-memory/atom-write] ${err.message}\n`);
     process.exit(1);
@@ -532,7 +532,7 @@ function cmdAtomAppend(contextDirectory, jsonArg) {
     process.exit(1);
   }
 
-  const { workspace, topic, content } = data;
+  const { workspace, normalize_workspace, topic, content } = data;
   if (!topic) {
     process.stderr.write('[agent-memory/atom-append] topic is required\n');
     process.exit(1);
@@ -540,7 +540,7 @@ function cmdAtomAppend(contextDirectory, jsonArg) {
 
   let resolved;
   try {
-    resolved = resolveWorkspace(workspace, contextDirectory);
+    resolved = resolveWorkspace(workspace, contextDirectory, { normalize: normalize_workspace !== false });
   } catch (err) {
     process.stderr.write(`[agent-memory/atom-append] ${err.message}\n`);
     process.exit(1);
@@ -618,7 +618,7 @@ function cmdAtomPatch(contextDirectory, jsonArg) {
     process.exit(1);
   }
 
-  const { workspace, targetWorkspace, topic, description, summary, tags, created_at: createdAt, pinned, always_include: alwaysInclude, status } = data;
+  const { workspace, normalize_workspace, targetWorkspace, topic, description, summary, tags, created_at: createdAt, pinned, always_include: alwaysInclude, status } = data;
   if (!topic) {
     process.stderr.write('[agent-memory/atom-patch] topic is required\n');
     process.exit(1);
@@ -626,7 +626,7 @@ function cmdAtomPatch(contextDirectory, jsonArg) {
 
   let source;
   try {
-    source = resolveWorkspace(workspace, contextDirectory);
+    source = resolveWorkspace(workspace, contextDirectory, { normalize: normalize_workspace !== false });
   } catch (err) {
     process.stderr.write(`[agent-memory/atom-patch] ${err.message}\n`);
     process.exit(1);
@@ -717,7 +717,7 @@ function cmdAtomDelete(contextDirectory, jsonArg) {
     process.exit(1);
   }
 
-  const { workspace, topic } = data;
+  const { workspace, normalize_workspace, topic } = data;
   if (!topic) {
     process.stderr.write('[agent-memory/atom-delete] topic is required\n');
     process.exit(1);
@@ -725,7 +725,7 @@ function cmdAtomDelete(contextDirectory, jsonArg) {
 
   let resolved;
   try {
-    resolved = resolveWorkspace(workspace, contextDirectory);
+    resolved = resolveWorkspace(workspace, contextDirectory, { normalize: normalize_workspace !== false });
   } catch (err) {
     process.stderr.write(`[agent-memory/atom-delete] ${err.message}\n`);
     process.exit(1);

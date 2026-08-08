@@ -794,8 +794,13 @@ const AgentMemory = async ({ client, $ }) => {
         'Accepts an ISO 8601 date string or an epoch-ms integer. ' +
         'When omitted, the current time is used.'
       ),
+      normalize_workspace: tool.schema.boolean().optional().describe(
+        'When false, the workspace path is used exactly as given — the git-root walk is skipped. ' +
+        'Use to write an atom at a specific sub-path rather than the repository root. ' +
+        'Default: true (normalize to nearest .git directory).'
+      ),
     },
-    async execute({ topic, content, description, summary, tags, workspace, pinned, always_include, created_at }, context) {
+    async execute({ topic, content, description, summary, tags, workspace, pinned, always_include, created_at, normalize_workspace }, context) {
       const validationError = validateWorkspace(workspace);
       if (validationError) {
         return { title: 'memory_atom_write', output: `Error: ${validationError}` };
@@ -823,7 +828,8 @@ const AgentMemory = async ({ client, $ }) => {
           { workspace, topic, content, description, summary, tags, pinned, alwaysInclude: always_include,
             sessionId: context.sessionID,
             sessionName: sessionNames.get(context.sessionID) ?? null,
-            ...(createdAt !== undefined ? { createdAt } : {}) });
+            ...(createdAt !== undefined ? { createdAt } : {}),
+            ...(normalize_workspace !== undefined ? { normalize_workspace } : {}) });
         const result = JSON.parse(out.trim());
         const location = formatLocation(result.scope, result.project);
         const msg = result.action === 'created'
@@ -861,14 +867,22 @@ const AgentMemory = async ({ client, $ }) => {
         'so all worktrees resolve to the main repo root. ' +
         '"." is always safe for the current project regardless of which subdirectory opencode was launched from.'
       ),
+      normalize_workspace: tool.schema.boolean().optional().describe(
+        'When false, the workspace path is used exactly as given — the git-root walk is skipped. ' +
+        'Use to append to an atom stored at a specific sub-path rather than the repository root. ' +
+        'Default: true (normalize to nearest .git directory).'
+      ),
     },
-    async execute({ topic, content, workspace }, context) {
+    async execute({ topic, content, workspace, normalize_workspace }, context) {
       const validationError = validateWorkspace(workspace);
       if (validationError) {
         return { title: 'memory_atom_append', output: `Error: ${validationError}` };
       }
       try {
-        const out = await spawnMemory($, ['atom-append', context.directory], { workspace, topic, content });
+        const out = await spawnMemory($, ['atom-append', context.directory], {
+          workspace, topic, content,
+          ...(normalize_workspace !== undefined ? { normalize_workspace } : {}),
+        });
         const result = JSON.parse(out.trim());
         const location = formatLocation(result.scope, result.project);
         return { title: 'memory_atom_append', output: `${result.content} ${location}` };
@@ -1117,6 +1131,12 @@ const AgentMemory = async ({ client, $ }) => {
         '"." is always safe for the current project regardless of which subdirectory opencode was launched from. ' +
         'This is the source — where the atom currently lives. To move the atom, supply patch.workspace.'
       ),
+      normalize_workspace: tool.schema.boolean().optional().describe(
+        'When false, the workspace path is used exactly as given — the git-root walk is skipped. ' +
+        'Use to target a ghost atom stored at a legacy sub-path (e.g. the exact path shown inside ' +
+        '[workspace: <path>] in an alsoIn listing). Only applies to the source workspace; the ' +
+        'destination (patch.workspace) is always normalized. Default: true.'
+      ),
       patch: tool.schema.object({
         description: tool.schema.string().optional().describe('New description (must be non-empty if supplied)'),
         summary: tool.schema.string().optional().describe(
@@ -1146,7 +1166,7 @@ const AgentMemory = async ({ client, $ }) => {
         ),
       }).describe('Fields to patch. At least one field must be present.'),
     },
-    async execute({ topic, patch = {}, workspace }, context) {
+    async execute({ topic, patch = {}, workspace, normalize_workspace }, context) {
       // patch = {} is a defensive default; schema requires patch but execute() can be
       // called directly in tests that bypass schema validation — the empty-patch guard below handles the fallback.
 
@@ -1209,6 +1229,7 @@ const AgentMemory = async ({ client, $ }) => {
       // Build the patch JSON with only present fields
       // patch.workspace becomes targetWorkspace in the CLI payload (move trigger)
       const patchPayload = { topic, workspace };
+      if (normalize_workspace !== undefined) patchPayload.normalize_workspace = normalize_workspace;
       if (description !== undefined) patchPayload.description = description;
       if (summary !== undefined) patchPayload.summary = summary;
       if (tags !== undefined) patchPayload.tags = tags;
@@ -1264,14 +1285,22 @@ const AgentMemory = async ({ client, $ }) => {
         'so all worktrees resolve to the main repo root. ' +
         '"." is always safe for the current project regardless of which subdirectory opencode was launched from.'
       ),
+      normalize_workspace: tool.schema.boolean().optional().describe(
+        'When false, the workspace path is used exactly as given — the git-root walk is skipped. ' +
+        'Use to delete a ghost atom stored at a legacy sub-path (e.g. the exact path shown inside ' +
+        '[workspace: <path>] in an alsoIn listing). Default: true (normalize to nearest .git directory).'
+      ),
     },
-    async execute({ topic, workspace }, context) {
+    async execute({ topic, workspace, normalize_workspace }, context) {
       const validationError = validateWorkspace(workspace);
       if (validationError) {
         return { title: 'memory_atom_delete', output: `Error: ${validationError}` };
       }
       try {
-        const out = await spawnMemory($, ['atom-delete', context.directory], { workspace, topic });
+        const out = await spawnMemory($, ['atom-delete', context.directory], {
+          workspace, topic,
+          ...(normalize_workspace !== undefined ? { normalize_workspace } : {}),
+        });
         const result = JSON.parse(out.trim());
         const location = formatLocation(result.scope, result.project);
         return { title: 'memory_atom_delete', output: `Deleted atom '${topic}' (${result.deleted} row removed) ${location}` };

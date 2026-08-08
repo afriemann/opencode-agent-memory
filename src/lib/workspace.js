@@ -82,9 +82,16 @@ export function findGitRoot(start) {
  *
  * @param {string|null|undefined} workspace
  * @param {string} contextDirectory — absolute path to expand `"."` against
+ * @param {{ normalize?: boolean }} [options]
+ *   `normalize` (default `true`) — when `false`, the git-root walk is skipped for
+ *   explicit paths: the expanded path is used as-is. The `null` (shared store) and
+ *   `undefined` (auto-detect) cases are unaffected. Use `normalize: false` to target
+ *   an atom stored at a legacy sub-path that predates git-root normalization.
  * @returns {{ scope: string, project: string }}
  */
-export function resolveWorkspace(workspace, contextDirectory) {
+export function resolveWorkspace(workspace, contextDirectory, options = {}) {
+  const { normalize = true } = options;
+
   if (workspace === null) {
     // Explicit shared store — always shared regardless of directory
     return { scope: 'global', project: '' };
@@ -111,6 +118,11 @@ export function resolveWorkspace(workspace, contextDirectory) {
     throw new Error(
       `workspace must be null, ".", or an absolute path — got: "${workspace}"`
     );
+  }
+
+  if (!normalize) {
+    // Skip git-root walk — use the expanded path as-is.
+    return { scope: 'project', project: expanded };
   }
 
   const root = findGitRootOrNull(expanded);

@@ -173,3 +173,63 @@ describe('resolveWorkspace', () => {
     expect(() => resolveWorkspace(42, '/ctx')).toThrow(/null or a string/i);
   });
 });
+
+// ── resolveWorkspace — normalize: false ───────────────────────────────────────
+
+describe('resolveWorkspace with normalize: false', () => {
+  let tmp;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'workspace-no-norm-'));
+  });
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  test('null → shared store regardless of normalize flag', () => {
+    expect(resolveWorkspace(null, '/any', { normalize: false }))
+      .toEqual({ scope: 'global', project: '' });
+  });
+
+  test('undefined auto-detect still resolves to git root even when normalize: false', () => {
+    mkdirSync(join(tmp, '.git'));
+    const sub = join(tmp, 'src');
+    mkdirSync(sub);
+    // auto-detect is unaffected: it still walks to the git root
+    expect(resolveWorkspace(undefined, sub, { normalize: false }))
+      .toEqual({ scope: 'project', project: tmp });
+  });
+
+  test('absolute sub-path inside a git repo is kept as-is when normalize: false', () => {
+    const repoRoot = join(tmp, 'myrepo');
+    mkdirSync(repoRoot);
+    mkdirSync(join(repoRoot, '.git'));
+    const sub = join(repoRoot, '.config', 'opencode');
+    mkdirSync(sub, { recursive: true });
+    // Without normalize: false this would resolve to repoRoot
+    expect(resolveWorkspace(sub, '/irrelevant', { normalize: false }))
+      .toEqual({ scope: 'project', project: sub });
+  });
+
+  test('"." is expanded to contextDirectory and used as-is when normalize: false', () => {
+    const repoRoot = join(tmp, 'myrepo');
+    mkdirSync(repoRoot);
+    mkdirSync(join(repoRoot, '.git'));
+    const sub = join(repoRoot, 'packages', 'app');
+    mkdirSync(sub, { recursive: true });
+    // "." expands to sub, then kept as sub (not walked to repoRoot)
+    expect(resolveWorkspace('.', sub, { normalize: false }))
+      .toEqual({ scope: 'project', project: sub });
+  });
+
+  test('normalize: true (explicit) behaves identically to the default', () => {
+    const repoRoot = join(tmp, 'myrepo');
+    mkdirSync(repoRoot);
+    mkdirSync(join(repoRoot, '.git'));
+    const sub = join(repoRoot, 'packages', 'app');
+    mkdirSync(sub, { recursive: true });
+    expect(resolveWorkspace(sub, '/irrelevant', { normalize: true }))
+      .toEqual(resolveWorkspace(sub, '/irrelevant'));
+  });
+});
