@@ -155,6 +155,23 @@ async function spawnMemory($, args, stdinData) {
   return await $`node ${SCRIPT} ${sub} ${rest}`.quiet().text();
 }
 
+/**
+ * Extract the best human-readable message from a spawn/tool error.
+ *
+ * Bun shell errors carry a `stderr` buffer with the child-process output;
+ * this is usually the most informative piece.  Falls back to `err.message`
+ * then a plain string conversion so the caller always gets a non-empty string.
+ *
+ * @param {unknown} err
+ * @returns {string}
+ */
+function spawnError(err) {
+  const stderrText = err?.stderr ? err.stderr.toString().trim() : '';
+  if (stderrText) return stderrText;
+  if (err instanceof Error && err.message) return err.message;
+  return String(err);
+}
+
 // ── Workspace validation (plugin-side, pre-spawn) ────────────────────────────
 
 /**
@@ -621,10 +638,7 @@ const AgentMemory = async ({ client, $ }) => {
           output: JSON.stringify({ ...result, active_primer: activePrimer }, null, 2),
         };
       } catch (err) {
-        return {
-          title: 'memory_state_inspect',
-          output: `Error reading memory: ${err && err.message ? err.message : String(err)}`,
-        };
+        throw new Error(spawnError(err));
       }
     },
   });
@@ -666,10 +680,7 @@ const AgentMemory = async ({ client, $ }) => {
           output: result.created ? 'Memory patch applied (new session row created).' : 'Memory corrected successfully.',
         };
       } catch (err) {
-        return {
-          title: 'memory_state_patch',
-          output: `Error correcting memory: ${err && err.message ? err.message : String(err)}`,
-        };
+        throw new Error(spawnError(err));
       }
     },
   });
@@ -699,10 +710,7 @@ const AgentMemory = async ({ client, $ }) => {
           output: 'Distillation triggered.',
         };
       } catch (err) {
-        return {
-          title: 'memory_state_distil',
-          output: `Error during forced distil: ${err && err.message ? err.message : String(err)}`,
-        };
+        throw new Error(spawnError(err));
       }
     },
   });
@@ -725,10 +733,7 @@ const AgentMemory = async ({ client, $ }) => {
     },
     async execute({ sessionId }, context) {
       if (sessionId === context.sessionID) {
-        return {
-          title: 'memory_state_delete',
-          output: 'Cannot delete the calling session\'s own row.',
-        };
+        throw new Error('Cannot delete the calling session\'s own row.');
       }
       try {
         const out = await spawnMemory($, ['hot-state-delete', context.directory, sessionId ?? '']);
@@ -737,10 +742,7 @@ const AgentMemory = async ({ client, $ }) => {
           output: out.trim(),
         };
       } catch (err) {
-        return {
-          title: 'memory_state_delete',
-          output: `Error: ${err && err.message ? err.message : String(err)}`,
-        };
+        throw new Error(spawnError(err));
       }
     },
   });
@@ -804,7 +806,7 @@ const AgentMemory = async ({ client, $ }) => {
     async execute({ topic, content, description, summary, tags, workspace, pinned, always_include, created_at, normalize_workspace }, context) {
       const validationError = validateWorkspace(workspace);
       if (validationError) {
-        return { title: 'memory_atom_write', output: `Error: ${validationError}` };
+        throw new Error(validationError);
       }
 
       // Convert caller-supplied creation timestamp to epoch ms.
@@ -815,10 +817,7 @@ const AgentMemory = async ({ client, $ }) => {
         } else if (typeof created_at === 'string') {
           const parsed = new Date(created_at).getTime();
           if (!Number.isFinite(parsed)) {
-            return {
-              title: 'memory_atom_write',
-              output: `Error: created_at "${created_at}" is not a valid ISO 8601 date string.`,
-            };
+            throw new Error(`created_at "${created_at}" is not a valid ISO 8601 date string.`);
           }
           createdAt = parsed;
         }
@@ -838,10 +837,7 @@ const AgentMemory = async ({ client, $ }) => {
           : `Updated existing atom at ${topic} (previous content overwritten) ${location}`;
         return { title: 'memory_atom_write', output: msg };
       } catch (err) {
-        return {
-          title: 'memory_atom_write',
-          output: `Error writing atom: ${err && err.message ? err.message : String(err)}`,
-        };
+        throw new Error(spawnError(err));
       }
     },
   });
@@ -878,7 +874,7 @@ const AgentMemory = async ({ client, $ }) => {
     async execute({ topic, content, workspace, normalize_workspace }, context) {
       const validationError = validateWorkspace(workspace);
       if (validationError) {
-        return { title: 'memory_atom_append', output: `Error: ${validationError}` };
+        throw new Error(validationError);
       }
       try {
         const out = await spawnMemory($, ['atom-append', context.directory], {
@@ -889,10 +885,7 @@ const AgentMemory = async ({ client, $ }) => {
         const location = formatLocation(result.scope, result.project);
         return { title: 'memory_atom_append', output: `${result.content} ${location}` };
       } catch (err) {
-        return {
-          title: 'memory_atom_append',
-          output: `Error appending to atom: ${err && err.message ? err.message : String(err)}`,
-        };
+        throw new Error(spawnError(err));
       }
     },
   });
@@ -959,10 +952,7 @@ const AgentMemory = async ({ client, $ }) => {
         }
         return { title: 'memory_atom_get', output: lines.join('\n') };
       } catch (err) {
-        return {
-          title: 'memory_atom_get',
-          output: `Error fetching atom: ${err && err.message ? err.message : String(err)}`,
-        };
+        throw new Error(spawnError(err));
       }
     },
   });
@@ -1003,7 +993,7 @@ const AgentMemory = async ({ client, $ }) => {
       if (status !== undefined) {
         const VALID_STATUSES = ['active', 'resolved', 'deprecated'];
         if (!VALID_STATUSES.includes(status)) {
-          return { title: 'memory_atom_search', output: `Error: status must be one of: ${VALID_STATUSES.join(', ')}` };
+          throw new Error(`status must be one of: ${VALID_STATUSES.join(', ')}`);
         }
       }
       try {
@@ -1022,10 +1012,7 @@ const AgentMemory = async ({ client, $ }) => {
         });
         return { title: 'memory_atom_search', output: lines.join('\n') };
       } catch (err) {
-        return {
-          title: 'memory_atom_search',
-          output: `Error searching atoms: ${err && err.message ? err.message : String(err)}`,
-        };
+        throw new Error(spawnError(err));
       }
     },
   });
@@ -1063,7 +1050,7 @@ const AgentMemory = async ({ client, $ }) => {
       if (status !== undefined) {
         const VALID_STATUSES = ['active', 'resolved', 'deprecated'];
         if (!VALID_STATUSES.includes(status)) {
-          return { title: 'memory_atom_list', output: `Error: status must be one of: ${VALID_STATUSES.join(', ')}` };
+          throw new Error(`status must be one of: ${VALID_STATUSES.join(', ')}`);
         }
       }
       try {
@@ -1095,10 +1082,7 @@ const AgentMemory = async ({ client, $ }) => {
         });
         return { title: 'memory_atom_list', output: lines.join('\n') };
       } catch (err) {
-        return {
-          title: 'memory_atom_list',
-          output: `Error listing atoms: ${err && err.message ? err.message : String(err)}`,
-        };
+        throw new Error(spawnError(err));
       }
     },
   });
@@ -1176,7 +1160,7 @@ const AgentMemory = async ({ client, $ }) => {
       // Validate source workspace
       const sourceValidationError = validateWorkspace(workspace);
       if (sourceValidationError) {
-        return { title: 'memory_atom_patch', output: `Error: ${sourceValidationError}` };
+        throw new Error(sourceValidationError);
       }
 
       const { description, summary, tags, created_at, pinned, always_include, status, workspace: destWorkspace } = patch;
@@ -1185,7 +1169,7 @@ const AgentMemory = async ({ client, $ }) => {
       if (destWorkspace !== undefined) {
         const destValidationError = validateWorkspace(destWorkspace);
         if (destValidationError) {
-          return { title: 'memory_atom_patch', output: `Error: patch.workspace: ${destValidationError}` };
+          throw new Error(`patch.workspace: ${destValidationError}`);
         }
       }
 
@@ -1198,17 +1182,14 @@ const AgentMemory = async ({ client, $ }) => {
       const isMove = destWorkspace !== undefined;
 
       if (present.length === 0 && !isMove) {
-        return { title: 'memory_atom_patch', output: 'Error: at least one of description, summary, tags, created_at, pinned, always_include, status is required in `patch`.' };
+        throw new Error('at least one of description, summary, tags, created_at, pinned, always_include, status is required in `patch`.');
       }
 
       // Validate status enum at the tool layer (before passing to CLI)
       if (status !== undefined) {
         const VALID_STATUSES = ['active', 'resolved', 'deprecated'];
         if (!VALID_STATUSES.includes(status)) {
-          return {
-            title: 'memory_atom_patch',
-            output: `Error: status must be one of: ${VALID_STATUSES.join(', ')}`,
-          };
+          throw new Error(`status must be one of: ${VALID_STATUSES.join(', ')}`);
         }
       }
 
@@ -1220,10 +1201,7 @@ const AgentMemory = async ({ client, $ }) => {
         } else if (typeof created_at === 'string') {
           const parsed = new Date(created_at).getTime();
           if (!Number.isFinite(parsed)) {
-            return {
-              title: 'memory_atom_patch',
-              output: `Error: created_at "${created_at}" is not a valid ISO 8601 date string.`,
-            };
+            throw new Error(`created_at "${created_at}" is not a valid ISO 8601 date string.`);
           }
           normCreatedAt = parsed;
         }
@@ -1242,28 +1220,39 @@ const AgentMemory = async ({ client, $ }) => {
       if (status !== undefined) patchPayload.status = status;
       if (isMove) patchPayload.targetWorkspace = destWorkspace;
 
+      // Build a human-readable summary of the patched values for the output.
+      // String values are shown quoted and truncated at 80 chars.
+      const patchLines = present.map((f) => {
+        const val = patchPayload[f];
+        let display;
+        if (typeof val === 'string') {
+          const truncated = val.length > 80 ? `${val.slice(0, 77)}...` : val;
+          display = `"${truncated}"`;
+        } else {
+          display = JSON.stringify(val);
+        }
+        return `  ${f}: ${display}`;
+      }).join('\n');
+
       try {
         const out = await spawnMemory($, ['atom-patch', context.directory], patchPayload);
         const result = JSON.parse(out.trim());
         if (result.moved) {
           const fromLoc = formatLocation(result.from.scope, result.from.project);
           const toLoc   = formatLocation(result.to.scope, result.to.project);
+          const moveLines = patchLines ? `\n${patchLines}` : '';
           return {
             title: 'memory_atom_patch',
-            output: `Moved atom '${result.topic || topic}' from ${fromLoc} to ${toLoc}`,
+            output: `Moved atom '${result.topic || topic}' from ${fromLoc} to ${toLoc}${moveLines}`,
           };
         }
-        const changedFields = result.patched ? result.patched.join(', ') : present.join(', ');
         const location = formatLocation(result.scope, result.project);
         return {
           title: 'memory_atom_patch',
-          output: `Patched atom '${result.topic || topic}' (${changedFields}) ${location}`,
+          output: `Patched '${result.topic || topic}' ${location}${patchLines ? `\n${patchLines}` : ''}`,
         };
       } catch (err) {
-        return {
-          title: 'memory_atom_patch',
-          output: `Error patching atom: ${err && err.message ? err.message : String(err)}`,
-        };
+        throw new Error(spawnError(err));
       }
     },
   });
@@ -1298,7 +1287,7 @@ const AgentMemory = async ({ client, $ }) => {
     async execute({ topic, workspace, normalize_workspace }, context) {
       const validationError = validateWorkspace(workspace);
       if (validationError) {
-        return { title: 'memory_atom_delete', output: `Error: ${validationError}` };
+        throw new Error(validationError);
       }
       try {
         const out = await spawnMemory($, ['atom-delete', context.directory], {
@@ -1309,10 +1298,7 @@ const AgentMemory = async ({ client, $ }) => {
         const location = formatLocation(result.scope, result.project);
         return { title: 'memory_atom_delete', output: `Deleted atom '${topic}' (${result.deleted} row removed) ${location}` };
       } catch (err) {
-        return {
-          title: 'memory_atom_delete',
-          output: `Error deleting atom: ${err && err.message ? err.message : String(err)}`,
-        };
+        throw new Error(spawnError(err));
       }
     },
   });
@@ -1350,10 +1336,7 @@ const AgentMemory = async ({ client, $ }) => {
         );
         return { title: 'memory_workspaces_list', output: lines.join('\n') };
       } catch (err) {
-        return {
-          title: 'memory_workspaces_list',
-          output: `Error listing workspaces: ${err && err.message ? err.message : String(err)}`,
-        };
+        throw new Error(spawnError(err));
       }
     },
   });

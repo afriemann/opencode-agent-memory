@@ -2692,3 +2692,181 @@ describe('read queries include summary field', () => {
     expect(alsoIn[0].summary).toBe('Foreign digest.');
   });
 });
+
+// ── atomPatch — always_include + summary combined (regression) ────────────────
+// Regression guard: combining always_include with another patchable field in one
+// atomPatch call must update both fields atomically.  These tests cover the
+// in-place (non-move) patch path.  The move-path regression guard (summary
+// preservation across workspace moves) is in the suite below.
+
+describe('atomPatch — always_include + summary combined patch', () => {
+  test('patching always_include=false and summary together updates both fields', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, {
+      scope: 'global', project: '',
+      topic: 'combined/patch-test',
+      content: 'body',
+      description: 'desc',
+      summary: 'old summary',
+      alwaysInclude: true,
+    });
+
+    const result = atomPatch(db, {
+      scope: 'global', project: '',
+      topic: 'combined/patch-test',
+      patch: { always_include: false, summary: 'LOAD THIS ATOM when working on any GitHub PR' },
+    });
+
+    expect(result.patched).toContain('always_include');
+    expect(result.patched).toContain('summary');
+
+    const row = db.prepare("SELECT always_include, summary FROM memory_atom WHERE topic='combined/patch-test'").get();
+    expect(row.always_include).toBe(0);
+    expect(row.summary).toBe('LOAD THIS ATOM when working on any GitHub PR');
+  });
+
+  test('patching always_include=true and description together updates both fields', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, {
+      scope: 'project', project: '/p',
+      topic: 'combined/patch-test-2',
+      content: 'body',
+      description: 'original description',
+    });
+
+    atomPatch(db, {
+      scope: 'project', project: '/p',
+      topic: 'combined/patch-test-2',
+      patch: { always_include: true, description: 'updated description' },
+    });
+
+    const row = db.prepare("SELECT always_include, description FROM memory_atom WHERE topic='combined/patch-test-2'").get();
+    expect(row.always_include).toBe(1);
+    expect(row.description).toBe('updated description');
+  });
+
+  test('patching always_include + summary + status together updates all three', () => {
+    const db = openMemory();
+    ensureSchema(db);
+    atomWrite(db, {
+      scope: 'global', project: '',
+      topic: 'combined/patch-test-3',
+      content: 'body',
+      description: 'desc',
+      summary: 'initial',
+      alwaysInclude: true,
+    });
+
+    const result = atomPatch(db, {
+      scope: 'global', project: '',
+      topic: 'combined/patch-test-3',
+      patch: { always_include: false, summary: 'new summary', status: 'resolved' },
+    });
+
+    expect(result.patched).toEqual(expect.arrayContaining(['always_include', 'summary', 'status']));
+
+    const row = db.prepare("SELECT always_include, summary, status FROM memory_atom WHERE topic='combined/patch-test-3'").get();
+    expect(row.always_include).toBe(0);
+    expect(row.summary).toBe('new summary');
+    expect(row.status).toBe('resolved');
+  });
+});
+
+// ── atomPatch move — summary preservation ────────────────────────────────────
+// Regression guard: atomPatch move path must preserve and correctly apply the
+// summary field.  Previously the SELECT and INSERT for the move path omitted
+// summary entirely, silently resetting it to '' on every move.
+
+describe('atomPatch move — summary preservation', () => {
+  let db;
+
+  beforeEach(() => {
+    db = openMemory();
+    ensureSchema(db);
+  });
+
+  afterEach(() => { db.close(); });
+
+  test('move preserves existing summary when summary not in patch', () => {
+    atomWrite(db, {
+      scope: 'project', project: '/src',
+      topic: 'movable/x',
+      content: 'body',
+      description: 'desc',
+      summary: 'Keep this summary across the move.',
+    });
+
+    atomPatch(db, {
+      source: { scope: 'project', project: '/src' },
+      dest:   { scope: 'project', project: '/dst' },
+      topic: 'movable/x',
+      patch: {},
+    });
+
+    const dest = db.prepare("SELECT summary FROM memory_atom WHERE project='/dst' AND topic='movable/x'").get();
+    expect(dest.summary).toBe('Keep this summary across the move.');
+  });
+
+  test('move + patch: new summary from patch overrides existing summary', () => {
+    atomWrite(db, {
+      scope: 'project', project: '/src',
+      topic: 'movable/y',
+      content: 'body',
+      description: 'desc',
+      summary: 'Old summary.',
+    });
+
+    atomPatch(db, {
+      source: { scope: 'project', project: '/src' },
+      dest:   { scope: 'global', project: '' },
+      topic: 'movable/y',
+      patch: { summary: 'New summary set during move.' },
+    });
+
+    const dest = db.prepare("SELECT summary FROM memory_atom WHERE scope='global' AND topic='movable/y'").get();
+    expect(dest.summary).toBe('New summary set during move.');
+  });
+
+  test('move preserves summary when atom had empty summary', () => {
+    atomWrite(db, {
+      scope: 'project', project: '/src',
+      topic: 'movable/z',
+      content: 'body',
+      description: 'desc',
+    });
+
+    atomPatch(db, {
+      source: { scope: 'project', project: '/src' },
+      dest:   { scope: 'project', project: '/dst' },
+      topic: 'movable/z',
+      patch: {},
+    });
+
+    const dest = db.prepare("SELECT summary FROM memory_atom WHERE project='/dst' AND topic='movable/z'").get();
+    expect(dest.summary).toBe('');
+  });
+
+  test('move preserves all fields including always_include and summary', () => {
+    atomWrite(db, {
+      scope: 'project', project: '/src',
+      topic: 'movable/full',
+      content: 'body',
+      description: 'desc',
+      summary: 'Preserved summary.',
+      alwaysInclude: true,
+    });
+
+    atomPatch(db, {
+      source: { scope: 'project', project: '/src' },
+      dest:   { scope: 'project', project: '/dst' },
+      topic: 'movable/full',
+      patch: {},
+    });
+
+    const dest = db.prepare("SELECT summary, always_include FROM memory_atom WHERE project='/dst' AND topic='movable/full'").get();
+    expect(dest.summary).toBe('Preserved summary.');
+    expect(dest.always_include).toBe(1);
+  });
+});

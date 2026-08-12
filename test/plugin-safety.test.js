@@ -1047,15 +1047,14 @@ describe('memory_state_inspect tool execute', () => {
     expect(system[1]).toBe(parsed.active_primer);
   });
 
-  test('returns error result instead of throwing when spawn fails', async () => {
+  test('throws when spawn fails', async () => {
     const $ = makeMockShell({}); // empty response → JSON.parse('') fails
     const plugin = await AgentMemory({ client: makeMockClient(), $ });
     const ctx = makeContext();
 
-    // Must not throw
-    const result = await expect(
+    await expect(
       plugin.tool.memory_state_inspect.execute({}, ctx)
-    ).resolves.toBeDefined();
+    ).rejects.toThrow();
   });
 
   test('uses session agent from session.get (not context.agent) as the CLI agent dimension', async () => {
@@ -1121,7 +1120,7 @@ describe('memory_state_patch tool execute', () => {
     expect(output).toContain('success');
   });
 
-  test('returns error result instead of throwing when spawn throws', async () => {
+  test('throws when spawn throws', async () => {
     // Build a $ that throws when the 'correct' subcommand is invoked, simulating
     // a subprocess exit-code error. All other calls (e.g. 'prune' at startup) return ''.
     const throwingShell = function (strings, ...values) {
@@ -1138,14 +1137,9 @@ describe('memory_state_patch tool execute', () => {
     const plugin = await AgentMemory({ client: makeMockClient(), $: throwingShell });
     const ctx = makeContext();
 
-    const result = await plugin.tool.memory_state_patch.execute(
-      { patch: { next_action: 'do it' } },
-      ctx
-    );
-
-    // Must resolve (not reject) and return an error result
-    const output = typeof result === 'string' ? result : result.output;
-    expect(output.toLowerCase()).toContain('error');
+    await expect(
+      plugin.tool.memory_state_patch.execute({ patch: { next_action: 'do it' } }, ctx)
+    ).rejects.toThrow(/spawn error/i);
   });
 
   test('uses session agent from session.get (not context.agent) as the CLI agent dimension', async () => {
@@ -1343,13 +1337,14 @@ describe('memory_state_delete tool execute', () => {
     return { sessionID, agentID: 'engineer', workspaceID: '/home/user/repo' };
   }
 
-  test('rejects deletion of the calling session own row', async () => {
+  test('throws when attempting deletion of the calling session own row', async () => {
     const $ = makeMockShell({});
     const plugin = await AgentMemory({ client: makeMockClient(), $ });
     const ctx = makeContext('ses_current');
 
-    const result = await plugin.tool.memory_state_delete.execute({ sessionId: 'ses_current' }, ctx);
-    expect(result.output).toContain('Cannot delete');
+    await expect(
+      plugin.tool.memory_state_delete.execute({ sessionId: 'ses_current' }, ctx)
+    ).rejects.toThrow(/Cannot delete/i);
   });
 
   test('passes sessionId to hot-state-delete CLI and returns result', async () => {
@@ -1990,7 +1985,7 @@ describe('workspace addressing (task 8.22)', () => {
 // spec: openspec/changes/atom-timestamps/specs/memory-atom-tools/spec.md
 
 describe('memory_atom_write invalid created_at', () => {
-  test('memory_atom_write returns error for invalid ISO date string', async () => {
+  test('memory_atom_write throws for invalid ISO date string', async () => {
     const $ = makeMockShell({
       read: COLD_READ,
       'atom-list': '[]',
@@ -2007,11 +2002,12 @@ describe('memory_atom_write invalid created_at', () => {
       ask: async () => {},
     };
 
-    const result = await plugin.tool.memory_atom_write.execute({
-      topic: 'bad-ts', content: 'body', description: 'desc', created_at: 'not-a-date',
-    }, ctx);
+    await expect(
+      plugin.tool.memory_atom_write.execute({
+        topic: 'bad-ts', content: 'body', description: 'desc', created_at: 'not-a-date',
+      }, ctx)
+    ).rejects.toThrow(/not a valid|invalid/i);
 
-    expect(result.output).toMatch(/not a valid|invalid/i);
     // No atom-write CLI call should have been made
     const atomWriteCalls = $.calls.filter((c) => c.includes('atom-write'));
     expect(atomWriteCalls).toHaveLength(0);
@@ -2274,29 +2270,32 @@ describe('memory_atom_patch tool', () => {
 
   test("Tool rejects invalid workspace (relative non-dot path)", async () => {
     const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
-    const result = await plugin.tool.memory_atom_patch.execute(
-      { topic: 'work/notes', workspace: 'relative/path', patch: { description: 'x' } },
-      makeCtx()
-    );
-    expect(result.output).toMatch(/absolute path|relative/i);
+    await expect(
+      plugin.tool.memory_atom_patch.execute(
+        { topic: 'work/notes', workspace: 'relative/path', patch: { description: 'x' } },
+        makeCtx()
+      )
+    ).rejects.toThrow(/absolute path|relative/i);
   });
 
   test('Tool rejects empty patch call', async () => {
     const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
-    const result = await plugin.tool.memory_atom_patch.execute(
-      { topic: 'work/notes', patch: {} },
-      makeCtx()
-    );
-    expect(result.output).toMatch(/at least one/i);
+    await expect(
+      plugin.tool.memory_atom_patch.execute(
+        { topic: 'work/notes', patch: {} },
+        makeCtx()
+      )
+    ).rejects.toThrow(/at least one/i);
   });
 
   test('memory_atom_patch rejects invalid created_at string', async () => {
     const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
-    const result = await plugin.tool.memory_atom_patch.execute(
-      { topic: 'work/notes', patch: { created_at: 'not-a-date' } },
-      makeCtx()
-    );
-    expect(result.output).toMatch(/not a valid ISO 8601/i);
+    await expect(
+      plugin.tool.memory_atom_patch.execute(
+        { topic: 'work/notes', patch: { created_at: 'not-a-date' } },
+        makeCtx()
+      )
+    ).rejects.toThrow(/not a valid ISO 8601/i);
   });
 
   test('Tool patches description and tags, returns confirmation naming changed fields', async () => {
@@ -2314,25 +2313,18 @@ describe('memory_atom_patch tool', () => {
     expect(result.output).toContain('tags');
   });
 
-  test('Tool surfaces error when atom does not exist', async () => {
+  test('Tool throws when atom does not exist', async () => {
     const $ = makeMockShell({}, {
       'atom-patch': { message: 'Atom does not exist', stderr: '[agent-memory/atom-patch] Atom does not exist' },
     });
     const plugin = await AgentMemory({ client: makeMockClient(), $ });
 
-    let threw = false;
-    let result;
-    try {
-      result = await plugin.tool.memory_atom_patch.execute(
+    await expect(
+      plugin.tool.memory_atom_patch.execute(
         { topic: 'arch/missing', patch: { description: 'x' } },
         makeCtx()
-      );
-    } catch {
-      threw = true;
-    }
-
-    expect(threw).toBe(false);
-    expect(result.output).toMatch(/error/i);
+      )
+    ).rejects.toThrow(/Atom does not exist/i);
   });
 });
 
@@ -2397,27 +2389,20 @@ describe('memory_atom_patch plugin-layer spec coverage', () => {
     }
   });
 
-  test('Tool rejects empty description', async () => {
+  test('Tool throws on empty description CLI error', async () => {
     // empty description is caught in the schema layer; this test confirms the
-    // plugin surfaces the CLI error as a non-throwing result.
+    // plugin propagates the CLI error as a thrown exception.
     const $ = makeMockShell({}, {
       'atom-patch': { message: 'Atom description must be a non-empty string', stderr: '[agent-memory/atom-patch] Atom description must be a non-empty string' },
     });
     const plugin = await AgentMemory({ client: makeMockClient(), $ });
 
-    let threw = false;
-    let result;
-    try {
-      result = await plugin.tool.memory_atom_patch.execute(
+    await expect(
+      plugin.tool.memory_atom_patch.execute(
         { topic: 'work/notes', patch: { description: '' } },
         makeCtx()
-      );
-    } catch {
-      threw = true;
-    }
-
-    expect(threw).toBe(false);
-    expect(result.output).toMatch(/error/i);
+      )
+    ).rejects.toThrow(/Atom description must be a non-empty string/i);
   });
 });
 
@@ -2524,15 +2509,6 @@ describe('memory_atom_patch pinned support', () => {
     const jsonMatch = atomPatchCall.match(/\{.*\}$/);
     const payload = JSON.parse(jsonMatch[0]);
     expect(payload.pinned).toBe(false);
-  });
-
-  test('memory_atom_patch with empty patch rejects when no fields present', async () => {
-    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
-    const result = await plugin.tool.memory_atom_patch.execute(
-      { topic: 'work/notes', patch: {} },
-      makeCtx()
-    );
-    expect(result.output).toMatch(/at least one/i);
   });
 });
 
@@ -2694,17 +2670,16 @@ describe('memory_atom_patch status support', () => {
     expect(payload.status).toBe('deprecated');
   });
 
-  test('patch with invalid status returns error output', async () => {
+  test('patch with invalid status throws', async () => {
     const $ = makeMockShell({});
     const plugin = await AgentMemory({ client: makeMockClient(), $ });
 
-    const result = await plugin.tool.memory_atom_patch.execute(
-      { topic: 'arch/notes', patch: { status: 'invalid-value' } },
-      makeCtx()
-    );
-
-    expect(result.output).toMatch(/Error/i);
-    expect(result.output).toContain('status');
+    await expect(
+      plugin.tool.memory_atom_patch.execute(
+        { topic: 'arch/notes', patch: { status: 'invalid-value' } },
+        makeCtx()
+      )
+    ).rejects.toThrow(/status/i);
   });
 
   test('patch without status field does not include status in CLI payload', async () => {
@@ -3365,11 +3340,12 @@ describe('workspace validation on write/mutate tools', () => {
 
   test('memory_atom_write rejects relative non-dot workspace', async () => {
     const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
-    const result = await plugin.tool.memory_atom_write.execute(
-      { topic: 't', content: 'c', description: 'd', workspace: 'relative/path' },
-      makeCtx()
-    );
-    expect(result.output).toMatch(/absolute path|relative/i);
+    await expect(
+      plugin.tool.memory_atom_write.execute(
+        { topic: 't', content: 'c', description: 'd', workspace: 'relative/path' },
+        makeCtx()
+      )
+    ).rejects.toThrow(/absolute path|relative/i);
   });
 
   test('memory_atom_write accepts null workspace (shared store)', async () => {
@@ -3394,11 +3370,12 @@ describe('workspace validation on write/mutate tools', () => {
 
   test('memory_atom_delete rejects relative non-dot workspace', async () => {
     const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
-    const result = await plugin.tool.memory_atom_delete.execute(
-      { topic: 't', workspace: 'relative/path' },
-      makeCtx()
-    );
-    expect(result.output).toMatch(/absolute path|relative/i);
+    await expect(
+      plugin.tool.memory_atom_delete.execute(
+        { topic: 't', workspace: 'relative/path' },
+        makeCtx()
+      )
+    ).rejects.toThrow(/absolute path|relative/i);
   });
 
   test('memory_atom_delete location suffix in output', async () => {

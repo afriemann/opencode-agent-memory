@@ -628,7 +628,7 @@ export function atomPatch(db, { scope, project, topic, patch, source, dest }) {
   try {
     // Read the full source row (needed for move to preserve all fields)
     const row = db
-      .prepare(`SELECT id, scope, project, topic, description, content, tags, pinned,
+      .prepare(`SELECT id, scope, project, topic, description, summary, content, tags, pinned,
                         always_include, status, session_id, session_name, created_at, updated_at
                 FROM memory_atom WHERE scope = ? AND project = ? AND topic = ?`)
       .get(srcScope, srcProject, normTopic);
@@ -670,6 +670,7 @@ export function atomPatch(db, { scope, project, topic, patch, source, dest }) {
       // Apply metadata patch fields to the in-memory row before inserting at dest.
       const now = Date.now();
       const description   = 'description'    in patch ? patch.description.trim()                    : row.description;
+      const summary       = 'summary'         in patch ? patch.summary.trim()                       : row.summary;
       const tagsJson      = 'tags'            in patch
         ? (Array.isArray(patch.tags) ? JSON.stringify(patch.tags) : '[]')
         : row.tags;
@@ -684,11 +685,12 @@ export function atomPatch(db, { scope, project, topic, patch, source, dest }) {
 
       db.prepare(`
         INSERT INTO memory_atom
-          (scope, project, topic, description, content, tags, pinned, always_include,
+          (scope, project, topic, description, summary, content, tags, pinned, always_include,
            status, session_id, session_name, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(scope, project, topic) DO UPDATE SET
           description    = excluded.description,
+          summary        = excluded.summary,
           content        = excluded.content,
           tags           = excluded.tags,
           pinned         = excluded.pinned,
@@ -700,7 +702,7 @@ export function atomPatch(db, { scope, project, topic, patch, source, dest }) {
           updated_at     = excluded.updated_at
       `).run(
         dstScope, dstProject, normTopic,
-        description, row.content, tagsJson, pinned, alwaysInclude,
+        description, summary, row.content, tagsJson, pinned, alwaysInclude,
         status, row.session_id, row.session_name,
         createdAt, now
       );
