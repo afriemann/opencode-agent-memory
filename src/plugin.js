@@ -20,7 +20,6 @@ import { fileURLToPath } from 'node:url';
 import { join, dirname, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import {
-  DISTIL_SCHEMA,
   buildDistilPrompt,
   parseDistilReply,
 } from './lib/distil-prompt.js';
@@ -519,7 +518,7 @@ const AgentMemory = async ({ client, $ }) => {
           body: {
             model: DISTILLER_MODEL,
             system: getDistillerPrompt(),
-            format: { type: 'json_schema', schema: DISTIL_SCHEMA, retryCount: 1 },
+            format: { type: 'text' },
             parts: [{ type: 'text', text: distilPrompt }],
           },
         });
@@ -539,41 +538,7 @@ const AgentMemory = async ({ client, $ }) => {
           }
         }
       } catch (err) {
-        log(`distil: json_schema call failed for ${sessionId}, trying text fallback`, err);
-      }
-
-      if (!distilled) {
-        try {
-          const res2 = await client.session.prompt({
-            path: { id: ephId },
-            body: {
-              model: DISTILLER_MODEL,
-              system: getDistillerPrompt(),
-              format: { type: 'text' },
-              parts: [{ type: 'text', text: distilPrompt }],
-            },
-          });
-          const parts = (res2 && res2.data && res2.data.parts) || [];
-          const text = parts
-            .filter((p) => p && p.type === 'text' && typeof p.text === 'string')
-            .map((p) => p.text)
-            .join('\n');
-          distilled = parseDistilReply(text);
-          if (distilled) {
-            log(`distil: json_schema failed, text fallback succeeded for ${sessionId}`);
-            // Extract cost from fallback response
-            const info2 = res2 && res2.data && res2.data.info;
-            if (info2) {
-              if (typeof info2.cost === 'number') distilCostUsd = info2.cost;
-              if (info2.tokens) {
-                if (typeof info2.tokens.input === 'number') distilTokensIn = info2.tokens.input;
-                if (typeof info2.tokens.output === 'number') distilTokensOut = info2.tokens.output;
-              }
-            }
-          }
-        } catch (err) {
-          log(`distil: text fallback call failed for ${sessionId}`, err);
-        }
+        log(`distil: text call failed for ${sessionId}`, err);
       }
 
       if (!distilled) {

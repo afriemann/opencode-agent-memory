@@ -1217,6 +1217,24 @@ describe('config hook — distiller agent registration', () => {
     expect(client._createCalls).toHaveLength(1);
     expect(client._createBodies[0]?.agent).toBe('distiller');
   });
+
+  test('distil makes exactly one prompt call using text format (no json_schema attempt)', async () => {
+    const $ = makeMockShell({ read: WARM_READ });
+    const client = makeMockClient();
+    const plugin = await AgentMemory({ client, $ });
+
+    await fire(plugin, 'session.idle', { sessionID: 'ses_distil_format_check' });
+
+    // The ephemeral session prompt call (distil) must be exactly one call,
+    // using format.type === 'text'. The old json_schema first attempt was
+    // always rejected by opencode 1.18.x and must not appear.
+    const distilPromptCalls = client._promptCalls.filter(
+      (c) => !c.body?.noReply,
+    );
+    expect(distilPromptCalls).toHaveLength(1);
+    expect(distilPromptCalls[0].body?.format?.type).toBe('text');
+    expect(distilPromptCalls[0].body?.format).not.toHaveProperty('schema');
+  });
 });
 
 describe('memory_distil_force tool execute', () => {
