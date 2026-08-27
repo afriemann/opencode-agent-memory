@@ -32,6 +32,7 @@ import {
   formatRelativeTime,
 } from './lib/signal-utils.js';
 import { loadConfigFile, resolveConfig } from './lib/config.js';
+import { SUMMARY_MAX_LENGTH } from './lib/schema.js';
 
 // ── Static config ────────────────────────────────────────────────────────────
 
@@ -72,7 +73,7 @@ You have persistent memory via the \`memory_atom_*\` and \`memory_state_*\` tool
 - A fact that would take real effort to re-discover: API quirks, undocumented behaviour, environment specifics
 - A reality correction — something that contradicts what documentation or prior assumptions suggest
 
-**Write a summary** (\`summary\` required on \`memory_atom_write\`): a one-sentence digest of what the content contains. Shown in listings so other agents can triage without fetching the full content. Max 280 chars. Distinct from \`description\` (which says what the atom is *for*). May go stale after \`memory_atom_append\` — re-patch when content changes significantly.
+**Write a summary** (\`summary\` required on \`memory_atom_write\`): a one-sentence digest of what the content contains. **Hard limit: ${SUMMARY_MAX_LENGTH} chars — the write fails if exceeded; aim for ~150 chars.** Shown in listings so other agents can triage without fetching the full content. Distinct from \`description\` (which says what the atom is *for*). May go stale after \`memory_atom_append\` — re-patch when content changes significantly.
 
 **Read before re-investigating**: before exploring a familiar domain, call \`memory_atom_search\` or \`memory_atom_list\` — previous findings may already be recorded. Use \`memory_atom_get\` to retrieve the full content of a specific atom.
 
@@ -733,9 +734,9 @@ const AgentMemory = async ({ client, $ }) => {
       content: tool.schema.string().describe('Full atom content'),
       description: tool.schema.string().describe('What this atom is for (required)'),
       summary: tool.schema.string().min(1).describe(
-        'One-sentence digest of what this atom\'s content contains (not the same as `description`, which says what the atom is for). ' +
-        'Shown in atom listings instead of a raw content preview, so make it actionable — another agent should be able to decide whether to fetch the full content just from reading this. ' +
-        'Max 280 chars.'
+        `Hard limit: ${SUMMARY_MAX_LENGTH} chars — the write fails if exceeded. Aim for ~150 chars. ` +
+        'One tight sentence summarising what this atom contains (distinct from `description`, which says what the atom is *for*). ' +
+        'Shown in atom listings so agents can triage without fetching the full content — make it actionable.'
       ),
       tags: tool.schema.array(tool.schema.string()).optional().describe('Optional tags'),
       workspace: tool.schema.union([tool.schema.string(), tool.schema.null()]).optional().describe(
@@ -1068,7 +1069,8 @@ const AgentMemory = async ({ client, $ }) => {
       '`patch.status` changes the atom\'s lifecycle visibility: "active" (default, all surfaces), ' +
       '"resolved" (hidden from primer; visible in list/search by default), or ' +
       '"deprecated" (hidden from all surfaces by default; retrieve with includeDeprecated: true). ' +
-      '`patch.summary` updates the one-sentence content digest shown in listings. Max 280 chars. ' +
+      '`patch.summary` replaces the one-sentence content digest shown in listings. ' +
+      `Hard limit: ${SUMMARY_MAX_LENGTH} chars — the write fails if exceeded. Aim for ~150 chars. ` +
       'Use to retroactively add a summary to older atoms that predate the summary field, or to correct a stale summary after significant content appends. ' +
       'Use memory_atom_write when you need to change the atom\'s content.',
     args: {

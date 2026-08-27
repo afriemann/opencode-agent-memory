@@ -41,6 +41,11 @@
 //     does not justify the drop/recreate/rebuild of the FTS5 virtual table).
 //   - PRAGMA user_version = 7 marks migration complete.
 
+// ── Shared validation constants ───────────────────────────────────────────────
+
+/** Hard maximum length (in UTF-16 code units) for an atom summary. */
+export const SUMMARY_MAX_LENGTH = 280;
+
 // ── Topic normalisation ───────────────────────────────────────────────────────
 
 /**
@@ -502,8 +507,8 @@ export function atomWrite(db, { scope, project, topic, content, description, sum
   if (typeof summary === 'string' && !trimmedSummary) {
     throw new Error('Atom summary must be a non-empty string when provided');
   }
-  if (trimmedSummary.length > 280) {
-    throw new Error('Atom summary must be 280 characters or fewer');
+  if (trimmedSummary.length > SUMMARY_MAX_LENGTH) {
+    throw new Error(`Atom summary must be ${SUMMARY_MAX_LENGTH} characters or fewer`);
   }
   const tagsJson = Array.isArray(tags)
     ? JSON.stringify(tags)
@@ -651,9 +656,9 @@ export function atomPatch(db, { scope, project, topic, patch, source, dest }) {
         db.exec('ROLLBACK');
         throw new Error('Atom summary must be a non-empty string');
       }
-      if (trimmedSummary.length > 280) {
+      if (trimmedSummary.length > SUMMARY_MAX_LENGTH) {
         db.exec('ROLLBACK');
-        throw new Error('Atom summary must be 280 characters or fewer');
+        throw new Error(`Atom summary must be ${SUMMARY_MAX_LENGTH} characters or fewer`);
       }
     }
 
