@@ -10,6 +10,17 @@
 
 import AgentMemory from '../src/plugin.js';
 import { jest } from '@jest/globals';
+
+/**
+ * Wrap AgentMemory with existsSync stubbed to `() => true` so tests that use
+ * fake filesystem paths (e.g. /proj, /home/user/repos/my/project) are not
+ * short-circuited by the deleted-directory guard in doDistil.
+ * Tests that specifically exercise the guard call AgentMemory() directly and
+ * pass their own existsSync.
+ */
+async function makePlugin(options) {
+  return AgentMemory({ existsSync: () => true, ...options });
+}
 import { reduceSignals, assemblePrimer, MAX_SIGNALS_PER_KIND, MAX_AGENT_SIGNALS } from '../src/lib/signal-utils.js';
 import { renderStaleness } from '../src/lib/git-helper.js';
 
@@ -192,7 +203,7 @@ describe('injection idempotency', () => {
   test('loads primer exactly once when session.created fires twice for the same session', async () => {
     const $ = makeMockShell({ read: WARM_READ });
     const client = makeMockClient();
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     const props = {
       sessionID: 'ses_001',
@@ -220,7 +231,7 @@ describe('injection idempotency', () => {
   test('does not load primer for cold start (no prior memory)', async () => {
     const $ = makeMockShell({ read: COLD_READ });
     const client = makeMockClient();
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     await fire(plugin, 'session.created', {
       sessionID: 'ses_cold',
@@ -248,7 +259,7 @@ describe('(agent, project) keying', () => {
         data: { agent: 'other-agent', directory: '/some/project', title: null },
       }),
     });
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     await fire(plugin, 'session.created', {
       sessionID: 'ses_other',
@@ -263,7 +274,7 @@ describe('(agent, project) keying', () => {
     // Use separate read responses keyed by project path presence
     const $ = makeMockShell({ read: WARM_READ });
     const client = makeMockClient();
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     await fire(plugin, 'session.created', {
       sessionID: 'ses_proj_a',
@@ -292,7 +303,7 @@ describe('ephemeral self-capture prevention', () => {
   test('session.created with EPHEMERAL_TITLE is added to ephemerals and not injected', async () => {
     const $ = makeMockShell({ read: WARM_READ });
     const client = makeMockClient();
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     // Simulate the session.created event for an ephemeral distil session
     await fire(plugin, 'session.created', {
@@ -307,7 +318,7 @@ describe('ephemeral self-capture prevention', () => {
   test('session.idle for a known ephemeral is skipped', async () => {
     const $ = makeMockShell({ read: WARM_READ });
     const client = makeMockClient();
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     // First mark it as ephemeral via session.created
     await fire(plugin, 'session.created', {
@@ -341,7 +352,7 @@ describe('idle-distil throttle', () => {
 
     const $ = makeMockShell({ read: throttledRead });
     const client = makeMockClient();
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     await fire(plugin, 'session.idle', { sessionID: 'ses_throttled' });
 
@@ -356,7 +367,7 @@ describe('fallback inject on message.updated', () => {
   test('loads primer when session was not primed by session.created', async () => {
     const $ = makeMockShell({ read: WARM_READ });
     const client = makeMockClient();
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     // No session.created fired — go straight to message.updated
     await fire(plugin, 'message.updated', {
@@ -378,7 +389,7 @@ describe('fallback inject on message.updated', () => {
   test('does not load primer twice when message.updated fires after session.created primed the session', async () => {
     const $ = makeMockShell({ read: WARM_READ });
     const client = makeMockClient();
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     // Primed by session.created first
     await fire(plugin, 'session.created', {
@@ -408,7 +419,7 @@ describe('buffer payload retention', () => {
   test('file.edited adds file paths to the buffer for the last active session', async () => {
     const $ = makeMockShell({ read: COLD_READ });
     const client = makeMockClient();
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     // Trigger a message.updated first so lastActiveSessionId is set
     await fire(plugin, 'message.updated', {
@@ -438,7 +449,7 @@ describe('buffer payload retention', () => {
     // Rebuild plugin with warm read to verify accrue path doesn't error
     const $2 = makeMockShell({ read: WARM_AFTER_FLUSH });
     const client2 = makeMockClient();
-    const plugin2 = await AgentMemory({ client: client2, $: $2 });
+    const plugin2 = await makePlugin({ client: client2, $: $2 });
 
     await fire(plugin2, 'message.updated', {
       sessionID: 'ses_buf',
@@ -458,7 +469,7 @@ describe('buffer payload retention', () => {
   test('todo.updated payloads are accumulated in the buffer', async () => {
     const $ = makeMockShell({ read: COLD_READ });
     const client = makeMockClient();
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     await fire(plugin, 'todo.updated', {
       sessionID: 'ses_todo',
@@ -479,7 +490,7 @@ describe('buffer payload retention', () => {
   test('D1 message classification only captures qualifying user messages', async () => {
     const $ = makeMockShell({ read: COLD_READ });
     const client = makeMockClient();
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     // Non-qualifying assistant message — should not crash or capture
     await fire(plugin, 'message.updated', {
@@ -513,7 +524,7 @@ describe('fail-safe degradation', () => {
     const client = makeMockClient({
       sessionGet: () => { throw new Error('network error'); },
     });
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     // Must not throw
     await expect(
@@ -529,7 +540,7 @@ describe('fail-safe degradation', () => {
     const client = makeMockClient({
       sessionGet: () => { throw new Error('timeout'); },
     });
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     await expect(
       fire(plugin, 'session.idle', { sessionID: 'ses_idle_fail' })
@@ -539,11 +550,37 @@ describe('fail-safe degradation', () => {
   test('session.idle does not throw when memory.js read fails', async () => {
     const $ = makeMockShell({}); // No read response → empty string → JSON.parse fails
     const client = makeMockClient();
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     await expect(
       fire(plugin, 'session.idle', { sessionID: 'ses_read_fail' })
     ).resolves.not.toThrow();
+  });
+
+  test('session.idle skips silently when session directory no longer exists on disk', async () => {
+    // Reproduces the toast shown when a session was opened inside a path that
+    // was subsequently deleted (e.g. a worktree removed after PR merge).
+    const DELETED_DIR = '/tmp/opencode-test-guard-nonexistent-dir-abc123';
+    const $ = makeMockShell({ read: WARM_READ });
+    const client = makeMockClient({
+      sessionGet: () => ({
+        data: { agent: 'engineer', directory: DELETED_DIR, title: null },
+      }),
+    });
+    // Pass the real existsSync (or a stub returning false) — the directory
+    // does NOT exist, so the guard should fire and abort before any spawn.
+    const plugin = await AgentMemory({ client, $, existsSync: () => false });
+
+    // Guard must have returned before any shell spawn.
+    // The factory emits one 'prune' call at construction — capture the count
+    // before firing session.idle so we can assert no new spawns were added.
+    const callsBefore = $.calls.length;
+    await expect(
+      fire(plugin, 'session.idle', { sessionID: 'ses_dead_dir' })
+    ).resolves.not.toThrow();
+
+    // Guard must have returned before any shell spawn (no read, no distil).
+    expect($.calls).toHaveLength(callsBefore);
   });
 
   test('session.idle does not throw when model call fails', async () => {
@@ -551,7 +588,7 @@ describe('fail-safe degradation', () => {
     const client = makeMockClient({
       sessionPrompt: () => { throw new Error('model unavailable'); },
     });
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     await expect(
       fire(plugin, 'session.idle', { sessionID: 'ses_model_fail' })
@@ -564,7 +601,7 @@ describe('fail-safe degradation', () => {
     const client = makeMockClient({
       sessionCreate: () => ({ data: {} }), // no id field
     });
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     await expect(
       fire(plugin, 'session.idle', { sessionID: 'ses_create_no_id' })
@@ -724,14 +761,14 @@ describe('assemblePrimer (smoke — new options-object API)', () => {
 
 describe('experimental.chat.system.transform hook', () => {
   test('hook is present on the returned hooks object', async () => {
-    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
+    const plugin = await makePlugin({ client: makeMockClient(), $: makeMockShell({}) });
     expect(typeof plugin['experimental.chat.system.transform']).toBe('function');
   });
 
   test('appends primer to output.system after session.created with prior memory', async () => {
     const $ = makeMockShell({ read: WARM_READ });
     const client = makeMockClient();
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     await fire(plugin, 'session.created', {
       sessionID: 'ses_transform_warm',
@@ -747,7 +784,7 @@ describe('experimental.chat.system.transform hook', () => {
   test('injects only protocol for cold start (no prior memory)', async () => {
     const $ = makeMockShell({ read: COLD_READ });
     const client = makeMockClient();
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     await fire(plugin, 'session.created', {
       sessionID: 'ses_transform_cold',
@@ -761,7 +798,7 @@ describe('experimental.chat.system.transform hook', () => {
 
   test('does not append when sessionID is absent from hook input', async () => {
     const $ = makeMockShell({ read: WARM_READ });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     const output = { system: [] };
     const hook = plugin['experimental.chat.system.transform'];
@@ -772,7 +809,7 @@ describe('experimental.chat.system.transform hook', () => {
 
   test('does not append for an ephemeral distil session', async () => {
     const $ = makeMockShell({ read: WARM_READ });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     // Register the session as ephemeral via session.created with ephemeral title
     await fire(plugin, 'session.created', {
@@ -788,7 +825,7 @@ describe('experimental.chat.system.transform hook', () => {
     // Build a plugin then corrupt the primers Map to simulate an internal error.
     // The hook must not propagate the error.
     const $ = makeMockShell({ read: WARM_READ });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     // Load the primer normally
     await fire(plugin, 'session.created', {
@@ -810,7 +847,7 @@ describe('primerLoaded ⊇ keys(primers) invariant', () => {
   test('cold-start session is load-attempted (no re-read on message.updated) but has no primer', async () => {
     const $ = makeMockShell({ read: COLD_READ });
     const client = makeMockClient();
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     // session.created fires for cold start
     await fire(plugin, 'session.created', {
@@ -845,7 +882,7 @@ describe('primer load log-line emission', () => {
     try {
       const $ = makeMockShell({ read: WARM_READ });
       const client = makeMockClient();
-      const plugin = await AgentMemory({ client, $ });
+      const plugin = await makePlugin({ client, $ });
 
       await fire(plugin, 'session.created', {
         sessionID: 'ses_log_test',
@@ -869,7 +906,7 @@ describe('primer load log-line emission', () => {
     try {
       const $ = makeMockShell({ read: COLD_READ });
       const client = makeMockClient();
-      const plugin = await AgentMemory({ client, $ });
+      const plugin = await makePlugin({ client, $ });
 
       await fire(plugin, 'session.created', {
         sessionID: 'ses_log_cold',
@@ -889,7 +926,7 @@ describe('primer load log-line emission', () => {
 describe('startup prune', () => {
   test('AgentMemory factory calls spawnMemory(["prune"]) on startup', async () => {
     const $ = makeMockShell({});
-    await AgentMemory({ client: makeMockClient(), $ });
+    await makePlugin({ client: makeMockClient(), $ });
     expect($.calls.some((c) => /\bprune\b/.test(c))).toBe(true);
   });
 });
@@ -916,7 +953,7 @@ describe('doDistil force parameter — throttle regression', () => {
 
     const $ = makeMockShell({ read: throttledRead });
     const client = makeMockClient();
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     // Fire a normal (non-forced) session.idle
     await fire(plugin, 'session.idle', { sessionID: 'ses_throttle_regression' });
@@ -939,7 +976,7 @@ const ALL_TOOLS = [
 describe('plugin tool hook — factory returns tool map', () => {
   test('AgentMemory factory returns exactly twelve tools', async () => {
     const $ = makeMockShell({});
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     expect(plugin).toHaveProperty('event');
     expect(plugin).toHaveProperty('tool');
@@ -951,7 +988,7 @@ describe('plugin tool hook — factory returns tool map', () => {
 
   test('no legacy tool names present', async () => {
     const $ = makeMockShell({});
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     expect(plugin.tool).not.toHaveProperty('memory_inspect');
     expect(plugin.tool).not.toHaveProperty('memory_correct');
@@ -960,7 +997,7 @@ describe('plugin tool hook — factory returns tool map', () => {
 
   test('each tool has description, args, and execute', async () => {
     const $ = makeMockShell({});
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     for (const name of ALL_TOOLS) {
       const t = plugin.tool[name];
@@ -990,7 +1027,7 @@ describe('memory_state_inspect tool execute', () => {
   test('delegates to memory.js inspect with the resolved session agent and context.directory', async () => {
     const inspectResult = { prior: { last_worked_summary: 'done' }, signals: [] };
     const $ = makeMockShell({ inspect: JSON.stringify(inspectResult) });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const ctx = makeContext();
 
     const result = await plugin.tool.memory_state_inspect.execute({}, ctx);
@@ -1006,7 +1043,7 @@ describe('memory_state_inspect tool execute', () => {
   test('active_primer is null when no primer is cached for the session', async () => {
     const inspectResult = { prior: null, signals: [] };
     const $ = makeMockShell({ inspect: JSON.stringify(inspectResult) });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     // No session.created fired — no primer loaded
     const ctx = makeContext({ sessionID: 'ses_no_primer' });
 
@@ -1023,7 +1060,7 @@ describe('memory_state_inspect tool execute', () => {
       inspect: JSON.stringify(inspectResult),
     });
     const client = makeMockClient();
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     // Load primer via session.created
     await fire(plugin, 'session.created', {
@@ -1049,7 +1086,7 @@ describe('memory_state_inspect tool execute', () => {
 
   test('throws when spawn fails', async () => {
     const $ = makeMockShell({}); // empty response → JSON.parse('') fails
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const ctx = makeContext();
 
     await expect(
@@ -1061,7 +1098,7 @@ describe('memory_state_inspect tool execute', () => {
     const inspectResult = { prior: null, signals: [] };
     const $ = makeMockShell({ inspect: JSON.stringify(inspectResult) });
     // session.get returns 'engineer' which is in TARGET_AGENTS
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     // context.agent is a different value; CLI must use the session's agent, not context.agent
     const ctx = makeContext({ agent: 'other-agent' });
@@ -1078,7 +1115,7 @@ describe('memory_state_inspect tool execute', () => {
     process.env.MEMORY_TARGET_AGENTS = 'code-reviewer'; // 'engineer' not tracked
     const $ = makeMockShell({});
     // session.get returns 'engineer' which is NOT in TARGET_AGENTS
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const ctx = makeContext();
 
     const result = await plugin.tool.memory_state_inspect.execute({}, ctx);
@@ -1107,7 +1144,7 @@ describe('memory_state_patch tool execute', () => {
 
   test('delegates to memory.js correct with serialised patch', async () => {
     const $ = makeMockShell({ correct: JSON.stringify({ ok: true }) });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const ctx = makeContext();
 
     const result = await plugin.tool.memory_state_patch.execute(
@@ -1134,7 +1171,7 @@ describe('memory_state_patch tool execute', () => {
     };
     throwingShell.calls = [];
 
-    const plugin = await AgentMemory({ client: makeMockClient(), $: throwingShell });
+    const plugin = await makePlugin({ client: makeMockClient(), $: throwingShell });
     const ctx = makeContext();
 
     await expect(
@@ -1144,7 +1181,7 @@ describe('memory_state_patch tool execute', () => {
 
   test('uses session agent from session.get (not context.agent) as the CLI agent dimension', async () => {
     const $ = makeMockShell({ correct: JSON.stringify({ ok: true }) });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const ctx = makeContext({ agent: 'different-agent' });
 
     await plugin.tool.memory_state_patch.execute({ patch: { next_action: 'x' } }, ctx);
@@ -1158,7 +1195,7 @@ describe('memory_state_patch tool execute', () => {
     const savedEnv = process.env.MEMORY_TARGET_AGENTS;
     process.env.MEMORY_TARGET_AGENTS = 'code-reviewer';
     const $ = makeMockShell({});
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const ctx = makeContext();
 
     const result = await plugin.tool.memory_state_patch.execute({ patch: { next_action: 'x' } }, ctx);
@@ -1173,11 +1210,11 @@ describe('memory_state_patch tool execute', () => {
 
 describe('config hook — distiller agent registration', () => {
   test('AgentMemory factory returns a config hook', async () => {
-    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
+    const plugin = await makePlugin({ client: makeMockClient(), $: makeMockShell({}) });
     expect(typeof plugin.config).toBe('function');
   });
   test('config hook registers distiller agent with mode, hidden, and deny-all permission', async () => {
-    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
+    const plugin = await makePlugin({ client: makeMockClient(), $: makeMockShell({}) });
     const cfg = {};
     await plugin.config(cfg);
     expect(cfg.agent).toBeDefined();
@@ -1193,14 +1230,14 @@ describe('config hook — distiller agent registration', () => {
     // (e.g. /tmp files from file.edited signals). external_directory must be
     // explicitly denied so opencode's path-level gate does not surface a
     // desktop permission prompt before the tool-level deny fires.
-    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
+    const plugin = await makePlugin({ client: makeMockClient(), $: makeMockShell({}) });
     const cfg = {};
     await plugin.config(cfg);
     expect(cfg.agent['distiller'].permission.external_directory).toBe('deny');
   });
 
   test('config hook does not overwrite existing agent entries', async () => {
-    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
+    const plugin = await makePlugin({ client: makeMockClient(), $: makeMockShell({}) });
     const cfg = { agent: { engineer: { existing: true } } };
     await plugin.config(cfg);
     expect(cfg.agent.engineer).toEqual({ existing: true });
@@ -1210,7 +1247,7 @@ describe('config hook — distiller agent registration', () => {
   test('session.create is called with agent: distiller on distil', async () => {
     const $ = makeMockShell({ read: WARM_READ });
     const client = makeMockClient();
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     await fire(plugin, 'session.idle', { sessionID: 'ses_distil_agent_check' });
 
@@ -1221,7 +1258,7 @@ describe('config hook — distiller agent registration', () => {
   test('distil makes exactly one prompt call using text format (no json_schema attempt)', async () => {
     const $ = makeMockShell({ read: WARM_READ });
     const client = makeMockClient();
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     await fire(plugin, 'session.idle', { sessionID: 'ses_distil_format_check' });
 
@@ -1268,7 +1305,7 @@ describe('memory_distil_force tool execute', () => {
 
     const $ = makeMockShell({ read: throttledRead });
     const client = makeMockClient();
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     const ctx = makeContext();
     await plugin.tool.memory_state_distil.execute({}, ctx);
@@ -1300,7 +1337,7 @@ describe('memory_distil_force tool execute', () => {
 
     const $ = makeMockShell({ read: throttledRead });
     const client = makeMockClient();
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     // Forced distil — bypasses throttle, creates 1 ephemeral session
     const ctx = makeContext({ sessionID: 'ses_force_then_idle' });
@@ -1320,7 +1357,7 @@ describe('memory_distil_force tool execute', () => {
     const client = makeMockClient({
       sessionGet: () => ({ data: { agent: 'different-agent', directory: '/proj' } }),
     });
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     const ctx = makeContext({ sessionID: 'ses_non_target_force' });
     const result = await plugin.tool.memory_state_distil.execute({}, ctx);
@@ -1337,7 +1374,7 @@ describe('memory_distil_force tool execute', () => {
       // session.get throws so doDistil returns early (no create call)
       sessionGet: () => { throw new Error('forced failure'); },
     });
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
     const ctx = makeContext();
 
     // Must not throw regardless of the internal failure
@@ -1357,7 +1394,7 @@ describe('memory_state_delete tool execute', () => {
 
   test('throws when attempting deletion of the calling session own row', async () => {
     const $ = makeMockShell({});
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const ctx = makeContext('ses_current');
 
     await expect(
@@ -1369,7 +1406,7 @@ describe('memory_state_delete tool execute', () => {
     const $ = makeMockShell({
       'hot-state-delete': JSON.stringify({ deleted: 1 }),
     });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const ctx = { sessionID: 'ses_caller', agentID: 'engineer', directory: '/home/user/repo' };
 
     const result = await plugin.tool.memory_state_delete.execute({ sessionId: 'ses_other' }, ctx);
@@ -1395,7 +1432,7 @@ describe('error observability', () => {
     const client = makeMockClient();
     const stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
-      const plugin = await AgentMemory({ client, $ });
+      const plugin = await makePlugin({ client, $ });
       await fire(plugin, 'session.idle', { sessionID: 'ses_eo_1' });
 
       expect(client.app.log).toHaveBeenCalled();
@@ -1418,7 +1455,7 @@ describe('error observability', () => {
     const client = makeMockClient();
     const stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
-      const plugin = await AgentMemory({ client, $ });
+      const plugin = await makePlugin({ client, $ });
       await fire(plugin, 'session.idle', { sessionID: 'ses_eo_2' });
 
       expect(client._appLogCalls.length).toBeGreaterThan(0);
@@ -1435,7 +1472,7 @@ describe('error observability', () => {
     const client = makeMockClient({ appLogThrows: true });
     const stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
-      const plugin = await AgentMemory({ client, $ });
+      const plugin = await makePlugin({ client, $ });
       await fire(plugin, 'session.idle', { sessionID: 'ses_eo_3' });
 
       const stderrOutput = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
@@ -1451,7 +1488,7 @@ describe('error observability', () => {
     const client = makeMockClient();
     const stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
-      const plugin = await AgentMemory({ client, $ });
+      const plugin = await makePlugin({ client, $ });
       await fire(plugin, 'session.idle', { sessionID: 'ses_eo_4' });
 
       expect(client.tui.showToast).toHaveBeenCalled();
@@ -1468,7 +1505,7 @@ describe('error observability', () => {
     const client = makeMockClient();
     const stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
-      const plugin = await AgentMemory({ client, $ });
+      const plugin = await makePlugin({ client, $ });
       await fire(plugin, 'session.idle', { sessionID: 'ses_eo_5' });
 
       // Both observability channels must have been notified for a critical read failure.
@@ -1486,7 +1523,7 @@ describe('error observability', () => {
     const client = makeMockClient();
     const stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
-      const plugin = await AgentMemory({ client, $ });
+      const plugin = await makePlugin({ client, $ });
 
       // A properties object whose sessionID getter throws synchronously.
       // Optional chaining (?.) only guards against null/undefined, not thrown
@@ -1515,7 +1552,7 @@ describe('error observability', () => {
     });
     const stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
-      const plugin = await AgentMemory({ client, $ });
+      const plugin = await makePlugin({ client, $ });
       await fire(plugin, 'session.idle', { sessionID: 'ses_eo_7' });
 
       // The error should still be logged...
@@ -1549,7 +1586,7 @@ describe('resolveSessionAgent cache-hit behaviour', () => {
     const inspectResult = { prior: null, signals: [] };
     const $ = makeMockShell({ inspect: JSON.stringify(inspectResult) });
     const client = makeMockClient();
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
     const ctx = makeContext();
 
     // Two back-to-back tool invocations for the same sessionID
@@ -1568,7 +1605,7 @@ describe('resolveSessionAgent cache-hit behaviour', () => {
       inspect: JSON.stringify(inspectResult),
     });
     const client = makeMockClient();
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     // session.created populates the sessionAgents map
     await fire(plugin, 'session.created', {
@@ -1609,7 +1646,7 @@ describe('memory_distil_force — not-tracked session', () => {
     process.env.MEMORY_TARGET_AGENTS = 'code-reviewer';
     const $ = makeMockShell({});
     const client = makeMockClient();
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
     const ctx = makeContext();
 
     const result = await plugin.tool.memory_state_distil.execute({}, ctx);
@@ -1626,7 +1663,7 @@ describe('memory_distil_force — not-tracked session', () => {
       sessionGet: () => ({ data: { agent: null, directory: '/proj', title: null } }),
     });
     const $ = makeMockShell({});
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
     const ctx = makeContext();
 
     const result = await plugin.tool.memory_state_distil.execute({}, ctx);
@@ -1652,7 +1689,7 @@ describe('multi-agent tracking', () => {
         },
       }),
     });
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     await fire(plugin, 'session.created', {
       sessionID: 'ses_eng',
@@ -1680,7 +1717,7 @@ describe('multi-agent tracking', () => {
     const client = makeMockClient({
       sessionGet: () => ({ data: { agent: 'architect', directory: '/proj', title: null } }),
     });
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     await fire(plugin, 'session.created', {
       sessionID: 'ses_arch',
@@ -1702,7 +1739,7 @@ describe('multi-agent tracking', () => {
     const client = makeMockClient({
       sessionGet: () => ({ data: { agent: null, directory: '/proj', title: null } }),
     });
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     await fire(plugin, 'session.created', {
       sessionID: 'ses_null_agent',
@@ -1746,7 +1783,7 @@ describe('session.created — sessionNames capture (task 8.21)', () => {
 
   test('session title is captured from event info.title', async () => {
     const $ = makeMockShell({ read: COLD_READ, 'atom-list': '[]' });
-    const plugin = await AgentMemory({ client: makeBasicClient(), $ });
+    const plugin = await makePlugin({ client: makeBasicClient(), $ });
 
     await plugin.event({ event: {
       type: 'session.created',
@@ -1792,7 +1829,7 @@ describe('session.created — sessionNames capture (task 8.21)', () => {
     };
     wrappedShell.calls = origFn.calls;
 
-    const plugin = await AgentMemory({ client, $: wrappedShell });
+    const plugin = await makePlugin({ client, $: wrappedShell });
 
     // session.created fires with a stale default title (empty/null here)
     await plugin.event({ event: {
@@ -1813,7 +1850,7 @@ describe('session.created — sessionNames capture (task 8.21)', () => {
 
   test('cold start with no atoms results in no primer (null)', async () => {
     const $ = makeMockShell({ read: COLD_READ, 'atom-list': '[]' });
-    const plugin = await AgentMemory({ client: makeBasicClient(), $ });
+    const plugin = await makePlugin({ client: makeBasicClient(), $ });
 
     await plugin.event({ event: {
       type: 'session.created',
@@ -1848,7 +1885,7 @@ describe('workspace addressing (task 8.22)', () => {
       return obj;
     };
 
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const ctx = {
       sessionID: 'ses-scope-test',
       directory: '/my/workspace',
@@ -1880,7 +1917,7 @@ describe('workspace addressing (task 8.22)', () => {
       return obj;
     };
 
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const ctx = {
       sessionID: 'ses-global-scope',
       directory: '/my/workspace',
@@ -1910,7 +1947,7 @@ describe('workspace addressing (task 8.22)', () => {
       return obj;
     };
 
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const ctx = {
       sessionID: 'ses-all-scope',
       directory: '/my/workspace',
@@ -1938,7 +1975,7 @@ describe('workspace addressing (task 8.22)', () => {
       return obj;
     };
 
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const ctx = {
       sessionID: 'ses-ts-iso',
       directory: '/my/workspace',
@@ -1974,7 +2011,7 @@ describe('workspace addressing (task 8.22)', () => {
       return obj;
     };
 
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const ctx = {
       sessionID: 'ses-ts-num',
       directory: '/my/workspace',
@@ -2008,7 +2045,7 @@ describe('memory_atom_write invalid created_at', () => {
       read: COLD_READ,
       'atom-list': '[]',
     });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const ctx = {
       sessionID: 'ses-invalid-iso',
       directory: '/my/workspace',
@@ -2053,7 +2090,7 @@ describe('memory_atom_get timestamp output', () => {
       'atom-get': fakeGetResponse,
     });
 
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const ctx = {
       sessionID: 'ses-ts-get',
       directory: '/my/workspace',
@@ -2094,7 +2131,7 @@ describe('memory_atom_search timestamp output', () => {
       'atom-search': fakeSearchResponse,
     });
 
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const ctx = {
       sessionID: 'ses-ts-search',
       directory: '/my/workspace',
@@ -2134,7 +2171,7 @@ describe('memory_atom_list timestamp output', () => {
       'atom-list': fakeListResponse,
     });
 
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const ctx = {
       sessionID: 'ses-ts-list',
       directory: '/my/workspace',
@@ -2188,7 +2225,7 @@ describe('memory_atom_get workspace arg changes resolution directory', () => {
     });
 
     const $ = makeMockShell({ 'atom-get': fakeGetResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const ctx = makeCtx('/current/workspace');
 
     const result = await plugin.tool.memory_atom_get.execute(
@@ -2226,7 +2263,7 @@ describe('memory_atom_get workspace arg changes resolution directory', () => {
     });
 
     const $ = makeMockShell({ 'atom-get': fakeGetResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const ctx = makeCtx('/current/workspace');
 
     const result = await plugin.tool.memory_atom_get.execute({ topic: 'arch/db' }, ctx);
@@ -2252,7 +2289,7 @@ describe('memory_atom_get workspace arg changes resolution directory', () => {
     });
 
     const $ = makeMockShell({ 'atom-get': fakeGetResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const ctx = makeCtx('/current/workspace');
 
     const result = await plugin.tool.memory_atom_get.execute({ topic: 'arch/db' }, ctx);
@@ -2281,13 +2318,13 @@ describe('memory_atom_patch tool', () => {
   }
 
   test('memory_atom_patch is registered in tool export', async () => {
-    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
+    const plugin = await makePlugin({ client: makeMockClient(), $: makeMockShell({}) });
     expect(plugin.tool).toHaveProperty('memory_atom_patch');
     expect(typeof plugin.tool.memory_atom_patch.execute).toBe('function');
   });
 
   test("Tool rejects invalid workspace (relative non-dot path)", async () => {
-    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
+    const plugin = await makePlugin({ client: makeMockClient(), $: makeMockShell({}) });
     await expect(
       plugin.tool.memory_atom_patch.execute(
         { topic: 'work/notes', workspace: 'relative/path', patch: { description: 'x' } },
@@ -2297,7 +2334,7 @@ describe('memory_atom_patch tool', () => {
   });
 
   test('Tool rejects empty patch call', async () => {
-    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
+    const plugin = await makePlugin({ client: makeMockClient(), $: makeMockShell({}) });
     await expect(
       plugin.tool.memory_atom_patch.execute(
         { topic: 'work/notes', patch: {} },
@@ -2307,7 +2344,7 @@ describe('memory_atom_patch tool', () => {
   });
 
   test('memory_atom_patch rejects invalid created_at string', async () => {
-    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
+    const plugin = await makePlugin({ client: makeMockClient(), $: makeMockShell({}) });
     await expect(
       plugin.tool.memory_atom_patch.execute(
         { topic: 'work/notes', patch: { created_at: 'not-a-date' } },
@@ -2319,7 +2356,7 @@ describe('memory_atom_patch tool', () => {
   test('Tool patches description and tags, returns confirmation naming changed fields', async () => {
     const fakePatchResponse = JSON.stringify({ ok: true, topic: 'work/notes', patched: ['description', 'tags'] });
     const $ = makeMockShell({ 'atom-patch': fakePatchResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     const result = await plugin.tool.memory_atom_patch.execute(
       { topic: 'work/notes', patch: { description: 'new desc', tags: ['t'] } },
@@ -2335,7 +2372,7 @@ describe('memory_atom_patch tool', () => {
     const $ = makeMockShell({}, {
       'atom-patch': { message: 'Atom does not exist', stderr: '[agent-memory/atom-patch] Atom does not exist' },
     });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     await expect(
       plugin.tool.memory_atom_patch.execute(
@@ -2368,7 +2405,7 @@ describe('memory_atom_patch plugin-layer spec coverage', () => {
     // This test verifies the normalised integer is what reaches the CLI.
     const fakePatchResponse = JSON.stringify({ ok: true, topic: 'work/notes', patched: ['created_at'] });
     const $ = makeMockShell({ 'atom-patch': fakePatchResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     await plugin.tool.memory_atom_patch.execute(
       { topic: 'work/notes', patch: { created_at: '2025-01-01T00:00:00.000Z' } },
@@ -2387,7 +2424,7 @@ describe('memory_atom_patch plugin-layer spec coverage', () => {
     // holds end-to-end from the plugin perspective).
     const fakePatchResponse = JSON.stringify({ ok: true, topic: 'work/notes', patched: ['created_at'] });
     const $ = makeMockShell({ 'atom-patch': fakePatchResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     await plugin.tool.memory_atom_patch.execute(
       { topic: 'work/notes', patch: { created_at: 1700000000000 } },
@@ -2413,7 +2450,7 @@ describe('memory_atom_patch plugin-layer spec coverage', () => {
     const $ = makeMockShell({}, {
       'atom-patch': { message: 'Atom description must be a non-empty string', stderr: '[agent-memory/atom-patch] Atom description must be a non-empty string' },
     });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     await expect(
       plugin.tool.memory_atom_patch.execute(
@@ -2444,7 +2481,7 @@ describe('memory_atom_write pinned support', () => {
   test('memory_atom_write forwards pinned:true to CLI', async () => {
     const fakeWriteResponse = JSON.stringify({ ok: true, action: 'created', message: 'Created atom at pinned/fact' });
     const $ = makeMockShell({ 'atom-write': fakeWriteResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     await plugin.tool.memory_atom_write.execute(
       { topic: 'pinned/fact', content: 'x', description: 'd', pinned: true },
@@ -2462,7 +2499,7 @@ describe('memory_atom_write pinned support', () => {
   test('memory_atom_write with pinned omitted does not set pinned in payload', async () => {
     const fakeWriteResponse = JSON.stringify({ ok: true, action: 'created', message: 'Created atom at regular/fact' });
     const $ = makeMockShell({ 'atom-write': fakeWriteResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     await plugin.tool.memory_atom_write.execute(
       { topic: 'regular/fact', content: 'x', description: 'd' },
@@ -2497,7 +2534,7 @@ describe('memory_atom_patch pinned support', () => {
   test('memory_atom_patch with patch:{pinned:true} is accepted and forwarded to CLI', async () => {
     const fakePatchResponse = JSON.stringify({ ok: true, topic: 'work/notes', patched: ['pinned'] });
     const $ = makeMockShell({ 'atom-patch': fakePatchResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     const result = await plugin.tool.memory_atom_patch.execute(
       { topic: 'work/notes', patch: { pinned: true } },
@@ -2516,7 +2553,7 @@ describe('memory_atom_patch pinned support', () => {
   test('memory_atom_patch with patch:{pinned:false} unpins and is forwarded to CLI', async () => {
     const fakePatchResponse = JSON.stringify({ ok: true, topic: 'work/notes', patched: ['pinned'] });
     const $ = makeMockShell({ 'atom-patch': fakePatchResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     await plugin.tool.memory_atom_patch.execute(
       { topic: 'work/notes', patch: { pinned: false } },
@@ -2557,7 +2594,7 @@ describe('memory_atom_list [pinned] display', () => {
     ]);
 
     const $ = makeMockShell({ 'atom-list': fakeListResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const result = await plugin.tool.memory_atom_list.execute({}, makeCtx());
 
     expect(result.output).toContain('[pinned]');
@@ -2574,7 +2611,7 @@ describe('memory_atom_list [pinned] display', () => {
     ]);
 
     const $ = makeMockShell({ 'atom-list': fakeListResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const result = await plugin.tool.memory_atom_list.execute({}, makeCtx());
 
     expect(result.output).not.toContain('[pinned]');
@@ -2596,7 +2633,7 @@ describe('memory_atom_list [pinned] display', () => {
     ]);
 
     const $ = makeMockShell({ 'atom-list': fakeListResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const result = await plugin.tool.memory_atom_list.execute({}, makeCtx());
 
     const lines = result.output.split('\n');
@@ -2624,7 +2661,7 @@ describe('memory_atom_patch pinned — absent field does not leak into payload',
   test('patch without pinned field does not include pinned in CLI payload', async () => {
     const fakePatchResponse = JSON.stringify({ ok: true, topic: 'work/notes', patched: ['description'] });
     const $ = makeMockShell({ 'atom-patch': fakePatchResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     await plugin.tool.memory_atom_patch.execute(
       { topic: 'work/notes', patch: { description: 'updated desc' } },
@@ -2660,7 +2697,7 @@ describe('memory_atom_patch status support', () => {
   test('patch with status="resolved" passes status in CLI payload', async () => {
     const fakePatchResponse = JSON.stringify({ ok: true, topic: 'arch/notes', patched: ['status'] });
     const $ = makeMockShell({ 'atom-patch': fakePatchResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     await plugin.tool.memory_atom_patch.execute(
       { topic: 'arch/notes', patch: { status: 'resolved' } },
@@ -2676,7 +2713,7 @@ describe('memory_atom_patch status support', () => {
   test('patch with status="deprecated" passes status in CLI payload', async () => {
     const fakePatchResponse = JSON.stringify({ ok: true, topic: 'arch/notes', patched: ['status'] });
     const $ = makeMockShell({ 'atom-patch': fakePatchResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     await plugin.tool.memory_atom_patch.execute(
       { topic: 'arch/notes', patch: { status: 'deprecated' } },
@@ -2690,7 +2727,7 @@ describe('memory_atom_patch status support', () => {
 
   test('patch with invalid status throws', async () => {
     const $ = makeMockShell({});
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     await expect(
       plugin.tool.memory_atom_patch.execute(
@@ -2703,7 +2740,7 @@ describe('memory_atom_patch status support', () => {
   test('patch without status field does not include status in CLI payload', async () => {
     const fakePatchResponse = JSON.stringify({ ok: true, topic: 'arch/notes', patched: ['description'] });
     const $ = makeMockShell({ 'atom-patch': fakePatchResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     await plugin.tool.memory_atom_patch.execute(
       { topic: 'arch/notes', patch: { description: 'updated' } },
@@ -2743,7 +2780,7 @@ describe('memory_atom_list status and includeDeprecated', () => {
     ]);
 
     const $ = makeMockShell({ 'atom-list': fakeListResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const result = await plugin.tool.memory_atom_list.execute({}, makeCtx());
 
     expect(result.output).toContain('[resolved]');
@@ -2760,7 +2797,7 @@ describe('memory_atom_list status and includeDeprecated', () => {
     ]);
 
     const $ = makeMockShell({ 'atom-list': fakeListResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const result = await plugin.tool.memory_atom_list.execute({}, makeCtx());
 
     expect(result.output).toContain('[deprecated]');
@@ -2777,7 +2814,7 @@ describe('memory_atom_list status and includeDeprecated', () => {
     ]);
 
     const $ = makeMockShell({ 'atom-list': fakeListResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const result = await plugin.tool.memory_atom_list.execute({}, makeCtx());
 
     expect(result.output).not.toContain('[resolved]');
@@ -2788,7 +2825,7 @@ describe('memory_atom_list status and includeDeprecated', () => {
   test('includeDeprecated=true passes options JSON to CLI', async () => {
     const fakeListResponse = JSON.stringify([]);
     const $ = makeMockShell({ 'atom-list': fakeListResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     await plugin.tool.memory_atom_list.execute({ includeDeprecated: true }, makeCtx());
 
@@ -2800,7 +2837,7 @@ describe('memory_atom_list status and includeDeprecated', () => {
   test('status="deprecated" passes status options JSON to CLI', async () => {
     const fakeListResponse = JSON.stringify([]);
     const $ = makeMockShell({ 'atom-list': fakeListResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     await plugin.tool.memory_atom_list.execute({ status: 'deprecated' }, makeCtx());
 
@@ -2838,7 +2875,7 @@ describe('memory_atom_search status and includeDeprecated', () => {
     ]);
 
     const $ = makeMockShell({ 'atom-search': fakeSearchResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const result = await plugin.tool.memory_atom_search.execute({ query: 'decision' }, makeCtx());
 
     expect(result.output).toContain('[resolved]');
@@ -2855,7 +2892,7 @@ describe('memory_atom_search status and includeDeprecated', () => {
     ]);
 
     const $ = makeMockShell({ 'atom-search': fakeSearchResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const result = await plugin.tool.memory_atom_search.execute({ query: 'stale' }, makeCtx());
 
     expect(result.output).toContain('[deprecated]');
@@ -2865,7 +2902,7 @@ describe('memory_atom_search status and includeDeprecated', () => {
   test('includeDeprecated=true is passed through to CLI JSON payload', async () => {
     const fakeSearchResponse = JSON.stringify([]);
     const $ = makeMockShell({ 'atom-search': fakeSearchResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     await plugin.tool.memory_atom_search.execute({ query: 'anything', includeDeprecated: true }, makeCtx());
 
@@ -2877,7 +2914,7 @@ describe('memory_atom_search status and includeDeprecated', () => {
   test('status="deprecated" is passed through to CLI JSON payload', async () => {
     const fakeSearchResponse = JSON.stringify([]);
     const $ = makeMockShell({ 'atom-search': fakeSearchResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     await plugin.tool.memory_atom_search.execute({ query: 'anything', status: 'deprecated' }, makeCtx());
 
@@ -2920,7 +2957,7 @@ describe('memory_atom_get shows status in output', () => {
     });
 
     const $ = makeMockShell({ 'atom-get': fakeGetResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const result = await plugin.tool.memory_atom_get.execute({ topic: 'arch/db' }, makeCtx());
 
     expect(result.output).toContain('**Status:**');
@@ -2942,7 +2979,7 @@ describe('memory_atom_get shows status in output', () => {
     });
 
     const $ = makeMockShell({ 'atom-get': fakeGetResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const result = await plugin.tool.memory_atom_get.execute({ topic: 'arch/old' }, makeCtx());
 
     expect(result.output).toContain('**Status:**');
@@ -2964,7 +3001,7 @@ describe('memory_atom_get shows status in output', () => {
     });
 
     const $ = makeMockShell({ 'atom-get': fakeGetResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const result = await plugin.tool.memory_atom_get.execute({ topic: 'shared/fact' }, makeCtx());
 
     expect(result.output).toContain('[deprecated]');
@@ -2981,7 +3018,7 @@ describe('MEMORY_PROTOCOL contains status lifecycle section', () => {
       read: COLD_READ,
       'atom-list': JSON.stringify([{ topic: 'any', description: 'd', preview: '', pinned: 0, status: 'active', created_at: 1, updated_at: 1 }]),
     });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     // Simulate session.created with a tracked agent
     await plugin.event({ event: { type: 'session.created', properties: { sessionID: 'ses-test' } } });
@@ -3005,7 +3042,7 @@ describe('agent message signal capture', () => {
   test('assistant message with finish gate is captured in buffer', async () => {
     const $ = makeMockShell({ read: COLD_READ });
     const client = makeMockClient();
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     // Trigger a finished assistant message (finish is truthy — non-streaming completed turn)
     await fire(plugin, 'message.updated', {
@@ -3031,7 +3068,7 @@ describe('agent message signal capture', () => {
 
     const $2 = makeMockShell({ read: WARM_WITH_SIGNAL });
     const client2 = makeMockClient();
-    const plugin2 = await AgentMemory({ client: client2, $: $2 });
+    const plugin2 = await makePlugin({ client: client2, $: $2 });
 
     await fire(plugin2, 'message.updated', {
       sessionID: 'ses_agent_capture2',
@@ -3051,7 +3088,7 @@ describe('agent message signal capture', () => {
   test('assistant message without finish gate is ignored (not captured)', async () => {
     const $ = makeMockShell({ read: COLD_READ });
     const client = makeMockClient();
-    const plugin = await AgentMemory({ client, $ });
+    const plugin = await makePlugin({ client, $ });
 
     // Streaming event: finish is falsy/absent — must not be captured
     await fire(plugin, 'message.updated', {
@@ -3068,7 +3105,7 @@ describe('agent message signal capture', () => {
       prior: null, signals: [], watermark: { last_signal_ms: 0, last_distil_ms: 0 },
     });
     const $2 = makeMockShell({ read: COLD_NO_SIG });
-    const plugin2 = await AgentMemory({ client: makeMockClient(), $: $2 });
+    const plugin2 = await makePlugin({ client: makeMockClient(), $: $2 });
 
     await fire(plugin2, 'message.updated', {
       sessionID: 'ses_no_finish',
@@ -3082,7 +3119,7 @@ describe('agent message signal capture', () => {
 
   test('assistant message with finish: null is not captured', async () => {
     const $ = makeMockShell({ read: COLD_READ });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     await fire(plugin, 'message.updated', {
       sessionID: 'ses_null_finish',
@@ -3098,7 +3135,7 @@ describe('agent message signal capture', () => {
 
   test('assistant message with finish: false is not captured', async () => {
     const $ = makeMockShell({ read: COLD_READ });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     await fire(plugin, 'message.updated', {
       sessionID: 'ses_false_finish',
@@ -3114,7 +3151,7 @@ describe('agent message signal capture', () => {
 
   test('assistant message shorter than 50 chars is not captured', async () => {
     const $ = makeMockShell({ read: COLD_READ });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     // Short response: "ok" + finish — must be ignored
     await fire(plugin, 'message.updated', {
@@ -3136,7 +3173,7 @@ describe('agent message signal capture', () => {
     const longMsg = 'A'.repeat(2000); // 2000 chars — exceeds 1500 limit
 
     const $ = makeMockShell({ read: COLD_READ });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     await fire(plugin, 'message.updated', {
       sessionID: 'ses_truncate',
@@ -3235,7 +3272,7 @@ describe('memory_atom_write — always_include plugin plumbing', () => {
   };
 
   test('memory_atom_write tool has always_include argument', async () => {
-    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({
+    const plugin = await makePlugin({ client: makeMockClient(), $: makeMockShell({
       'atom-write': { ok: true, action: 'created', message: 'Created atom at ai-test' },
       'prune': '{}',
     }) });
@@ -3250,7 +3287,7 @@ describe('memory_atom_write — always_include plugin plumbing', () => {
       const obj = { quiet: () => obj, text: async () => JSON.stringify({ ok: true, action: 'created', message: 'Created atom at always-test' }) };
       return obj;
     };
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     await plugin.tool.memory_atom_write.execute({
       topic: 'always-test', content: 'body', description: 'desc', always_include: true,
     }, ctx);
@@ -3267,7 +3304,7 @@ describe('memory_atom_write — always_include plugin plumbing', () => {
       const obj = { quiet: () => obj, text: async () => JSON.stringify({ ok: true, action: 'created', message: 'Created atom at no-flag' }) };
       return obj;
     };
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     await plugin.tool.memory_atom_write.execute({
       topic: 'no-flag', content: 'body', description: 'desc',
     }, ctx);
@@ -3292,7 +3329,7 @@ describe('memory_atom_patch — always_include plugin plumbing', () => {
   };
 
   test('memory_atom_patch patch schema has always_include field', async () => {
-    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({
+    const plugin = await makePlugin({ client: makeMockClient(), $: makeMockShell({
       'prune': '{}',
     }) });
     expect(plugin.tool.memory_atom_patch.args.patch).toBeDefined();
@@ -3308,7 +3345,7 @@ describe('memory_atom_patch — always_include plugin plumbing', () => {
       const obj = { quiet: () => obj, text: async () => JSON.stringify({ ok: true, topic: 'patch-ai', patched: ['always_include'] }) };
       return obj;
     };
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     await plugin.tool.memory_atom_patch.execute({
       topic: 'patch-ai', patch: { always_include: true },
     }, ctx);
@@ -3324,7 +3361,7 @@ describe('MEMORY_PROTOCOL — always_include guidance', () => {
   test('MEMORY_PROTOCOL string contains always_include guidance', async () => {
     // We verify the system prompt string injected into sessions references always_include.
     // MEMORY_PROTOCOL is injected via the experimental.chat.system.transform hook.
-    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({ 'prune': '{}' }) });
+    const plugin = await makePlugin({ client: makeMockClient(), $: makeMockShell({ 'prune': '{}' }) });
 
     // After a session.created, the protocol is injected via system.transform.
     // Check that the injected string contains 'always_include'.
@@ -3357,7 +3394,7 @@ describe('workspace validation on write/mutate tools', () => {
   }
 
   test('memory_atom_write rejects relative non-dot workspace', async () => {
-    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
+    const plugin = await makePlugin({ client: makeMockClient(), $: makeMockShell({}) });
     await expect(
       plugin.tool.memory_atom_write.execute(
         { topic: 't', content: 'c', description: 'd', workspace: 'relative/path' },
@@ -3368,7 +3405,7 @@ describe('workspace validation on write/mutate tools', () => {
 
   test('memory_atom_write accepts null workspace (shared store)', async () => {
     const $ = makeMockShell({ 'atom-write': JSON.stringify({ ok: true, action: 'created', scope: 'global', project: '' }) });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const result = await plugin.tool.memory_atom_write.execute(
       { topic: 't', content: 'c', description: 'd', workspace: null },
       makeCtx()
@@ -3378,7 +3415,7 @@ describe('workspace validation on write/mutate tools', () => {
 
   test('memory_atom_write location suffix contains git root path for project write', async () => {
     const $ = makeMockShell({ 'atom-write': JSON.stringify({ ok: true, action: 'created', scope: 'project', project: '/my/workspace' }) });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const result = await plugin.tool.memory_atom_write.execute(
       { topic: 't', content: 'c', description: 'd', workspace: '.' },
       makeCtx()
@@ -3387,7 +3424,7 @@ describe('workspace validation on write/mutate tools', () => {
   });
 
   test('memory_atom_delete rejects relative non-dot workspace', async () => {
-    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
+    const plugin = await makePlugin({ client: makeMockClient(), $: makeMockShell({}) });
     await expect(
       plugin.tool.memory_atom_delete.execute(
         { topic: 't', workspace: 'relative/path' },
@@ -3398,7 +3435,7 @@ describe('workspace validation on write/mutate tools', () => {
 
   test('memory_atom_delete location suffix in output', async () => {
     const $ = makeMockShell({ 'atom-delete': JSON.stringify({ ok: true, deleted: 1, scope: 'project', project: '/my/workspace' }) });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const result = await plugin.tool.memory_atom_delete.execute(
       { topic: 'arch/db', workspace: '.' },
       makeCtx()
@@ -3415,7 +3452,7 @@ describe('workspace validation on write/mutate tools', () => {
       patched: [],
     });
     const $ = makeMockShell({ 'atom-patch': fakePatchResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     const result = await plugin.tool.memory_atom_patch.execute(
       { topic: 'work/notes', workspace: '/src', patch: { workspace: '/dst' } },
@@ -3435,7 +3472,7 @@ describe('workspace validation on write/mutate tools', () => {
       patched: [],
     });
     const $ = makeMockShell({ 'atom-patch': fakePatchResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     await plugin.tool.memory_atom_patch.execute(
       { topic: 'work/notes', workspace: '.', patch: { workspace: null } },
@@ -3468,7 +3505,7 @@ describe('memory_atom_search keywords rename', () => {
 
   test('memory_atom_search uses "keywords" arg (not "query")', async () => {
     const $ = makeMockShell({ 'atom-search': JSON.stringify([]) });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const args = plugin.tool.memory_atom_search.args;
     expect(args).toHaveProperty('keywords');
     expect(args).not.toHaveProperty('query');
@@ -3476,7 +3513,7 @@ describe('memory_atom_search keywords rename', () => {
 
   test('memory_atom_search sends keywords in CLI payload', async () => {
     const $ = makeMockShell({ 'atom-search': JSON.stringify([]) });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     await plugin.tool.memory_atom_search.execute({ keywords: 'SQLite arch' }, makeCtx());
 
@@ -3505,7 +3542,7 @@ describe('memory_workspaces_list tool', () => {
   }
 
   test('memory_workspaces_list is registered in tool export', async () => {
-    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({}) });
+    const plugin = await makePlugin({ client: makeMockClient(), $: makeMockShell({}) });
     expect(plugin.tool).toHaveProperty('memory_workspaces_list');
     expect(typeof plugin.tool.memory_workspaces_list.execute).toBe('function');
   });
@@ -3516,7 +3553,7 @@ describe('memory_workspaces_list tool', () => {
       { workspace: '/repo/b', count: 2 },
     ]);
     const $ = makeMockShell({ 'atom-list-workspaces': fakeResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     const result = await plugin.tool.memory_workspaces_list.execute({}, makeCtx());
 
@@ -3526,7 +3563,7 @@ describe('memory_workspaces_list tool', () => {
 
   test('returns "No workspaces" message when empty', async () => {
     const $ = makeMockShell({ 'atom-list-workspaces': '[]' });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     const result = await plugin.tool.memory_workspaces_list.execute({}, makeCtx());
 
@@ -3536,7 +3573,7 @@ describe('memory_workspaces_list tool', () => {
   test('output ends with usage note when results exist', async () => {
     const fakeResponse = JSON.stringify([{ workspace: '/repo/a', count: 1 }]);
     const $ = makeMockShell({ 'atom-list-workspaces': fakeResponse });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     const result = await plugin.tool.memory_workspaces_list.execute({}, makeCtx());
 
@@ -3546,7 +3583,7 @@ describe('memory_workspaces_list tool', () => {
 
   test('passes includeDeprecated to CLI when true', async () => {
     const $ = makeMockShell({ 'atom-list-workspaces': '[]' });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     await plugin.tool.memory_workspaces_list.execute({ includeDeprecated: true }, makeCtx());
 
@@ -3563,7 +3600,7 @@ describe('resolveScope vocabulary remap — scope:global = entire space', () => 
   // Task 5.3
   test('memory_atom_list with scope=global passes "all" to CLI (entire space)', async () => {
     const $ = makeMockShell({ 'atom-list': '[]' });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     function makeCtx(directory = '/my/workspace') {
       return { sessionID: 'ses-scope', messageID: 'msg-scope', agent: 'engineer', directory };
     }
@@ -3576,7 +3613,7 @@ describe('resolveScope vocabulary remap — scope:global = entire space', () => 
 
   test('memory_atom_search with scope=global passes "all" to CLI (entire space)', async () => {
     const $ = makeMockShell({ 'atom-search': '[]' });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     function makeCtx(directory = '/my/workspace') {
       return { sessionID: 'ses-scope2', messageID: 'msg-scope2', agent: 'engineer', directory };
     }
@@ -3591,7 +3628,7 @@ describe('resolveScope vocabulary remap — scope:global = entire space', () => 
     // WHEN resolveScope is called with scope='workspace' AND directory='',
     // THEN the result is {scope:'project', project:''} which queries only the shared bucket.
     const $ = makeMockShell({ 'atom-list': '[]' });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     function makeCtx(directory = '') {
       return { sessionID: 'ses-scope3', messageID: 'msg-scope3', agent: 'engineer', directory };
     }
@@ -3613,7 +3650,7 @@ describe('MEMORY_PROTOCOL — workspace auto-detect + shared terminology', () =>
   }
 
   test('MEMORY_PROTOCOL does not contain "there is no default" for workspace', async () => {
-    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({ 'prune': '{}' }) });
+    const plugin = await makePlugin({ client: makeMockClient(), $: makeMockShell({ 'prune': '{}' }) });
     await fire(plugin, 'session.created', {
       sessionID: 'ses-proto',
       info: { agent: 'engineer', directory: '/proj', title: null },
@@ -3626,7 +3663,7 @@ describe('MEMORY_PROTOCOL — workspace auto-detect + shared terminology', () =>
   });
 
   test('MEMORY_PROTOCOL contains "shared" terminology for non-project atoms', async () => {
-    const plugin = await AgentMemory({ client: makeMockClient(), $: makeMockShell({ 'prune': '{}' }) });
+    const plugin = await makePlugin({ client: makeMockClient(), $: makeMockShell({ 'prune': '{}' }) });
     await fire(plugin, 'session.created', {
       sessionID: 'ses-proto2',
       info: { agent: 'engineer', directory: '/proj', title: null },
@@ -3648,7 +3685,7 @@ describe('write tools — workspace omitted triggers auto-detect', () => {
     // With workspace undefined, resolveWorkspace in memory.js auto-detects
     // (non-git → shared store). We verify the CLI call does NOT receive "null" for workspace.
     const $ = makeMockShell({ 'atom-write': JSON.stringify({ ok: true, action: 'created', scope: 'global', project: '' }) });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     // Execute without workspace field
     const result = await plugin.tool.memory_atom_write.execute(
       { topic: 't', content: 'c', description: 'd', summary: 's' },
@@ -3666,7 +3703,7 @@ describe('write tools — workspace omitted triggers auto-detect', () => {
 
   test('memory_atom_delete with workspace omitted does not return validation error', async () => {
     const $ = makeMockShell({ 'atom-delete': JSON.stringify({ ok: true, deleted: 1, scope: 'global', project: '' }) });
-    const plugin = await AgentMemory({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
     const result = await plugin.tool.memory_atom_delete.execute({ topic: 't' }, makeCtx());
     expect(result.output).not.toContain('Error:');
     expect(result.output).toContain('[shared]');

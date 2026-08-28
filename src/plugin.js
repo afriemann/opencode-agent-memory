@@ -15,7 +15,7 @@
 // capture / no injection" for that session and never throw into opencode.
 
 import { tool } from '@opencode-ai/plugin';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join, dirname, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
@@ -242,7 +242,7 @@ function resolveScope(scope, directory) {
 
 // ── Plugin factory ───────────────────────────────────────────────────────────
 
-const AgentMemory = async ({ client, $ }) => {
+const AgentMemory = async ({ client, $, existsSync: _existsSync = existsSync }) => {
   // ── Config (read fresh per factory call for testability) ──────────────────
   const _fileCfg = loadConfigFile();
   const {
@@ -429,6 +429,14 @@ const AgentMemory = async ({ client, $ }) => {
 
     if (!agent || !TARGET_AGENTS.has(agent)) return;
     if (!rawDir) return;
+
+    // Guard: skip silently when the session directory has been deleted from disk
+    // (e.g. a worktree removed after a PR merge). Without this check the Bun
+    // shell raises a PlatformError at spawn time, surfacing a confusing toast.
+    if (!_existsSync(rawDir)) {
+      log(`distil: skipping ${sessionId} — session directory no longer exists: ${rawDir}`);
+      return;
+    }
 
     sessionAgents.set(sessionId, agent);
 
