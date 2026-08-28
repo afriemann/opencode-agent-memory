@@ -971,16 +971,17 @@ const ALL_TOOLS = [
   'memory_atom_write', 'memory_atom_append', 'memory_atom_get',
   'memory_atom_search', 'memory_atom_list', 'memory_atom_delete',
   'memory_atom_patch', 'memory_workspaces_list',
+  'memory_show_injection',
 ];
 
 describe('plugin tool hook — factory returns tool map', () => {
-  test('AgentMemory factory returns exactly twelve tools', async () => {
+  test('AgentMemory factory returns exactly thirteen tools', async () => {
     const $ = makeMockShell({});
     const plugin = await makePlugin({ client: makeMockClient(), $ });
 
     expect(plugin).toHaveProperty('event');
     expect(plugin).toHaveProperty('tool');
-    expect(Object.keys(plugin.tool)).toHaveLength(12);
+    expect(Object.keys(plugin.tool)).toHaveLength(13);
     for (const name of ALL_TOOLS) {
       expect(plugin.tool).toHaveProperty(name);
     }
@@ -1123,6 +1124,88 @@ describe('memory_state_inspect tool execute', () => {
     expect(output).toContain('not tracked');
     // No inspect CLI call should have been made
     expect($.calls.filter((c) => c.includes('inspect'))).toHaveLength(0);
+    process.env.MEMORY_TARGET_AGENTS = savedEnv;
+  });
+});
+
+// spec: openspec/changes/memory-show-injection/specs/memory-state-tools/spec.md
+describe('memory_show_injection tool execute', () => {
+  function makeContext(overrides = {}) {
+    return {
+      sessionID: 'ses_show_test',
+      messageID: 'msg_1',
+      agent: 'engineer',
+      directory: '/test/project',
+      worktree: '/test/project',
+      abort: new AbortController().signal,
+      metadata: () => {},
+      ask: async () => {},
+      ...overrides,
+    };
+  }
+
+  test('Returns both protocol and primer for a warm tracked session', async () => {
+    const $ = makeMockShell({ read: WARM_READ });
+    const client = makeMockClient();
+    const plugin = await makePlugin({ client, $ });
+
+    await fire(plugin, 'session.created', {
+      sessionID: 'ses_warm_show',
+      info: { agent: 'engineer', directory: '/home/user/repos/my/project', title: null },
+    });
+
+    const ctx = makeContext({ sessionID: 'ses_warm_show' });
+    const result = await plugin.tool.memory_show_injection.execute({}, ctx);
+    const output = typeof result === 'string' ? result : result.output;
+
+    expect(output).toContain('Memory usage protocol');
+    expect(output).toContain('Memory primer');
+    expect(output).toContain('background context'); // primer content
+  });
+
+  test('Returns protocol only for a cold-start tracked session', async () => {
+    const $ = makeMockShell({ read: COLD_READ });
+    const client = makeMockClient();
+    const plugin = await makePlugin({ client, $ });
+
+    await fire(plugin, 'session.created', {
+      sessionID: 'ses_cold_show',
+      info: { agent: 'engineer', directory: '/home/user/repos/my/project', title: null },
+    });
+
+    const ctx = makeContext({ sessionID: 'ses_cold_show' });
+    const result = await plugin.tool.memory_show_injection.execute({}, ctx);
+    const output = typeof result === 'string' ? result : result.output;
+
+    expect(output).toContain('Memory usage protocol');
+    expect(output).toContain('cold start');
+    expect(output).not.toContain('--- [Memory primer] ---'); // no primer section label for cold start
+  });
+
+  test('Returns no-injection message for an untracked session', async () => {
+    const $ = makeMockShell({});
+    const client = makeMockClient();
+    const plugin = await makePlugin({ client, $ });
+    // No session.created fired — primerLoaded has no entry for this session
+    const ctx = makeContext({ sessionID: 'ses_no_primer_show' });
+    const result = await plugin.tool.memory_show_injection.execute({}, ctx);
+    const output = typeof result === 'string' ? result : result.output;
+
+    expect(output).toContain('No injection active');
+  });
+
+  test('Returns not-tracked message when session agent is not in TARGET_AGENTS', async () => {
+    const savedEnv = process.env.MEMORY_TARGET_AGENTS;
+    process.env.MEMORY_TARGET_AGENTS = 'code-reviewer'; // 'engineer' not tracked
+    const $ = makeMockShell({});
+    // session.get returns 'engineer' which is NOT in TARGET_AGENTS
+    const plugin = await makePlugin({ client: makeMockClient(), $ });
+    const ctx = makeContext();
+
+    const result = await plugin.tool.memory_show_injection.execute({}, ctx);
+    const output = typeof result === 'string' ? result : result.output;
+
+    expect(output).toContain('not tracked');
     process.env.MEMORY_TARGET_AGENTS = savedEnv;
   });
 });

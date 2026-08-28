@@ -722,6 +722,50 @@ const AgentMemory = async ({ client, $, existsSync: _existsSync = existsSync }) 
   });
 
   /**
+   * memory_show_injection — show the exact content injected into the system prompt.
+   * Mirrors what `experimental.chat.system.transform` would push for this session.
+   */
+  const memory_show_injection = tool({
+    description:
+      'Show the exact content injected into this session\'s system prompt by the agent-memory plugin. ' +
+      'Returns the verbatim memory usage protocol and memory primer (if present) with clear section labels, ' +
+      'or a message explaining why no injection is active. ' +
+      'Use this to verify what the agent is reading about prior work and memory conventions.',
+    args: {},
+    async execute(_args, context) {
+      const agent = await resolveSessionAgent(context.sessionID);
+      if (!agent) {
+        return {
+          title: 'memory_show_injection',
+          output: 'Session agent is not tracked by agent-memory.',
+        };
+      }
+      if (!primerLoaded.has(context.sessionID)) {
+        return {
+          title: 'memory_show_injection',
+          output:
+            'No injection active for this session — agent-memory has not yet processed this ' +
+            'session (session.created may not have fired yet).',
+        };
+      }
+      const sections = [];
+      sections.push('--- [Memory usage protocol] ---\n' + MEMORY_PROTOCOL);
+      const primer = primers.get(context.sessionID);
+      if (primer) {
+        sections.push('--- [Memory primer] ---\n' + primer);
+      } else {
+        sections.push(
+          '(No memory primer — cold start: no prior sessions or atoms for this project.)',
+        );
+      }
+      return {
+        title: 'memory_show_injection',
+        output: sections.join('\n\n'),
+      };
+    },
+  });
+
+  /**
    * memory_atom_write — upsert a durable named atom.
    */
   const memory_atom_write = tool({
@@ -1485,6 +1529,7 @@ const AgentMemory = async ({ client, $, existsSync: _existsSync = existsSync }) 
       memory_state_patch,
       memory_state_distil,
       memory_state_delete,
+      memory_show_injection,
       memory_atom_write,
       memory_atom_append,
       memory_atom_get,
