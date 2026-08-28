@@ -766,12 +766,18 @@ const AgentMemory = async ({ client, $, existsSync: _existsSync = existsSync }) 
       // Inject as a visible session message so the user can read it directly.
       // noReply: true suppresses an LLM response; the preamble tells the agent
       // the message is for the user and requires no action.
+      // User messages render as plain text (no markdown), so strip markdown
+      // symbols so headings and bold text don't appear as literal ##/**.
+      const plainText = content
+        .replace(/^#{1,6} /gm, '')         // ## Heading → Heading
+        .replace(/\*\*(.*?)\*\*/g, '$1')   // **bold** → bold
+        .replace(/`([^`\n]+)`/g, '$1');    // `code` → code
       const preamble =
         '[Plugin output — injected by memory_show_injection for the user to read. ' +
         'This is not a user message; no response is needed.]';
       client.session.promptAsync({
         path: { id: context.sessionID },
-        body: { noReply: true, parts: [{ type: 'text', text: preamble + '\n\n' + content }] },
+        body: { noReply: true, parts: [{ type: 'text', text: preamble + '\n\n' + plainText }] },
       }).catch(() => {});
       return {
         title: 'memory_show_injection',
