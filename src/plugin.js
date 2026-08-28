@@ -769,7 +769,6 @@ const AgentMemory = async ({ client, $, existsSync: _existsSync = existsSync }) 
       // User messages render as plain text (no markdown), so strip markdown
       // symbols so headings and bold text don't appear as literal ##/**.
       const plainText = content
-        .replace(/^#{1,6} /gm, '')         // ## Heading → Heading
         .replace(/\*\*(.*?)\*\*/g, '$1')   // **bold** → bold
         .replace(/`([^`\n]+)`/g, '$1');    // `code` → code
       const preamble =
