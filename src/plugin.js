@@ -724,12 +724,16 @@ const AgentMemory = async ({ client, $, existsSync: _existsSync = existsSync }) 
   /**
    * memory_show_injection — show the exact content injected into the system prompt.
    * Mirrors what `experimental.chat.system.transform` would push for this session.
+   * Injects the content as a visible session message (noReply) so the user can read it
+   * directly in the TUI without the model needing to echo it.
    */
   const memory_show_injection = tool({
     description:
       'Show the exact content injected into this session\'s system prompt by the agent-memory plugin. ' +
       'Returns the verbatim memory usage protocol and memory primer (if present) with clear section labels, ' +
       'or a message explaining why no injection is active. ' +
+      'The content is also pushed as a visible message in the session so the user can read it directly ' +
+      'without the agent needing to echo it. ' +
       'Use this to verify what the agent is reading about prior work and memory conventions.',
     args: {},
     async execute(_args, context) {
@@ -758,9 +762,20 @@ const AgentMemory = async ({ client, $, existsSync: _existsSync = existsSync }) 
           '(No memory primer — cold start: no prior sessions or atoms for this project.)',
         );
       }
+      const content = sections.join('\n\n');
+      // Inject as a visible session message so the user can read it directly.
+      // noReply: true suppresses an LLM response; the preamble tells the agent
+      // the message is for the user and requires no action.
+      const preamble =
+        '[Plugin output — injected by memory_show_injection for the user to read. ' +
+        'This is not a user message; no response is needed.]';
+      client.session.promptAsync({
+        path: { id: context.sessionID },
+        body: { noReply: true, parts: [{ type: 'text', text: preamble + '\n\n' + content }] },
+      }).catch(() => {});
       return {
         title: 'memory_show_injection',
-        output: sections.join('\n\n'),
+        output: content,
       };
     },
   });

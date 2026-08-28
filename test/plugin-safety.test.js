@@ -114,6 +114,7 @@ const WARM_READ = JSON.stringify({
  */
 function makeMockClient(overrides = {}) {
   const promptCalls = [];
+  const promptAsyncCalls = [];
   const createCalls = [];
   const deleteCalls = [];
   const getCalls = [];
@@ -151,6 +152,12 @@ function makeMockClient(overrides = {}) {
           }) }] },
         };
       },
+      promptAsync: async (options) => {
+        const id = options?.path?.id ?? options?.sessionID;
+        const body = options?.body ?? {};
+        promptAsyncCalls.push({ id, body });
+        return overrides.sessionPromptAsync?.(id, body) ?? {};
+      },
       delete: async (options) => {
         const id = options?.path?.id ?? options?.sessionID;
         deleteCalls.push(id);
@@ -171,6 +178,7 @@ function makeMockClient(overrides = {}) {
       }),
     },
     _promptCalls: promptCalls,
+    _promptAsyncCalls: promptAsyncCalls,
     _createCalls: createCalls,
     _createBodies: createBodies,
     _deleteCalls: deleteCalls,
@@ -1161,6 +1169,17 @@ describe('memory_show_injection tool execute', () => {
     expect(output).toContain('Memory usage protocol');
     expect(output).toContain('Memory primer');
     expect(output).toContain('background context'); // primer content
+
+    // Content is also injected as a visible session message for the user
+    await new Promise((r) => setTimeout(r, 0)); // allow fire-and-forget to settle
+    expect(client._promptAsyncCalls).toHaveLength(1);
+    const call = client._promptAsyncCalls[0];
+    expect(call.id).toBe('ses_warm_show');
+    expect(call.body.noReply).toBe(true);
+    const text = call.body.parts[0].text;
+    expect(text).toContain('Plugin output');
+    expect(text).toContain('Memory usage protocol');
+    expect(text).toContain('Memory primer');
   });
 
   test('Returns protocol only for a cold-start tracked session', async () => {
@@ -1180,6 +1199,13 @@ describe('memory_show_injection tool execute', () => {
     expect(output).toContain('Memory usage protocol');
     expect(output).toContain('cold start');
     expect(output).not.toContain('--- [Memory primer] ---'); // no primer section label for cold start
+
+    // Also injected as a visible session message
+    await new Promise((r) => setTimeout(r, 0));
+    expect(client._promptAsyncCalls).toHaveLength(1);
+    const call = client._promptAsyncCalls[0];
+    expect(call.body.noReply).toBe(true);
+    expect(call.body.parts[0].text).toContain('Plugin output');
   });
 
   test('Returns no-injection message for an untracked session', async () => {
@@ -1192,20 +1218,25 @@ describe('memory_show_injection tool execute', () => {
     const output = typeof result === 'string' ? result : result.output;
 
     expect(output).toContain('No injection active');
+    // No visible message injected for non-processed sessions
+    expect(client._promptAsyncCalls).toHaveLength(0);
   });
 
   test('Returns not-tracked message when session agent is not in TARGET_AGENTS', async () => {
     const savedEnv = process.env.MEMORY_TARGET_AGENTS;
     process.env.MEMORY_TARGET_AGENTS = 'code-reviewer'; // 'engineer' not tracked
     const $ = makeMockShell({});
+    const client = makeMockClient();
     // session.get returns 'engineer' which is NOT in TARGET_AGENTS
-    const plugin = await makePlugin({ client: makeMockClient(), $ });
+    const plugin = await makePlugin({ client, $ });
     const ctx = makeContext();
 
     const result = await plugin.tool.memory_show_injection.execute({}, ctx);
     const output = typeof result === 'string' ? result : result.output;
 
     expect(output).toContain('not tracked');
+    // No visible message injected for non-tracked sessions
+    expect(client._promptAsyncCalls).toHaveLength(0);
     process.env.MEMORY_TARGET_AGENTS = savedEnv;
   });
 });
