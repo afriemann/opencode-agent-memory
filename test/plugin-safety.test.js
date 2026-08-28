@@ -1176,8 +1176,8 @@ describe('memory_show_injection tool execute', () => {
     const call = client._promptAsyncCalls[0];
     expect(call.id).toBe('ses_warm_show');
     expect(call.body.noReply).toBe(true);
+    expect(call.body.system).toContain('Plugin output');
     const text = call.body.parts[0].text;
-    expect(text).toContain('Plugin output');
     expect(text).toContain('Memory usage protocol');
     expect(text).toContain('Memory primer');
   });
@@ -1205,7 +1205,8 @@ describe('memory_show_injection tool execute', () => {
     expect(client._promptAsyncCalls).toHaveLength(1);
     const call = client._promptAsyncCalls[0];
     expect(call.body.noReply).toBe(true);
-    expect(call.body.parts[0].text).toContain('Plugin output');
+    expect(call.body.system).toContain('Plugin output');
+    expect(call.body.parts[0].text).toContain('Memory usage protocol');
   });
 
   test('Returns no-injection message for an untracked session', async () => {
