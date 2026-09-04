@@ -10,7 +10,7 @@
     "@opencode-ai/plugin": ">=1.15.0"
   },
   "devDependencies": {
-    "jest": "^30.4.2"
+    "jest": "^30.5.1"
   },
   "scripts": {
     "test": "node --experimental-vm-modules node_modules/.bin/jest"
