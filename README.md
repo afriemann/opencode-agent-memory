@@ -152,6 +152,35 @@ Force an immediate memory distillation for the current session, bypassing the id
 | Args | *(none)* |
 | CLI equivalent | **None.** Only available as a plugin tool (requires in-process `client`). |
 
+## Terminal UI (TUI)
+
+A standalone terminal UI for inspecting and modifying memories interactively, separate from the opencode plugin runtime. It never opens the SQLite database directly — every read and write is issued by spawning `src/memory.js` as a child process, the same sole-writer invariant the plugin itself relies on.
+
+Launch it either via the installed `bin` entry:
+
+```bash
+agent-memory-tui
+```
+
+or directly with Node:
+
+```bash
+node src/tui.js
+```
+
+Both start the same application. Set `AGENT_MEMORY_DB` beforehand to point it at a non-default database (e.g. a scratch DB for testing).
+
+Four screens, navigated from a Main Menu (`Esc` always steps back toward the Main Menu; `q` quits from the Main Menu):
+
+- **Inspect Agent Primer** — pick an agent+project pair (from every pair with a recorded session) and see the exact primer text a real session for that pair would receive, freshly assembled on every visit (no caching).
+- **Browse Project Atoms** / **Browse Global/Shared Atoms** — list memory atoms in the chosen scope with a live preview pane (description, summary, status, last-updated); `Tab` toggles scope, `Enter` opens the selected atom.
+- **Atom Detail & Actions** — view an atom's full content, tags, and lifecycle state, and act on it:
+  - `[e]` Edit the content in `$EDITOR` (falls back to `vi`); the change is only persisted if the editor exits successfully and the content actually changed.
+  - `[p]` Toggle pinned.
+  - `[a]` Toggle always-include (standing-context injection).
+  - `[s]` Cycle status: active → resolved → deprecated → active.
+  - `[d]` Delete, gated by an explicit `[y]`/`[n]` confirmation.
+
 ## Known limitations
 
 - **File-edit attribution** — `file.edited` events carry no `sessionID`. The plugin attributes them to the last active tracked-agent session in the current process. In environments with multiple concurrent tracked sessions (multiple worktrees), edits may be attributed to the wrong session. This is a Phase-1 trade-off; the distiller still receives the correct file names, just potentially under the wrong session key.

@@ -12,8 +12,12 @@ import { writeFileSync, unlinkSync, mkdtempSync, mkdirSync, rmSync } from 'node:
 import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
-import { ensureSchema, pruneHotState } from '../src/lib/schema.js';
+import { ensureSchema, pruneHotState, atomList, atomListFull, hotStateCrossProject } from '../src/lib/schema.js';
 import { readDistilWatermark, advanceDistilWatermark } from '../src/lib/watermark.js';
+import { homedir } from 'node:os';
+import { assemblePrimer } from '../src/lib/signal-utils.js';
+import { gitStalenessNode } from '../src/lib/git-helper.js';
+import { loadConfigFile, resolveConfig } from '../src/lib/config.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = dirname(__filename);
@@ -846,6 +850,49 @@ describe('memory.js — non-git (empty-string project) subcommands', () => {
   });
 });
 
+// ── hot-state-list-pairs ──────────────────────────────────────────────────────
+// spec: openspec/changes/memory-tui/specs/memory-tui/spec.md — Hot-state pair enumeration subcommand
+
+describe('memory.js hot-state-list-pairs subcommand (subprocess integration)', () => {
+  let tmpDb;
+  beforeEach(() => {
+    tmpDb = `/tmp/test-hslp-db-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+  });
+  afterEach(() => {
+    try { unlinkSync(tmpDb); } catch {}
+  });
+  function run(args) {
+    return spawnSync(process.execPath, [MEMORY_JS, ...args], {
+      env: { ...process.env, AGENT_MEMORY_DB: tmpDb },
+      encoding: 'utf8',
+    });
+  }
+
+  test('Listing pairs', () => {
+    const payload = JSON.stringify({
+      distilled: { last_worked_summary: 'work', next_action: '', open_questions: [] },
+      anchoredSha: null,
+      lastSignalMs: 0,
+      sessionId: 'ses1',
+    });
+    run(['distil-write', 'engineer', '/repo-a', payload]);
+
+    const result = run(['hot-state-list-pairs']);
+    expect(result.status).toBe(0);
+    const out = JSON.parse(result.stdout.trim());
+    expect(out.pairs).toHaveLength(1);
+    expect(out.pairs[0]).toMatchObject({ agent: 'engineer', project: '/repo-a', sessionCount: 1 });
+  });
+
+  test('No pairs recorded', () => {
+    run(['init']);
+    const result = run(['hot-state-list-pairs']);
+    expect(result.status).toBe(0);
+    const out = JSON.parse(result.stdout.trim());
+    expect(out.pairs).toEqual([]);
+  });
+});
+
 // ── error boundary ────────────────────────────────────────────────────────────
 
 describe('memory.js dispatch error boundary', () => {
@@ -863,5 +910,118 @@ describe('memory.js dispatch error boundary', () => {
     } finally {
       try { unlinkSync(tmpDb2); } catch {}
     }
+  });
+});
+
+// ── primer-preview ────────────────────────────────────────────────────────────
+// spec: openspec/changes/memory-tui/specs/memory-tui/spec.md — Primer preview subcommand
+
+describe('memory.js primer-preview subcommand (subprocess integration)', () => {
+  let tmpDb;
+  beforeEach(() => {
+    tmpDb = `/tmp/test-primer-preview-${Date.now()}-${Math.random().toString(36).slice(2)}.db`;
+  });
+  afterEach(() => {
+    try { unlinkSync(tmpDb); } catch {}
+  });
+  function run(args) {
+    return spawnSync(process.execPath, [MEMORY_JS, ...args], {
+      env: { ...process.env, AGENT_MEMORY_DB: tmpDb },
+      encoding: 'utf8',
+    });
+  }
+
+  test('Returns assembled primer text', () => {
+    run(['distil-write', 'engineer', '/proj-fixture', JSON.stringify({
+      distilled: { last_worked_summary: 'did the work', next_action: 'ship it', open_questions: [] },
+      anchoredSha: null, lastSignalMs: 0, sessionId: 'ses1',
+    })]);
+    run(['atom-write', '/proj-fixture', JSON.stringify({
+      workspace: '/proj-fixture', topic: 'arch/note', content: 'body', description: 'desc',
+    })]);
+
+    const result = run(['primer-preview', 'engineer', '/proj-fixture']);
+    expect(result.status).toBe(0);
+    const out = JSON.parse(result.stdout.trim());
+    expect(typeof out.primerText).toBe('string');
+    expect(out.primerText).toContain('did the work');
+    expect(out.primerText).toContain('arch/note');
+  });
+
+  test('Fidelity: primer-preview output matches assemblePrimer direct output for the same fixture inputs', () => {
+    const AGENT = 'engineer';
+    const PROJECT = '/proj-fixture-fidelity';
+
+    run(['distil-write', AGENT, PROJECT, JSON.stringify({
+      distilled: { last_worked_summary: 'did work', next_action: 'ship it', open_questions: ['q1'] },
+      anchoredSha: null, lastSignalMs: 0, sessionId: 'ses1',
+    })]);
+    run(['atom-write', PROJECT, JSON.stringify({
+      workspace: PROJECT, topic: 'arch/note', content: 'workspace atom body', description: 'workspace desc',
+    })]);
+    run(['atom-write', PROJECT, JSON.stringify({
+      workspace: null, topic: 'shared/fact', content: 'shared atom body', description: 'shared desc',
+    })]);
+
+    const result = run(['primer-preview', AGENT, PROJECT]);
+    expect(result.status).toBe(0);
+    const out = JSON.parse(result.stdout.trim());
+
+    // Independently gather the same inputs via the schema.js exports + the
+    // same top-3 hot_state query cmdRead/cmdPrimerPreview use, then compute
+    // the expected primer directly — this is the fidelity check design.md
+    // requires: one implementation, one answer, no drift.
+    const db = new DatabaseSync(tmpDb);
+    ensureSchema(db);
+    const recentRows = db.prepare(`
+      SELECT id, scope, agent, project, session_id, session_name,
+             last_worked_summary, next_action, open_questions,
+             anchored_git_sha, schema_version, updated_at
+      FROM hot_state
+      WHERE scope = 'project' AND agent = ? AND project = ?
+      ORDER BY updated_at DESC, id DESC
+      LIMIT 3
+    `).all(AGENT, PROJECT);
+    const rows = recentRows.map((row) => ({
+      ...row,
+      open_questions: row.open_questions ? JSON.parse(row.open_questions) : [],
+    }));
+    const projectAtoms = atomList(db, { scope: 'project', project: PROJECT });
+    const sharedAtoms = atomList(db, { scope: 'global', project: '' });
+    const standingAtoms = atomListFull(db, { scope: 'project', project: PROJECT });
+    const since24h = Date.now() - 24 * 60 * 60 * 1000;
+    const crossProjectRows = hotStateCrossProject(db, PROJECT, since24h);
+    db.close();
+
+    const { atomInjectCap } = resolveConfig(process.env, loadConfigFile());
+    const storedSha = rows.length > 0 ? (rows[0].anchored_git_sha ?? null) : null;
+    const staleness = gitStalenessNode(PROJECT, storedSha);
+    const expectedPrimerText = assemblePrimer({
+      rows, projectAtoms, sharedAtoms, standingAtoms, crossProjectRows,
+      agent: AGENT, project: PROJECT, homeDir: homedir(), staleness, cap: atomInjectCap,
+    });
+
+    expect(out.primerText).toBe(expectedPrimerText);
+  });
+
+  test('Non-git project is accepted', () => {
+    run(['distil-write', 'engineer', '', JSON.stringify({
+      distilled: { last_worked_summary: 'shared work', next_action: '', open_questions: [] },
+      anchoredSha: null, lastSignalMs: 0, sessionId: 'ses_shared',
+    })]);
+
+    const result = run(['primer-preview', 'engineer', '']);
+    expect(result.status).toBe(0);
+    const out = JSON.parse(result.stdout.trim());
+    expect(typeof out.primerText).toBe('string');
+    expect(out.primerText).toContain('Shared memory');
+  });
+
+  test('Unknown agent+project pair', () => {
+    run(['init']);
+    const result = run(['primer-preview', 'nobody', '/never-seen']);
+    expect(result.status).toBe(0);
+    const out = JSON.parse(result.stdout.trim());
+    expect(out.primerText).toBeNull();
   });
 });
