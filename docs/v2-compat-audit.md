@@ -53,9 +53,24 @@ used for session-scoped file-edit attribution) and todo-state accumulation
 (`src/plugin.js:1471`, used for the latest-todo-list capture) are gone in
 any hypothetical V2 port, full stop.
 
+**Update (2026-09-18): the todo half of this is now confirmed permanent,
+not merely absent from the tag we inspected.** GitHub issue
+[anomalyco/opencode#42421](https://github.com/anomalyco/opencode/issues/42421)
+was filed specifically against V2, and a maintainer replied directly:
+*"This is intentional in V2. The TODO tools are not currently planned."*
+The issue was closed as "Not planned." There is no `todowrite`/`todoread`
+tool anywhere in V2's built-in tool catalog (confirmed both by source
+inspection and the live V2 Tools docs), so there is nothing for a
+`ctx.tool.hook("execute.after")`-based reconstruction to observe — this
+option is not merely undesirable, it is impossible. Do not revisit the
+todo-signal drop expecting a future opencode release to reintroduce the
+underlying tool; treat it as permanent unless that upstream position
+changes.
+
 > Footnote (not a plan): it is theoretically possible to reconstruct
 > file-touch data by hooking `ctx.tool.hook("execute.after")` on built-in
-> edit/write tool calls. This is explicitly **not** written up as a
+> edit/write tool calls — the `edit`/`write`/`patch` tools DO still exist
+> on V2, unlike the todo tool. This is explicitly **not** written up as a
 > committed workaround — see the "needs live verification" section below
 > for the one open question that would gate even considering it.
 
