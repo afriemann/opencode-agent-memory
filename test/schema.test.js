@@ -19,7 +19,6 @@ import {
   checkFtsIntegrity,
   hotStateCrossProject,
   hotStateDelete,
-  hotStateListPairs,
 } from '../src/lib/schema.js';
 
 function openMemory() {
@@ -2869,34 +2868,5 @@ describe('atomPatch move — summary preservation', () => {
     const dest = db.prepare("SELECT summary, always_include FROM memory_atom WHERE project='/dst' AND topic='movable/full'").get();
     expect(dest.summary).toBe('Preserved summary.');
     expect(dest.always_include).toBe(1);
-  });
-});
-
-// ── hotStateListPairs ─────────────────────────────────────────────────────────
-// spec: openspec/changes/memory-tui/specs/memory-tui/spec.md — Hot-state pair enumeration subcommand
-
-describe('hotStateListPairs', () => {
-  let db;
-  beforeEach(() => {
-    db = openMemory();
-    ensureSchema(db);
-  });
-  afterEach(() => { db.close(); });
-
-  test('Listing pairs', () => {
-    insertHotStateRow(db, { agent: 'engineer', project: '/repo-a', sessionId: 'ses1', updatedAt: 1000 });
-    insertHotStateRow(db, { agent: 'engineer', project: '/repo-a', sessionId: 'ses2', updatedAt: 2000 });
-    insertHotStateRow(db, { agent: 'code-reviewer', project: '/repo-b', sessionId: 'ses3', updatedAt: 3000 });
-
-    const pairs = hotStateListPairs(db);
-
-    expect(pairs).toHaveLength(2);
-    // Ordered by most recently updated first
-    expect(pairs[0]).toMatchObject({ agent: 'code-reviewer', project: '/repo-b', sessionCount: 1, lastUpdatedAt: 3000 });
-    expect(pairs[1]).toMatchObject({ agent: 'engineer', project: '/repo-a', sessionCount: 2, lastUpdatedAt: 2000 });
-  });
-
-  test('No pairs recorded', () => {
-    expect(hotStateListPairs(db)).toEqual([]);
   });
 });

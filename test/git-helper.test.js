@@ -1,15 +1,8 @@
 // test/git-helper.test.js — git reconciliation helper tests.
 //
-// All gitRevParse/gitStaleness/renderStaleness tests use a mock $ tagged-template
-// function so no real git repo is needed. gitStalenessNode tests use a real git
-// repo (created via execFileSync) since it invokes git directly via
-// node:child_process, not the Bun `$` shell.
+// All tests use a mock $ tagged-template function so no real git repo is needed.
 
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { gitRevParse, gitStaleness, gitStalenessNode, renderStaleness } from '../src/lib/git-helper.js';
+import { gitRevParse, gitStaleness, renderStaleness } from '../src/lib/git-helper.js';
 
 // ── Mock $ factory ───────────────────────────────────────────────────────────
 
@@ -138,73 +131,6 @@ describe('gitStaleness', () => {
     const result = await gitStaleness($, '/proj', 'deadbeef');
     // parseInt('fatal:...') → NaN → diverged
     expect(result.status).toBe('diverged');
-  });
-});
-
-// ── gitStalenessNode ──────────────────────────────────────────────────────────
-// spec: openspec/changes/memory-tui/specs/memory-tui/spec.md — Primer preview subcommand
-//
-// Uses a real git repo (via execFileSync) since gitStalenessNode invokes git
-// through node:child_process, not the Bun `$` shell gitStaleness uses.
-
-describe('gitStalenessNode', () => {
-  let repoDir;
-
-  beforeEach(() => {
-    repoDir = mkdtempSync(join(tmpdir(), 'agent-memory-gitstale-'));
-    const gitEnv = {
-      ...process.env,
-      GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.com',
-      GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.com',
-    };
-    execFileSync('git', ['init', '-q'], { cwd: repoDir, env: gitEnv });
-    execFileSync('git', ['commit', '--allow-empty', '-q', '-m', 'first'], { cwd: repoDir, env: gitEnv });
-  });
-
-  afterEach(() => {
-    rmSync(repoDir, { recursive: true, force: true });
-  });
-
-  test('returns { status: "no-anchor" } when storedSha is null', () => {
-    const result = gitStalenessNode(repoDir, null);
-    expect(result.status).toBe('no-anchor');
-  });
-
-  test('returns { status: "ok", distance: 0 } when storedSha equals HEAD (git repo)', () => {
-    const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, encoding: 'utf8' }).trim();
-    const result = gitStalenessNode(repoDir, sha);
-    expect(result.status).toBe('ok');
-    expect(result.distance).toBe(0);
-  });
-
-  test('returns { status: "ok", distance: N } after further commits', () => {
-    const gitEnv = {
-      ...process.env,
-      GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.com',
-      GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.com',
-    };
-    const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, encoding: 'utf8' }).trim();
-    execFileSync('git', ['commit', '--allow-empty', '-q', '-m', 'second'], { cwd: repoDir, env: gitEnv });
-    execFileSync('git', ['commit', '--allow-empty', '-q', '-m', 'third'], { cwd: repoDir, env: gitEnv });
-    const result = gitStalenessNode(repoDir, sha);
-    expect(result.status).toBe('ok');
-    expect(result.distance).toBe(2);
-  });
-
-  test('returns { status: "no-git" } for a non-git directory', () => {
-    const nonGitDir = mkdtempSync(join(tmpdir(), 'agent-memory-nogit-'));
-    try {
-      const result = gitStalenessNode(nonGitDir, 'deadbeef');
-      expect(result.status).toBe('no-git');
-    } finally {
-      rmSync(nonGitDir, { recursive: true, force: true });
-    }
-  });
-
-  test('returns { status: "no-git" } for an inaccessible/nonexistent path (never throws)', () => {
-    expect(() => gitStalenessNode('/nonexistent/path/does-not-exist', 'deadbeef')).not.toThrow();
-    const result = gitStalenessNode('/nonexistent/path/does-not-exist', 'deadbeef');
-    expect(result.status).toBe('no-git');
   });
 });
 

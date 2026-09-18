@@ -3,8 +3,6 @@
 // Wraps git rev-parse and rev-list for staleness computation.
 // All functions are read-only and never throw (failures degrade gracefully).
 
-import { execFileSync } from 'node:child_process';
-
 /**
  * Get the current HEAD SHA for a project directory.
  * Returns null if git is absent, the directory is not a repo, or any error occurs.
@@ -55,49 +53,6 @@ export async function gitStaleness($, project, storedSha) {
       return { status: 'diverged' };
     } catch {
       // git is absent or the directory is not a repo
-      return { status: 'no-git' };
-    }
-  }
-}
-
-/**
- * Compute the staleness of a stored anchor SHA relative to the current HEAD,
- * without Bun's `$` shell (uses node:child_process directly).
- *
- * Parallel to gitStaleness above, not a modification of it — the two coexist
- * because they run under different shells (plugin.js's Bun `$` vs the TUI's
- * plain Node), not because of redundant design (see design.md Decision 3).
- * A non-git or inaccessible project directory degrades to `no-git` rather
- * than throwing.
- *
- * @param {string} project — absolute path to the project directory
- * @param {string|null} storedSha — the SHA stored in hot_state (null = no anchor)
- * @returns {
- *   { status: 'ok', distance: number } |
- *   { status: 'no-anchor' } |
- *   { status: 'no-git' } |
- *   { status: 'diverged' }
- * }
- */
-export function gitStalenessNode(project, storedSha) {
-  if (!storedSha) return { status: 'no-anchor' };
-
-  try {
-    const result = execFileSync(
-      'git', ['-C', project, 'rev-list', '--count', `${storedSha}..HEAD`],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
-    );
-    const n = parseInt(result.trim(), 10);
-    if (isNaN(n)) return { status: 'diverged' };
-    return { status: 'ok', distance: n };
-  } catch {
-    try {
-      execFileSync(
-        'git', ['-C', project, 'rev-parse', 'HEAD'],
-        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }
-      );
-      return { status: 'diverged' };
-    } catch {
       return { status: 'no-git' };
     }
   }

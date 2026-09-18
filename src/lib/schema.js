@@ -1044,24 +1044,3 @@ export function atomListWorkspaces(db, { includeDeprecated = false } = {}) {
     ORDER BY count DESC
   `).all();
 }
-
-// ── hotStateListPairs ─────────────────────────────────────────────────────────
-
-/**
- * List every distinct agent+project pair that has at least one hot_state row,
- * with its session count and most recent update time. Used by the TUI's
- * Primer Inspector picker (memory-tui change) — a distinct-pairs enumeration
- * that doesn't compose from hotStateCrossProject (scoped to a single project
- * + time window, not a global agent+project enumeration).
- *
- * @param {import('node:sqlite').DatabaseSync} db
- * @returns {Array<{ agent: string, project: string, sessionCount: number, lastUpdatedAt: number }>}
- */
-export function hotStateListPairs(db) {
-  return db.prepare(`
-    SELECT agent, project, COUNT(*) AS sessionCount, MAX(updated_at) AS lastUpdatedAt
-    FROM hot_state
-    GROUP BY agent, project
-    ORDER BY lastUpdatedAt DESC
-  `).all();
-}

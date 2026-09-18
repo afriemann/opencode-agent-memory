@@ -74,19 +74,6 @@
 //     stdout: JSON array of { project, updated_at }
 //     Query hot_state for projects other than currentProject active since sinceMs.
 //     Returns one row per distinct project, most recently active first.
-//
-//   hot-state-list-pairs
-//     stdout: { pairs: Array<{ agent, project, sessionCount, lastUpdatedAt }> }
-//     List every distinct agent+project pair with at least one hot_state row,
-//     ordered by most recently updated first. Used by the TUI's Primer
-//     Inspector picker (memory-tui change).
-//
-//   primer-preview <agent> <project>
-//     stdout: { primerText: string|null }
-//     Compose the exact primer text a real session for (agent, project) would
-//     receive, using the same assemblePrimer assembly logic plugin.js uses
-//     (no sessionId needed). project '' (non-git) is accepted. Used by the
-//     TUI's Primer Inspector screen (memory-tui change).
 
 import { openDb } from './lib/db.js';
 import {
@@ -104,15 +91,10 @@ import {
   atomListWorkspaces,
   hotStateCrossProject,
   hotStateDelete,
-  hotStateListPairs,
 } from './lib/schema.js';
 import { resolveWorkspace } from './lib/workspace.js';
 import { readDistilWatermark, advanceDistilWatermark } from './lib/watermark.js';
 import { EMPTY_RECORD } from './lib/distil-prompt.js';
-import { homedir } from 'node:os';
-import { assemblePrimer } from './lib/signal-utils.js';
-import { gitStalenessNode } from './lib/git-helper.js';
-import { loadConfigFile, resolveConfig } from './lib/config.js';
 
 // ── DB bootstrap ────────────────────────────────────────────────────────────
 
@@ -785,73 +767,6 @@ function cmdHotStateDelete(project, sessionId) {
   process.stdout.write(JSON.stringify(result) + '\n');
 }
 
-function cmdHotStateListPairs() {
-  const db = openAndInit();
-  const pairs = hotStateListPairs(db);
-  db.close();
-  process.stdout.write(JSON.stringify({ pairs }) + '\n');
-}
-
-/**
- * Compose the exact primer text a real session for (agent, project) would
- * receive — same assembly logic (assemblePrimer) fed the same inputs
- * plugin.js gathers, without needing a sessionId (unlike `read`). Used by
- * the TUI's Primer Inspector screen (memory-tui change).
- */
-function cmdPrimerPreview(agent, project) {
-  const db = openAndInit();
-
-  // Top-3 most recent hot_state rows for (agent, project) — mirrors cmdRead's
-  // recentRows query; no sessionId scoping since a preview has none.
-  const recentRows = db
-    .prepare(`
-      SELECT id, scope, agent, project, session_id, session_name,
-             last_worked_summary, next_action, open_questions,
-             anchored_git_sha, schema_version, updated_at
-      FROM hot_state
-      WHERE scope = 'project' AND agent = ? AND project = ?
-      ORDER BY updated_at DESC, id DESC
-      LIMIT 3
-    `)
-    .all(agent, project);
-
-  const rows = recentRows.map((row) => {
-    let open_questions = [];
-    try {
-      open_questions = row.open_questions ? JSON.parse(row.open_questions) : [];
-    } catch { /* leave as [] */ }
-    return { ...row, open_questions };
-  });
-
-  const projectAtoms = atomList(db, { scope: 'project', project });
-  const sharedAtoms = atomList(db, { scope: 'global', project: '' });
-  const standingAtoms = atomListFull(db, { scope: 'project', project });
-
-  const since24h = Date.now() - 24 * 60 * 60 * 1000;
-  const crossProjectRows = hotStateCrossProject(db, project, since24h);
-
-  db.close();
-
-  const { atomInjectCap } = resolveConfig(process.env, loadConfigFile());
-  const storedSha = rows.length > 0 ? (rows[0].anchored_git_sha ?? null) : null;
-  const staleness = gitStalenessNode(project, storedSha);
-
-  const primerText = assemblePrimer({
-    rows,
-    projectAtoms,
-    sharedAtoms,
-    standingAtoms,
-    crossProjectRows,
-    agent,
-    project,
-    homeDir: homedir(),
-    staleness,
-    cap: atomInjectCap,
-  });
-
-  process.stdout.write(JSON.stringify({ primerText }) + '\n');
-}
-
 // ── Dispatch ────────────────────────────────────────────────────────────────
 
 const [,, cmd, ...rest] = process.argv;
@@ -1018,23 +933,9 @@ switch (cmd) {
     break;
   }
 
-  case 'hot-state-list-pairs':
-    cmdHotStateListPairs();
-    break;
-
-  case 'primer-preview': {
-    const [agent, project] = rest;
-    if (!agent || project === undefined) {
-      process.stderr.write('Usage: memory.js primer-preview <agent> <project>\n');
-      process.exit(1);
-    }
-    cmdPrimerPreview(agent, project);
-    break;
-  }
-
   default:
     process.stderr.write(
-      `Usage: memory.js <init|accrue|read|inspect|distil-write|correct|prune|atom-write|atom-append|atom-get|atom-search|atom-list|atom-list-full|atom-delete|atom-patch|atom-list-workspaces|hot-state-cross-project|hot-state-delete|hot-state-list-pairs|primer-preview> [args]\n`
+      `Usage: memory.js <init|accrue|read|inspect|distil-write|correct|prune|atom-write|atom-append|atom-get|atom-search|atom-list|atom-list-full|atom-delete|atom-patch|atom-list-workspaces|hot-state-cross-project|hot-state-delete> [args]\n`
     );
     process.exit(1);
 }
